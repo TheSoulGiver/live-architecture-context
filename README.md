@@ -98,24 +98,37 @@ results. With a configured `code_graph.query`, code edges appear in a separate
 CALM remains the parser/index owner and a full CALM index is never labelled
 incremental.
 
-## Codex-native adoption
+## Codex-native onboarding
 
-Keep a private, gitignored config at `.archctx/architecture.json`, then install one small
-managed block into the repository's existing `AGENTS.md`:
+Install the CLI once, then bind the first source-backed component. This is the
+only architecture input required; ArchCtx does not infer a canonical system
+from filenames or write architecture claims on its own.
 
 ```sh
-<python> /stable/path/archctx.py --config .archctx/architecture.json refresh
-<python> /stable/path/archctx.py --config .archctx/architecture.json install-codex
+python -m pip install live-architecture-context
+cd your-repository
+archctx init --component service --evidence 'src/service.py::def serve'
 ```
 
-The block is placed at the top of `AGENTS.md`: it tells every new Codex session
-to run `status`, use `search --query "<current task>"` before broad archaeology,
-read only matching evidence/canonical components, and checkpoint with
-`impact`/`refresh`.
-`install-codex --check` previews this without writing. It is idempotent and
-updates only the `<!-- archctx:* -->` block; a stale or unavailable index never
-blocks normal development. The installer rejects a config outside the repo, so
-an AGENTS block cannot accidentally depend on a private workstation path.
+`init` creates the private `.archctx/architecture.json`, adds `.archctx/` to
+`.gitignore`, refreshes a passing last-good snapshot, and places a compact
+managed block in the existing `AGENTS.md`. It preserves the rest of that file.
+Run it again after upgrades: it never overwrites the config or user rules.
+
+Every new Codex session then performs a small `status` check before substantive
+work. A fresh context narrows the first read through `search`; a stale one uses
+last-good only as a direction to source verification; missing or failed context
+falls back to normal development. It is an accelerator, not a gate.
+
+```sh
+archctx --config .archctx/architecture.json uninstall-codex
+```
+
+Uninstall removes only the managed block. Config, last-good history, and
+`.gitignore` are deliberately preserved. `install-codex --check` still previews
+an existing manual configuration without writing. A polling watcher remains an
+optional faster maintenance path; the per-session revision/evidence check is
+the default lazy maintenance path.
 
 ## Release boundaries
 
