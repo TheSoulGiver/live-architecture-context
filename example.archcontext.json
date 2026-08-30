@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "repo": ".",
+  "components": [
+    {
+      "id": "cli",
+      "name": "CLI",
+      "purpose": "The only command entry point.",
+      "truth_sources": ["archctx.py"],
+      "tags": ["runtime"],
+      "evidence": [{"path": "archctx.py", "contains": "def main()"}]
+    },
+    {
+      "id": "snapshot-store",
+      "name": "Last-known-good snapshot",
+      "purpose": "Serves a marked stale result after invalid refresh.",
+      "truth_sources": ["archctx.py"],
+      "tags": ["state", "trust"],
+      "evidence": [{"path": "archctx.py", "contains": "last_good_preserved"}]
+    }
+  ],
+  "relations": [{"from": "cli", "to": "snapshot-store", "kind": "writes"}],
+  "watch": {"paths": ["*.py"], "ignore": [".archctx/*", "__pycache__/*"]},
+  "drift_rules": [{"kind": "trust-boundary", "pattern": "subprocess.run", "paths": ["*.py"]}]
+}

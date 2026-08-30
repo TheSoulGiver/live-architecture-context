@@ -1,0 +1,16 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11'}
+      - run: python -m unittest -v
+      - run: python archctx.py --config demo-repo/architecture.json refresh
+      - run: python archctx.py --config demo-repo/architecture.json canonical service
+      - run: git diff --check
