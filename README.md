@@ -10,15 +10,15 @@ validator. Their outputs are never relabelled as authored relations.
 
 ## Three-minute start
 
-Windows PowerShell or Linux/macOS shell:
+Use `py -3` on Windows and `python3` on Linux/macOS in place of `<python>`:
 
 ```sh
 git clone <this-repository>
 cd live-architecture-context
-python -m unittest -v
-python archctx.py --config demo-repo/architecture.json refresh
-python archctx.py --config demo-repo/architecture.json canonical service
-python archctx.py --config demo-repo/architecture.json impact --files src/service.py
+<python> -m unittest -v
+<python> archctx.py --config demo-repo/architecture.json refresh
+<python> archctx.py --config demo-repo/architecture.json canonical service
+<python> archctx.py --config demo-repo/architecture.json impact --files src/service.py
 ```
 
 The only runtime dependency is Python 3.10+. `pip install .` can expose the
@@ -28,8 +28,8 @@ the source script is the offline/default route.
 ## Live loop
 
 ```sh
-python archctx.py --config architecture.json refresh
-python archctx.py --config architecture.json watch --poll-ms 500
+<python> archctx.py --config architecture.json refresh
+<python> archctx.py --config architecture.json watch --poll-ms 500
 ```
 
 The watcher hashes configured evidence plus optional `watch.paths`; an
@@ -76,7 +76,7 @@ MCP tools: `status`, `refresh`, `snapshot`, `canonical`, `evidence`, `trace`,
 `architecture_`). An MCP client configuration is simply:
 
 ```json
-{"command":"python","args":["/absolute/path/archctx.py","--config","/absolute/path/architecture.json","mcp"]}
+{"command":"/absolute/path/to/python","args":["/absolute/path/archctx.py","--config","/absolute/path/architecture.json","mcp"]}
 ```
 
 `trace` without `--code` and `impact` are deliberately authored/evidence
@@ -94,8 +94,8 @@ Keep a private, gitignored config at `.archctx/architecture.json`, then install 
 managed block into the repository's existing `AGENTS.md`:
 
 ```sh
-python /stable/path/archctx.py --config .archctx/architecture.json refresh
-python /stable/path/archctx.py --config .archctx/architecture.json install-codex
+<python> /stable/path/archctx.py --config .archctx/architecture.json refresh
+<python> /stable/path/archctx.py --config .archctx/architecture.json install-codex
 ```
 
 The block is placed at the top of `AGENTS.md`: it tells every new Codex session

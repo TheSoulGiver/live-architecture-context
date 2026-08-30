@@ -8,10 +8,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).parent
 TOOL = ROOT / "archctx.py"
+PYTHON = sys.executable
 
 
 def run(config, state, *args):
-    result = subprocess.run(["python", str(TOOL), "--config", str(config), "--state-dir", str(state), *args], text=True, capture_output=True, check=True)
+    result = subprocess.run([PYTHON, str(TOOL), "--config", str(config), "--state-dir", str(state), *args], text=True, capture_output=True, check=True)
     return json.loads(result.stdout)
 
 
@@ -53,7 +54,7 @@ class ArchitectureContextTest(unittest.TestCase):
             base["gates"] = [{"name": "fail", "command": [sys.executable, "-c", "raise SystemExit(1)"]}]
             config.write_text(json.dumps(base)); self.assertTrue(run(config, state, "refresh")["last_good_preserved"])
             self.assertEqual(run(config, state, "status")["status"], "STALE")
-            process = subprocess.run(["python", str(TOOL), "--config", str(config), "--state-dir", str(state), "mcp"], input=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}) + "\n", text=True, capture_output=True, check=True)
+            process = subprocess.run([PYTHON, str(TOOL), "--config", str(config), "--state-dir", str(state), "mcp"], input=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}) + "\n", text=True, capture_output=True, check=True)
             tools = json.loads(process.stdout)["result"]["tools"]
             self.assertIn("architecture_refresh", {item["name"] for item in tools})
 
@@ -70,7 +71,7 @@ class ArchitectureContextTest(unittest.TestCase):
             self.assertTrue(installed.startswith("<!-- archctx:begin -->"))
             self.assertIn("archctx:begin", installed)
             external = root.parent / "external.json"; external.write_text(json.dumps({"version": 1, "repo": root.name, "components": [{"id": "owner", "evidence": [{"path": "source.py", "contains": "OWNER"}]}]}))
-            failed = subprocess.run(["python", str(TOOL), "--config", str(external), "--state-dir", str(state), "install-codex", "--target", str(root / "OTHER.md")], text=True, capture_output=True)
+            failed = subprocess.run([PYTHON, str(TOOL), "--config", str(external), "--state-dir", str(state), "install-codex", "--target", str(root / "OTHER.md")], text=True, capture_output=True)
             self.assertEqual(failed.returncode, 2)
     def test_last_good_is_preserved_and_marked_stale(self):
         with tempfile.TemporaryDirectory() as directory:
