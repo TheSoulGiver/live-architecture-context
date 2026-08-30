@@ -116,9 +116,10 @@ managed block in the existing `AGENTS.md`. It preserves the rest of that file.
 Run it again after upgrades: it never overwrites the config or user rules.
 
 Every new Codex session then performs a small `status` check before substantive
-work. A fresh context narrows the first read through `search`; a stale one uses
-last-good only as a direction to source verification; missing or failed context
-falls back to normal development. It is an accelerator, not a gate.
+work. A fresh context selectively uses `search`/canonical facts when they
+narrow the task; a stale one uses last-good only as a direction to source
+verification; missing or failed context falls back to normal development. It
+is an accelerator, not a gate.
 
 ```sh
 archctx --config .archctx/architecture.json uninstall-codex
@@ -129,6 +130,12 @@ Uninstall removes only the managed block. Config, last-good history, and
 an existing manual configuration without writing. A polling watcher remains an
 optional faster maintenance path; the per-session revision/evidence check is
 the default lazy maintenance path.
+
+CLI and MCP calls append local aggregate telemetry under `.archctx`: command,
+freshness/status, latency, response size, and counts only. Search text is
+hashed and length-counted; source, evidence, and raw task text are never kept.
+Use `archctx --config .archctx/architecture.json telemetry` for a compact
+summary.
 
 ## Release boundaries
 

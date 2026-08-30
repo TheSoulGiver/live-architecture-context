@@ -96,6 +96,16 @@ class ArchitectureContextTest(unittest.TestCase):
             self.assertEqual(removed["action"], "removed"); self.assertTrue(config.exists())
             self.assertEqual((root / "AGENTS.md").read_text(), "# local rules\n")
             self.assertEqual(run_raw("--config", str(config), "uninstall-codex", "--target", str(root / "AGENTS.md"))["action"], "unchanged")
+
+    def test_telemetry_is_local_compact_and_never_keeps_raw_task_text(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); (root / "source.py").write_text("OWNER\n")
+            config, state = root / "context.json", root / "state"
+            config.write_text(json.dumps({"version": 1, "repo": ".", "components": [{"id": "owner", "evidence": [{"path": "source.py", "contains": "OWNER"}]}]}))
+            run(config, state, "refresh"); run(config, state, "search", "--query", "private product goal")
+            summary = run(config, state, "telemetry")
+            self.assertEqual(summary["events"]["search"], 1); self.assertEqual(summary["privacy"], "local metrics only; no source, evidence, or raw task text")
+            self.assertNotIn("private product goal", (state / "telemetry.jsonl").read_text())
     def test_last_good_is_preserved_and_marked_stale(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); (root / "source.py").write_text("OWNER = 'one'\n")

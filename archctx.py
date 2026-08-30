@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse, fnmatch, hashlib, json, os, subprocess, sys, time
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,27 @@ def last_path(directory: Path) -> Path: return directory / "last-good.json"
 def atomic(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True); temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"); os.replace(temporary, path)
+def telemetry(directory: Path, event: str, value: dict[str, Any], elapsed_ms: int, query: str | None = None) -> None:
+    """Best-effort local metrics; never retain source, evidence, or raw task text."""
+    try:
+        record: dict[str, Any] = {"version": 1, "at": datetime.now(timezone.utc).isoformat(), "event": event, "status": value.get("status"), "freshness": value.get("freshness"), "revision": value.get("revision"), "elapsed_ms": elapsed_ms, "response_bytes": len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode())}
+        if query is not None: record["query"] = {"sha256": sha(query.encode()), "length": len(query)}
+        for key in ("matches", "changed_files", "direct_components", "candidates"):
+            if isinstance(value.get(key), list): record[f"{key}_count"] = len(value[key])
+        directory.mkdir(parents=True, exist_ok=True)
+        with (directory / "telemetry.jsonl").open("a", encoding="utf-8") as output: output.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+    except OSError: pass
+def telemetry_summary(directory: Path) -> dict[str, Any]:
+    events, statuses, bytes_total, elapsed_total = Counter(), Counter(), 0, 0
+    path = directory / "telemetry.jsonl"
+    if path.exists():
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            try: record = json.loads(line)
+            except json.JSONDecodeError: continue
+            if isinstance(record, dict):
+                events[str(record.get("event"))] += 1; statuses[str(record.get("status"))] += 1; bytes_total += int(record.get("response_bytes", 0)); elapsed_total += int(record.get("elapsed_ms", 0))
+    count = sum(events.values())
+    return {"protocol_version": PROTOCOL_VERSION, "status": "PASS", "privacy": "local metrics only; no source, evidence, or raw task text", "events": dict(sorted(events.items())), "statuses": dict(sorted(statuses.items())), "event_count": count, "response_bytes": bytes_total, "average_latency_ms": elapsed_total // count if count else 0}
 
 def repo_for(config_path: Path, config: dict[str, Any]) -> Path:
     raw = config.get("repo", ".")
@@ -168,7 +190,7 @@ def codex_block(relative_config: str, command: str) -> str:
 ## Architecture context
 
 For substantive work, first run `{command} --config {relative_config} status`.
-If `FRESH`, search the task, then read only returned evidence and matching canonical/trace results; if no match, do normal targeted discovery.
+If `FRESH`, use search or matching canonical/trace only when it narrows the task, then read only returned evidence; otherwise do normal targeted discovery.
 If `STALE`, verify cited source before using last-good; if unavailable, develop normally without architecture claims.
 Before architecture-relevant edits run `impact --files <paths>`; checkpoint with `refresh` and `changed-since` when relevant.
 This narrows first reads only: it never bypasses repo safety, tests, or release rules. Authored traces are not CALM code edges.
@@ -356,7 +378,8 @@ def serve_mcp(config_path: Path, explicit: str | None) -> int:
             if method == "initialize": result: Any = {"protocolVersion": params.get("protocolVersion", "2025-06-18"), "capabilities": {"tools": {}}, "serverInfo": {"name": "live-architecture-context", "version": SERVER_VERSION}}
             elif method == "tools/list": result = {"tools": mcp_tools()}
             elif method == "tools/call":
-                value = mcp_value(config_path, explicit, str(params.get("name", "")), params.get("arguments", {})); result = {"content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False, separators=(",", ":"))}], "isError": value.get("status") in ("ERROR", "INVALID")}
+                name, arguments = str(params.get("name", "")), params.get("arguments", {})
+                value = mcp_value(config_path, explicit, name, arguments); telemetry(state(config_path, explicit), f"mcp:{name}", value, 0, str(arguments.get("query")) if isinstance(arguments.get("query"), str) else None); result = {"content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False, separators=(",", ":"))}], "isError": value.get("status") in ("ERROR", "INVALID")}
             elif "id" not in request: continue
             else: raise ValueError("method not found")
             if "id" in request: print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}, ensure_ascii=False), flush=True)
@@ -366,7 +389,7 @@ def serve_mcp(config_path: Path, explicit: str | None) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(); parser.add_argument("--config"); parser.add_argument("--state-dir"); sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("status", "refresh", "snapshot", "mcp"): sub.add_parser(name)
+    for name in ("status", "refresh", "snapshot", "mcp", "telemetry"): sub.add_parser(name)
     x = sub.add_parser("canonical"); x.add_argument("id"); x = sub.add_parser("search"); x.add_argument("--query", required=True); x = sub.add_parser("evidence"); x.add_argument("id")
     x = sub.add_parser("trace"); x.add_argument("id"); x.add_argument("--direction", choices=("upstream", "downstream"), default="downstream"); x.add_argument("--code", action="store_true")
     x = sub.add_parser("impact"); x.add_argument("--base"); x.add_argument("--files", nargs="*")
@@ -383,12 +406,13 @@ def main() -> int:
         if not args.config: raise ValueError("--config is required except for init")
         config_path = Path(args.config).resolve()
         if args.command == "mcp": return serve_mcp(config_path, args.state_dir)
+        if args.command == "telemetry": dump(telemetry_summary(state(config_path, args.state_dir))); return 0
         if args.command == "watch":
             if args.once: dump(watch_once(config_path, args.state_dir)); return 0
             return watch(config_path, args.state_dir, args.poll_ms, args.max_events)
         target = Path(args.target) if args.command in ("install-codex", "uninstall-codex") else None
         install_target = target if target and target.is_absolute() else (repo_for(config_path, load(config_path)) / target) if target else None
         actions = {"status": lambda: status(config_path, args.state_dir), "refresh": lambda: refresh(config_path, args.state_dir), "snapshot": lambda: snapshot(config_path, args.state_dir), "canonical": lambda: canonical(config_path, args.state_dir, args.id), "search": lambda: search(config_path, args.state_dir, args.query), "evidence": lambda: mcp_value(config_path, args.state_dir, "architecture_evidence", {"id": args.id}), "trace": lambda: trace(config_path, args.state_dir, args.id, args.direction, args.code), "impact": lambda: impact(config_path, args.state_dir, args.base, args.files), "changed-since": lambda: changed_since(config_path, args.state_dir, args.revision), "delta": lambda: delta(config_path, args.state_dir, args.revision), "drift": lambda: drift(config_path, args.base), "install-codex": lambda: install_codex(config_path, install_target.resolve(), args.check), "uninstall-codex": lambda: uninstall_codex(install_target.resolve(), args.check)}
-        dump(actions[args.command]()); return 0
+        started = time.monotonic(); value = actions[args.command](); telemetry(state(config_path, args.state_dir), args.command, value, int((time.monotonic() - started) * 1000), args.query if args.command == "search" else None); dump(value); return 0
     except (ValueError, OSError) as e: dump({"protocol_version": PROTOCOL_VERSION, "status": "ERROR", "error": str(e)}); return 2
 if __name__ == "__main__": raise SystemExit(main())
