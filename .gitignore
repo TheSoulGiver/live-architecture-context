@@ -1,5 +1,6 @@
 .archctx/
 __pycache__/
 *.py[cod]
+.venv/
 .dogfood/
 .dogfood-mirrors/
