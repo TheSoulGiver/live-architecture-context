@@ -15,6 +15,7 @@ python archctx.py --config example.archcontext.json refresh
 python archctx.py --config example.archcontext.json canonical snapshot-store
 python archctx.py --config example.archcontext.json trace cli
 python archctx.py --config example.archcontext.json changed-since --revision <git-sha>
+python archctx.py --config example.archcontext.json mcp
 ```
 
 `code_graph.refresh` and `gates[]` are optional argv arrays. They run without a shell and must succeed before promotion. Use the latter for `node scripts/architecture.mjs verify`, so Archify remains the renderer/IR validator instead of becoming a copied dependency.

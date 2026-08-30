@@ -275,10 +275,37 @@ def drift(config_path: Path, base: str) -> dict[str, Any]:
     return {"base": base, "candidates": candidates, "note": "Only configured, high-value additions are reported; no architecture fact is inferred."}
 
 
+def mcp_tools() -> list[dict[str, Any]]:
+    return [
+        {"name": "architecture_status", "description": "Freshness and last-known-good status.", "inputSchema": {"type": "object", "properties": {}}},
+        {"name": "architecture_canonical", "description": "Canonical component and source evidence.", "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}},
+        {"name": "architecture_trace", "description": "Authored architecture trace; not a compiler call-graph claim.", "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}, "direction": {"enum": ["upstream", "downstream"]}}, "required": ["id"]}},
+    ]
+
+
+def serve_mcp(config_path: Path, explicit_state: str | None) -> int:
+    """Small JSON-lines MCP stdio surface; transport adapters stay dependency-free."""
+    for line in sys.stdin:
+        try:
+            request = json.loads(line); method = request.get("method"); params = request.get("params", {}); result: Any = None
+            if method == "initialize": result = {"protocolVersion": params.get("protocolVersion", "2025-06-18"), "capabilities": {"tools": {}}, "serverInfo": {"name": "live-architecture-context", "version": "0.1.0"}}
+            elif method == "tools/list": result = {"tools": mcp_tools()}
+            elif method == "tools/call":
+                arguments = params.get("arguments", {}); name = params.get("name")
+                value = status(config_path, explicit_state) if name == "architecture_status" else canonical(config_path, explicit_state, arguments.get("id", "")) if name == "architecture_canonical" else trace(config_path, explicit_state, arguments.get("id", ""), arguments.get("direction", "downstream")) if name == "architecture_trace" else {"status": "ERROR", "error": f"unknown tool: {name}"}
+                result = {"content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False, separators=(",", ":"))}], "isError": value.get("status") == "ERROR"}
+            elif method and "id" not in request: continue
+            else: result = {"error": "method not found"}
+            if "id" in request: print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}, ensure_ascii=False), flush=True)
+        except (ValueError, OSError) as error:
+            if "id" in locals().get("request", {}): print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "error": {"code": -32602, "message": str(error)}}), flush=True)
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(); parser.add_argument("--config", required=True); parser.add_argument("--state-dir")
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("status"); sub.add_parser("refresh"); sub.add_parser("snapshot")
+    sub.add_parser("status"); sub.add_parser("refresh"); sub.add_parser("snapshot"); sub.add_parser("mcp")
     item = sub.add_parser("canonical"); item.add_argument("id")
     route = sub.add_parser("trace"); route.add_argument("id"); route.add_argument("--direction", choices=("upstream", "downstream"), default="downstream")
     change = sub.add_parser("impact"); change.add_argument("--base", required=True)
@@ -286,6 +313,7 @@ def main() -> int:
     change = sub.add_parser("drift"); change.add_argument("--base", required=True)
     args = parser.parse_args(); config_path = Path(args.config).resolve()
     try:
+        if args.command == "mcp": return serve_mcp(config_path, args.state_dir)
         action = {"status": lambda: status(config_path, args.state_dir), "refresh": lambda: refresh(config_path, args.state_dir),
                   "snapshot": lambda: last_good(config_path, args.state_dir), "canonical": lambda: canonical(config_path, args.state_dir, args.id),
                   "trace": lambda: trace(config_path, args.state_dir, args.id, args.direction),
