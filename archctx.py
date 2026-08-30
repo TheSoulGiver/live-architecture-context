@@ -250,6 +250,20 @@ def impact(config_path: Path, explicit_state: str | None, base: str) -> dict[str
             "note": "Source evidence files map directly; this is not a compiler call-graph claim."}
 
 
+def changed_since(config_path: Path, explicit_state: str | None, revision: str) -> dict[str, Any]:
+    state = state_dir(config_path, explicit_state)
+    latest = load_json(snapshot_path(state))
+    baseline = next((load_json(path) for path in (state / "snapshots").glob("*.json")
+                     if load_json(path).get("revision") == revision), None)
+    if baseline is None:
+        return {"status": "ERROR", "error": f"no retained snapshot for revision {revision}"}
+    old = {item["id"]: item for item in baseline["context"]["components"]}
+    new = {item["id"]: item for item in latest["context"]["components"]}
+    changed = sorted(key for key in old.keys() | new.keys() if old.get(key) != new.get(key))
+    return {"status": "PASS", "from_revision": revision, "to_revision": latest["revision"],
+            "changed_components": changed, "note": "Changes are source-evidence/config deltas, not inferred runtime behavior."}
+
+
 def drift(config_path: Path, base: str) -> dict[str, Any]:
     config = load_json(config_path); repo = resolve_repo(config_path, config)
     patch = git(repo, "diff", "--unified=0", f"{base}..HEAD") or ""
@@ -268,13 +282,16 @@ def main() -> int:
     item = sub.add_parser("canonical"); item.add_argument("id")
     route = sub.add_parser("trace"); route.add_argument("id"); route.add_argument("--direction", choices=("upstream", "downstream"), default="downstream")
     change = sub.add_parser("impact"); change.add_argument("--base", required=True)
+    change = sub.add_parser("changed-since"); change.add_argument("--revision", required=True)
     change = sub.add_parser("drift"); change.add_argument("--base", required=True)
     args = parser.parse_args(); config_path = Path(args.config).resolve()
     try:
         action = {"status": lambda: status(config_path, args.state_dir), "refresh": lambda: refresh(config_path, args.state_dir),
                   "snapshot": lambda: last_good(config_path, args.state_dir), "canonical": lambda: canonical(config_path, args.state_dir, args.id),
                   "trace": lambda: trace(config_path, args.state_dir, args.id, args.direction),
-                  "impact": lambda: impact(config_path, args.state_dir, args.base), "drift": lambda: drift(config_path, args.base)}[args.command]
+                  "impact": lambda: impact(config_path, args.state_dir, args.base),
+                  "changed-since": lambda: changed_since(config_path, args.state_dir, args.revision),
+                  "drift": lambda: drift(config_path, args.base)}[args.command]
         dump(action()); return 0
     except (ValueError, OSError) as error:
         dump({"status": "ERROR", "error": str(error)}); return 2

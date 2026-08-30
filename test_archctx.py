@@ -38,6 +38,19 @@ class ArchitectureContextTest(unittest.TestCase):
             self.assertEqual(run(config, state, "trace", "a")["kind"], "authored_architecture_trace")
             self.assertEqual(run(config, state, "impact", "--base", base)["kind"], "authored_architecture_impact")
 
+    def test_changed_since_compares_retained_source_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); (root / "source.py").write_text("OWNER = 'one'\n")
+            subprocess.run(["git", "init", "-q", str(root)], check=True); subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(root), "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-qm", "base"], check=True)
+            base = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
+            config = root / "context.json"; state = root / "state"
+            config.write_text(json.dumps({"repo": ".", "components": [{"id": "owner", "evidence": [{"path": "source.py", "contains": "OWNER"}]}]}))
+            run(config, state, "refresh"); (root / "source.py").write_text("OWNER = 'two'\n")
+            subprocess.run(["git", "-C", str(root), "add", "source.py"], check=True); subprocess.run(["git", "-C", str(root), "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-qm", "change"], check=True)
+            run(config, state, "refresh")
+            self.assertEqual(run(config, state, "changed-since", "--revision", base)["changed_components"], ["owner"])
+
 
 if __name__ == "__main__":
     unittest.main()
