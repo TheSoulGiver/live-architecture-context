@@ -108,6 +108,18 @@ class ArchitectureContextTest(unittest.TestCase):
             run(config, state, "refresh")
             self.assertEqual(run(config, state, "changed-since", "--revision", base)["changed_components"], ["owner"])
 
+    def test_changed_since_uses_first_snapshot_for_an_unchanged_git_revision(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); (root / "source.py").write_text("OWNER\n")
+            subprocess.run(["git", "init", "-q", str(root)], check=True); subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(root), "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-qm", "base"], check=True)
+            base = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
+            config, state = root / "context.json", root / "state"
+            value = {"version": 1, "repo": ".", "components": [{"id": "owner", "evidence": [{"path": "source.py", "contains": "OWNER"}]}]}
+            config.write_text(json.dumps(value)); run(config, state, "refresh")
+            value["components"][0]["name"] = "Renamed owner"; config.write_text(json.dumps(value)); run(config, state, "refresh")
+            self.assertEqual(run(config, state, "changed-since", "--revision", base)["changed_components"], ["owner"])
+
 
 if __name__ == "__main__":
     unittest.main()
