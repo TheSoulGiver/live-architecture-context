@@ -83,6 +83,11 @@ MCP tools: `status`, `refresh`, `snapshot`, `canonical`, `evidence`, `trace`,
 results. With a configured `code_graph.query`, code edges appear in a separate
 `code_graph` field with `confidence: provider_reported`.
 
+`calm_query.py` is the supplied thin adapter for CALM's read-only MCP
+`callers`/`callees` tools. It returns a capped, confidence-labelled edge list;
+CALM remains the parser/index owner and a full CALM index is never labelled
+incremental.
+
 ## Codex-native adoption
 
 Keep a private, gitignored config at `.archctx/architecture.json`, then install one small
