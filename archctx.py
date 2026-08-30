@@ -235,10 +235,8 @@ def impact(config_path: Path, explicit: str | None, base: str | None, files: lis
     return {"protocol_version": PROTOCOL_VERSION, "kind": "authored_architecture_impact", "provenance": "source_evidence_plus_authored_architecture", "base": base, "changed_files": changed, "direct_components": direct, "reachable_components": reach, "code_graph": {"available": isinstance(config.get("code_graph"), dict), "note": "Code edges remain separate provider facts; use trace --code."}, "next_action": "refresh" if direct else "no canonical evidence owner; no architecture refresh needed"}
 
 def retained(directory: Path, rev: str) -> dict[str, Any] | None:
-    for path in (directory / "snapshots").glob("*.json"):
-        value = load(path)
-        if value.get("revision") == rev: return value
-    return None
+    matches = [load(path) for path in (directory / "snapshots").glob("*.json") if load(path).get("revision") == rev]
+    return min(matches, key=lambda value: str(value.get("created_at", ""))) if matches else None
 def record_diff(old: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
     a, b = {x["id"]: x for x in old["context"]["components"]}, {x["id"]: x for x in new["context"]["components"]}
     ar, br = set(json.dumps(x, sort_keys=True) for x in old["context"].get("relations", [])), set(json.dumps(x, sort_keys=True) for x in new["context"].get("relations", []))
