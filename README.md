@@ -21,8 +21,9 @@ python archctx.py --config demo-repo/architecture.json canonical service
 python archctx.py --config demo-repo/architecture.json impact --files src/service.py
 ```
 
-The only runtime dependency is Python 3.10+. `pip install .` also exposes the
-same command as `archctx`.
+The only runtime dependency is Python 3.10+. `pip install .` can expose the
+same command as `archctx` where a normal Python build environment is present;
+the source script is the offline/default route.
 
 ## Live loop
 
@@ -81,6 +82,24 @@ MCP tools: `status`, `refresh`, `snapshot`, `canonical`, `evidence`, `trace`,
 `trace` without `--code` and `impact` are deliberately authored/evidence
 results. With a configured `code_graph.query`, code edges appear in a separate
 `code_graph` field with `confidence: provider_reported`.
+
+## Codex-native adoption
+
+Keep a private, gitignored config at `.archctx/architecture.json`, then install one small
+managed block into the repository's existing `AGENTS.md`:
+
+```sh
+python /stable/path/archctx.py --config .archctx/architecture.json refresh
+python /stable/path/archctx.py --config .archctx/architecture.json install-codex
+```
+
+The block tells every new Codex session to run `status`, use
+`search --query "<current task>"` before broad archaeology, query only the
+matching canonical components, and checkpoint with `impact`/`refresh`.
+`install-codex --check` previews this without writing. It is idempotent and
+updates only the `<!-- archctx:* -->` block; a stale or unavailable index never
+blocks normal development. The installer rejects a config outside the repo, so
+an AGENTS block cannot accidentally depend on a private workstation path.
 
 ## Release boundaries
 

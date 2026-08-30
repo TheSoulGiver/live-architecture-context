@@ -46,6 +46,20 @@ class ArchitectureContextTest(unittest.TestCase):
             process = subprocess.run(["python", str(TOOL), "--config", str(config), "--state-dir", str(state), "mcp"], input=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}) + "\n", text=True, capture_output=True, check=True)
             tools = json.loads(process.stdout)["result"]["tools"]
             self.assertIn("architecture_refresh", {item["name"] for item in tools})
+
+    def test_search_and_codex_install_are_compact_and_idempotent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); (root / "source.py").write_text("OWNER\n")
+            config, state = root / "context.json", root / "state"
+            config.write_text(json.dumps({"version": 1, "repo": ".", "components": [{"id": "owner", "name": "Owner service", "tags": ["identity"], "evidence": [{"path": "source.py", "contains": "OWNER"}]}]}))
+            run(config, state, "refresh")
+            self.assertEqual(run(config, state, "search", "--query", "identity")["matches"][0]["id"], "owner")
+            self.assertEqual(run(config, state, "install-codex", "--target", str(root / "AGENTS.md"))["action"], "created")
+            self.assertEqual(run(config, state, "install-codex", "--target", str(root / "AGENTS.md"))["action"], "unchanged")
+            self.assertIn("archctx:begin", (root / "AGENTS.md").read_text())
+            external = root.parent / "external.json"; external.write_text(json.dumps({"version": 1, "repo": root.name, "components": [{"id": "owner", "evidence": [{"path": "source.py", "contains": "OWNER"}]}]}))
+            failed = subprocess.run(["python", str(TOOL), "--config", str(external), "--state-dir", str(state), "install-codex", "--target", str(root / "OTHER.md")], text=True, capture_output=True)
+            self.assertEqual(failed.returncode, 2)
     def test_last_good_is_preserved_and_marked_stale(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); (root / "source.py").write_text("OWNER = 'one'\n")

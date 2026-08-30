@@ -141,6 +141,54 @@ def canonical(config_path: Path, explicit: str | None, ident: str) -> dict[str, 
         if x["id"] == ident: return {k: value[k] for k in ("protocol_version", "status", "revision", "freshness", "confidence", "next_action") if k in value} | {"canonical": x, "warning": value.get("reason")}
     return {k: value[k] for k in ("protocol_version", "status", "revision", "freshness", "next_action") if k in value} | {"error": f"unknown component: {ident}", "warning": value.get("reason")}
 
+def search(config_path: Path, explicit: str | None, query: str) -> dict[str, Any]:
+    value = snapshot(config_path, explicit)
+    terms = [term for term in query.casefold().split() if term]
+    matches = []
+    for item in value.get("context", {}).get("components", []):
+        haystack = json.dumps({key: item.get(key) for key in ("id", "name", "purpose", "tags", "truth_sources")}, ensure_ascii=False).casefold()
+        score = sum(term in haystack for term in terms)
+        if score:
+            matches.append((score, item))
+    compact = [{key: item[key] for key in ("id", "name", "purpose", "tags", "truth_sources", "evidence") if key in item} for _, item in sorted(matches, key=lambda row: (-row[0], row[1]["id"]))]
+    return {key: value[key] for key in ("protocol_version", "status", "revision", "freshness", "confidence", "next_action") if key in value} | {"query": query, "matches": compact, "warning": value.get("reason")}
+
+CODEX_BEGIN, CODEX_END = "<!-- archctx:begin -->", "<!-- archctx:end -->"
+
+def codex_block(relative_config: str, command: str) -> str:
+    return f'''{CODEX_BEGIN}
+## Architecture context
+
+For each substantive task, before broad repository archaeology:
+
+1. Run `{command} --config {relative_config} status`.
+2. Run `{command} --config {relative_config} search --query "<current task>"`; query `canonical` and `trace` only for matches.
+3. Before an architecture-relevant edit, use `impact --files <changed paths>`; after the checkpoint run `refresh` and, when relevant, `changed-since`.
+
+Treat `STALE` as last-known-good context, not current truth: inspect the cited source before relying on it. If archctx is unavailable or has no config, continue normal development and do not invent architecture facts. Authored traces are not CALM code edges; request code edges separately with `trace --code` when configured.
+{CODEX_END}
+'''
+
+def install_codex(config_path: Path, target: Path, check: bool) -> dict[str, Any]:
+    config, repo = load(config_path), repo_for(config_path, load(config_path))
+    components(config)
+    try: relative = config_path.relative_to(repo).as_posix()
+    except ValueError as error: raise ValueError("Codex config must live inside its repository (normally .archctx/architecture.json)") from error
+    command = subprocess.list2cmdline([sys.executable, str(Path(__file__).resolve())])
+    block = codex_block(relative, command)
+    before = target.read_text(encoding="utf-8") if target.exists() else ""
+    start, end = before.find(CODEX_BEGIN), before.find(CODEX_END)
+    if (start < 0) != (end < 0): raise ValueError(f"unbalanced archctx markers in {target}")
+    if start >= 0:
+        end += len(CODEX_END)
+        if before[end:end + 1] == "\n": end += 1
+        after = before[:start] + block + before[end:]; action = "updated"
+    else:
+        after = before.rstrip() + ("\n\n" if before.strip() else "") + block; action = "created"
+    if not check and after != before:
+        target.write_text(after, encoding="utf-8")
+    return {"protocol_version": PROTOCOL_VERSION, "status": "PASS", "action": "unchanged" if after == before else action, "target": str(target), "config": relative, "check": check, "next_action": "start a new Codex session in this repo"}
+
 def authored(context_value: dict[str, Any], ident: str, direction: str) -> list[str]:
     seen, todo = {ident}, [ident]
     while todo:
@@ -235,12 +283,13 @@ def watch(config_path: Path, explicit: str | None, poll_ms: int, max_events: int
 
 def mcp_tools() -> list[dict[str, Any]]:
     empty = {"type": "object", "properties": {}}; ident = {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}
-    return [{"name": "architecture_status", "description": "Freshness and last-known-good status.", "inputSchema": empty}, {"name": "architecture_refresh", "description": "Validate and atomically promote context.", "inputSchema": empty}, {"name": "architecture_snapshot", "description": "Compact last-known-good context.", "inputSchema": empty}, {"name": "architecture_canonical", "description": "Canonical component and evidence.", "inputSchema": ident}, {"name": "architecture_evidence", "description": "Source evidence for one component.", "inputSchema": ident}, {"name": "architecture_trace", "description": "Authored relations; optional code graph stays separate.", "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}, "direction": {"enum": ["upstream", "downstream"]}, "include_code_edges": {"type": "boolean"}}, "required": ["id"]}}, {"name": "architecture_impact", "description": "Changed files to canonical ownership.", "inputSchema": {"type": "object", "properties": {"base": {"type": "string"}, "files": {"type": "array", "items": {"type": "string"}}}}}, {"name": "architecture_changed_since", "description": "Retained architecture delta by revision.", "inputSchema": {"type": "object", "properties": {"revision": {"type": "string"}}, "required": ["revision"]}}, {"name": "architecture_drift", "description": "Configured high-value drift candidates only.", "inputSchema": {"type": "object", "properties": {"base": {"type": "string"}}, "required": ["base"]}}, {"name": "architecture_stale", "description": "Alias for freshness status.", "inputSchema": empty}]
+    return [{"name": "architecture_status", "description": "Freshness and last-known-good status.", "inputSchema": empty}, {"name": "architecture_refresh", "description": "Validate and atomically promote context.", "inputSchema": empty}, {"name": "architecture_snapshot", "description": "Compact last-known-good context.", "inputSchema": empty}, {"name": "architecture_canonical", "description": "Canonical component and evidence.", "inputSchema": ident}, {"name": "architecture_search", "description": "Match the current task to compact canonical components.", "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}, {"name": "architecture_evidence", "description": "Source evidence for one component.", "inputSchema": ident}, {"name": "architecture_trace", "description": "Authored relations; optional code graph stays separate.", "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}, "direction": {"enum": ["upstream", "downstream"]}, "include_code_edges": {"type": "boolean"}}, "required": ["id"]}}, {"name": "architecture_impact", "description": "Changed files to canonical ownership.", "inputSchema": {"type": "object", "properties": {"base": {"type": "string"}, "files": {"type": "array", "items": {"type": "string"}}}}}, {"name": "architecture_changed_since", "description": "Retained architecture delta by revision.", "inputSchema": {"type": "object", "properties": {"revision": {"type": "string"}}, "required": ["revision"]}}, {"name": "architecture_drift", "description": "Configured high-value drift candidates only.", "inputSchema": {"type": "object", "properties": {"base": {"type": "string"}}, "required": ["base"]}}, {"name": "architecture_stale", "description": "Alias for freshness status.", "inputSchema": empty}]
 def mcp_value(config_path: Path, explicit: str | None, name: str, args: dict[str, Any]) -> dict[str, Any]:
     if name in ("architecture_status", "architecture_stale"): return status(config_path, explicit)
     if name == "architecture_refresh": return refresh(config_path, explicit)
     if name == "architecture_snapshot": return snapshot(config_path, explicit)
     if name == "architecture_canonical": return canonical(config_path, explicit, str(args.get("id", "")))
+    if name == "architecture_search": return search(config_path, explicit, str(args.get("query", "")))
     if name == "architecture_evidence":
         value = canonical(config_path, explicit, str(args.get("id", ""))); return {k: value[k] for k in value if k != "canonical"} | {"evidence": value.get("canonical", {}).get("evidence", [])}
     if name == "architecture_trace": return trace(config_path, explicit, str(args.get("id", "")), str(args.get("direction", "downstream")), bool(args.get("include_code_edges")))
@@ -267,18 +316,21 @@ def serve_mcp(config_path: Path, explicit: str | None) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(); parser.add_argument("--config", required=True); parser.add_argument("--state-dir"); sub = parser.add_subparsers(dest="command", required=True)
     for name in ("status", "refresh", "snapshot", "mcp"): sub.add_parser(name)
-    x = sub.add_parser("canonical"); x.add_argument("id"); x = sub.add_parser("evidence"); x.add_argument("id")
+    x = sub.add_parser("canonical"); x.add_argument("id"); x = sub.add_parser("search"); x.add_argument("--query", required=True); x = sub.add_parser("evidence"); x.add_argument("id")
     x = sub.add_parser("trace"); x.add_argument("id"); x.add_argument("--direction", choices=("upstream", "downstream"), default="downstream"); x.add_argument("--code", action="store_true")
     x = sub.add_parser("impact"); x.add_argument("--base"); x.add_argument("--files", nargs="*")
     x = sub.add_parser("changed-since"); x.add_argument("--revision", required=True); x = sub.add_parser("delta"); x.add_argument("--revision", required=True); x = sub.add_parser("drift"); x.add_argument("--base", required=True)
     x = sub.add_parser("watch"); x.add_argument("--once", action="store_true"); x.add_argument("--poll-ms", type=int, default=500); x.add_argument("--max-events", type=int)
+    x = sub.add_parser("install-codex"); x.add_argument("--target", default="AGENTS.md"); x.add_argument("--check", action="store_true")
     args = parser.parse_args(); config_path = Path(args.config).resolve()
     try:
         if args.command == "mcp": return serve_mcp(config_path, args.state_dir)
         if args.command == "watch":
             if args.once: dump(watch_once(config_path, args.state_dir)); return 0
             return watch(config_path, args.state_dir, args.poll_ms, args.max_events)
-        actions = {"status": lambda: status(config_path, args.state_dir), "refresh": lambda: refresh(config_path, args.state_dir), "snapshot": lambda: snapshot(config_path, args.state_dir), "canonical": lambda: canonical(config_path, args.state_dir, args.id), "evidence": lambda: mcp_value(config_path, args.state_dir, "architecture_evidence", {"id": args.id}), "trace": lambda: trace(config_path, args.state_dir, args.id, args.direction, args.code), "impact": lambda: impact(config_path, args.state_dir, args.base, args.files), "changed-since": lambda: changed_since(config_path, args.state_dir, args.revision), "delta": lambda: delta(config_path, args.state_dir, args.revision), "drift": lambda: drift(config_path, args.base)}
+        target = Path(args.target) if args.command == "install-codex" else None
+        install_target = target if target and target.is_absolute() else (repo_for(config_path, load(config_path)) / target) if target else None
+        actions = {"status": lambda: status(config_path, args.state_dir), "refresh": lambda: refresh(config_path, args.state_dir), "snapshot": lambda: snapshot(config_path, args.state_dir), "canonical": lambda: canonical(config_path, args.state_dir, args.id), "search": lambda: search(config_path, args.state_dir, args.query), "evidence": lambda: mcp_value(config_path, args.state_dir, "architecture_evidence", {"id": args.id}), "trace": lambda: trace(config_path, args.state_dir, args.id, args.direction, args.code), "impact": lambda: impact(config_path, args.state_dir, args.base, args.files), "changed-since": lambda: changed_since(config_path, args.state_dir, args.revision), "delta": lambda: delta(config_path, args.state_dir, args.revision), "drift": lambda: drift(config_path, args.base), "install-codex": lambda: install_codex(config_path, install_target.resolve(), args.check)}
         dump(actions[args.command]()); return 0
     except (ValueError, OSError) as e: dump({"protocol_version": PROTOCOL_VERSION, "status": "ERROR", "error": str(e)}); return 2
 if __name__ == "__main__": raise SystemExit(main())
