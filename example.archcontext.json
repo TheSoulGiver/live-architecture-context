@@ -1,4 +1,5 @@
 {
+  "version": 1,
   "repo": ".",
   "components": [
     {
@@ -19,5 +20,6 @@
     }
   ],
   "relations": [{"from": "cli", "to": "snapshot-store", "kind": "writes"}],
-  "drift_rules": [{"kind": "trust-boundary", "pattern": "subprocess.run"}]
+  "watch": {"paths": ["*.py"], "ignore": [".archctx/*", "__pycache__/*"]},
+  "drift_rules": [{"kind": "trust-boundary", "pattern": "subprocess.run", "paths": ["*.py"]}]
 }

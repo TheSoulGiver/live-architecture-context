@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "repo": ".",
+  "components": [
+    {"id":"service","name":"Demo service","truth_sources":["src/service.py"],"evidence":[{"path":"src/service.py","contains":"def serve"}]},
+    {"id":"store","name":"Demo store","truth_sources":["src/store.py"],"evidence":[{"path":"src/store.py","contains":"class Store"}]}
+  ],
+  "relations": [{"from":"service","to":"store","kind":"reads"}],
+  "watch": {"paths":["src/*.py"],"ignore":[".archctx/*"]},
+  "drift_rules": [{"kind":"new-storage","pattern":"sqlite","paths":["src/*.py"]}]
+}
