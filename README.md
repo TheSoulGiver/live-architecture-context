@@ -93,9 +93,10 @@ python /stable/path/archctx.py --config .archctx/architecture.json refresh
 python /stable/path/archctx.py --config .archctx/architecture.json install-codex
 ```
 
-The block tells every new Codex session to run `status`, use
-`search --query "<current task>"` before broad archaeology, query only the
-matching canonical components, and checkpoint with `impact`/`refresh`.
+The block is placed at the top of `AGENTS.md`: it tells every new Codex session
+to run `status`, use `search --query "<current task>"` before broad archaeology,
+read only matching evidence/canonical components, and checkpoint with
+`impact`/`refresh`.
 `install-codex --check` previews this without writing. It is idempotent and
 updates only the `<!-- archctx:* -->` block; a stale or unavailable index never
 blocks normal development. The installer rejects a config outside the repo, so

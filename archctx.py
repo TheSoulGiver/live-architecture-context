@@ -9,6 +9,9 @@ from typing import Any
 
 CONFIG_VERSION, PROTOCOL_VERSION, SERVER_VERSION = 1, "1.0", "0.1.0rc1"
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
 def dump(x: Any) -> None: print(json.dumps(x, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
 def sha(x: bytes) -> str: return hashlib.sha256(x).hexdigest()
 def load(path: Path) -> dict[str, Any]:
@@ -17,7 +20,7 @@ def load(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict): raise ValueError(f"JSON object required: {path}")
     return value
 def git(repo: Path, *args: str) -> str | None:
-    r = subprocess.run(["git", "-C", str(repo), *args], text=True, capture_output=True)
+    r = subprocess.run(["git", "-C", str(repo), *args], text=True, encoding="utf-8", errors="replace", capture_output=True)
     return r.stdout.strip() if r.returncode == 0 else None
 def revision(repo: Path, facts: dict[str, list[dict[str, Any]]] | None = None) -> str:
     """Prefer an immutable commit; read-only/dubious worktrees get an explicit evidence binding."""
@@ -85,17 +88,18 @@ def run(command: list[Any], repo: Path, timeout: int, values: dict[str, str], ex
     if extra_env:
         if not all(isinstance(k, str) and isinstance(v, str) for k, v in extra_env.items()): raise ValueError("command env must be a string map")
         env.update(extra_env)
-    return argv, subprocess.run(argv, cwd=repo, text=True, capture_output=True, timeout=timeout, env=env)
+    return argv, subprocess.run(argv, cwd=repo, text=True, encoding="utf-8", errors="replace", capture_output=True, timeout=timeout, env=env)
 
 def graph_refresh(config: dict[str, Any], repo: Path, directory: Path, changed: list[str] | None) -> dict[str, Any]:
     graph = config.get("code_graph")
     if not graph: return {"configured": False, "freshness": "not_configured"}
     if not isinstance(graph, dict): raise ValueError("code_graph must be an object")
-    command = graph.get("incremental") if changed and isinstance(graph.get("incremental"), list) else graph.get("refresh")
+    incremental = changed and isinstance(graph.get("incremental"), list)
+    command = graph.get("incremental") if incremental else graph.get("refresh")
     if not isinstance(command, list): return {"configured": True, "provider": graph.get("provider", "external"), "endpoint": graph.get("endpoint"), "index": graph.get("index"), "freshness": "external_daemon_unverified"}
     argv, r = run(command, repo, int(graph.get("timeout_seconds", 180)), {"{repo}": str(repo), "{state}": str(directory / "codegraph"), "{changed_files}": json.dumps(changed or [])})
     if r.returncode: raise RuntimeError(f"code graph command failed ({r.returncode}): {r.stderr.strip()[-1000:]}")
-    return {"configured": True, "provider": graph.get("provider", "external"), "freshness": "incremental" if changed else "refreshed", "command": argv, "stdout_tail": r.stdout.strip()[-1000:]}
+    return {"configured": True, "provider": graph.get("provider", "external"), "freshness": "incremental" if incremental else "refreshed", "command": argv, "stdout_tail": r.stdout.strip()[-1000:]}
 
 def gates(config: dict[str, Any], repo: Path, directory: Path) -> list[dict[str, Any]]:
     receipts = []
@@ -159,13 +163,16 @@ def codex_block(relative_config: str, command: str) -> str:
     return f'''{CODEX_BEGIN}
 ## Architecture context
 
-For each substantive task, before broad repository archaeology:
+This block takes priority over broad repository archaeology. It narrows the
+first read; it does not bypass repository safety, acceptance, or release rules.
+For each substantive task:
 
 1. Run `{command} --config {relative_config} status`.
-2. Run `{command} --config {relative_config} search --query "<current task>"`; query `canonical` and `trace` only for matches.
-3. Before an architecture-relevant edit, use `impact --files <changed paths>`; after the checkpoint run `refresh` and, when relevant, `changed-since`.
+2. If `FRESH`, run `{command} --config {relative_config} search --query "<current task>"`, then read only the returned evidence and query `canonical`/`trace` only for matching components. Do not read overview or baseline documents merely to rediscover these facts.
+3. If `STALE`, inspect the cited canonical source before relying on last-known-good context. If `MISSING` or unavailable, continue normal development and do not invent architecture facts.
+4. Before an architecture-relevant edit, use `impact --files <changed paths>`; after the checkpoint run `refresh` and, when relevant, `changed-since`.
 
-Treat `STALE` as last-known-good context, not current truth: inspect the cited source before relying on it. If archctx is unavailable or has no config, continue normal development and do not invent architecture facts. Authored traces are not CALM code edges; request code edges separately with `trace --code` when configured.
+Authored traces are not CALM code edges; request code edges separately with `trace --code` when configured.
 {CODEX_END}
 '''
 
@@ -182,9 +189,11 @@ def install_codex(config_path: Path, target: Path, check: bool) -> dict[str, Any
     if start >= 0:
         end += len(CODEX_END)
         if before[end:end + 1] == "\n": end += 1
-        after = before[:start] + block + before[end:]; action = "updated"
+        remainder = before[:start] + before[end:]
+        after = block + ("\n" if remainder.strip() else "") + remainder.lstrip()
+        action = "updated"
     else:
-        after = before.rstrip() + ("\n\n" if before.strip() else "") + block; action = "created"
+        after = block + ("\n" if before.strip() else "") + before; action = "created"
     if not check and after != before:
         target.write_text(after, encoding="utf-8")
     return {"protocol_version": PROTOCOL_VERSION, "status": "PASS", "action": "unchanged" if after == before else action, "target": str(target), "config": relative, "check": check, "next_action": "start a new Codex session in this repo"}

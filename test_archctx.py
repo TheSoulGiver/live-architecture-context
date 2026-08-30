@@ -34,6 +34,16 @@ class ArchitectureContextTest(unittest.TestCase):
             self.assertEqual(result["status"], "INVALID")
             self.assertTrue(result["last_good_preserved"])
 
+    def test_watcher_never_labels_a_full_graph_refresh_incremental(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); (root / "owner.py").write_text("OWNER = 'one'\n")
+            config, state = root / "context.json", root / "state"
+            config.write_text(json.dumps({"version": 1, "repo": ".", "components": [{"id": "owner", "evidence": [{"path": "owner.py", "contains": "OWNER"}]}], "watch": {"paths": ["*.py"]}, "code_graph": {"refresh": [sys.executable, "-c", "print('indexed')"]}}))
+            self.assertEqual(run(config, state, "refresh")["status"], "PASS")
+            run(config, state, "watch", "--once")
+            (root / "owner.py").write_text("OWNER = 'two'\n")
+            self.assertEqual(run(config, state, "watch", "--once")["graph"]["freshness"], "refreshed")
+
     def test_failed_gate_preserves_last_good_and_mcp_lists_live_tools(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); (root / "source.py").write_text("OWNER\n")
@@ -56,7 +66,9 @@ class ArchitectureContextTest(unittest.TestCase):
             self.assertEqual(run(config, state, "search", "--query", "identity")["matches"][0]["id"], "owner")
             self.assertEqual(run(config, state, "install-codex", "--target", str(root / "AGENTS.md"))["action"], "created")
             self.assertEqual(run(config, state, "install-codex", "--target", str(root / "AGENTS.md"))["action"], "unchanged")
-            self.assertIn("archctx:begin", (root / "AGENTS.md").read_text())
+            installed = (root / "AGENTS.md").read_text()
+            self.assertTrue(installed.startswith("<!-- archctx:begin -->"))
+            self.assertIn("archctx:begin", installed)
             external = root.parent / "external.json"; external.write_text(json.dumps({"version": 1, "repo": root.name, "components": [{"id": "owner", "evidence": [{"path": "source.py", "contains": "OWNER"}]}]}))
             failed = subprocess.run(["python", str(TOOL), "--config", str(external), "--state-dir", str(state), "install-codex", "--target", str(root / "OTHER.md")], text=True, capture_output=True)
             self.assertEqual(failed.returncode, 2)
