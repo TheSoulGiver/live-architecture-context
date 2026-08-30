@@ -11,6 +11,7 @@ jobs:
       - uses: actions/setup-python@v5
         with: {python-version: '3.11'}
       - run: python -m unittest -v
-      - run: python archctx.py --config demo-repo/architecture.json refresh
-      - run: python archctx.py --config demo-repo/architecture.json canonical service
+      - run: python -m pip install .
+      - run: archctx --config demo-repo/architecture.json refresh
+      - run: archctx --config demo-repo/architecture.json canonical service
       - run: git diff --check

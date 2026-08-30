@@ -25,6 +25,16 @@ The only runtime dependency is Python 3.10+. `pip install .` can expose the
 same command as `archctx` where a normal Python build environment is present;
 the source script is the offline/default route.
 
+## v0.1 field evidence
+
+The release was dogfooded against two private, long-lived repositories without
+including their source or configuration here. One representative new-session
+comparison used less input context and fewer file reads with archctx; it was a
+single workflow sample, not a general speed or code-correctness benchmark.
+Fresh sessions also used source evidence to correct a parallel implementation.
+Those observations do not make this index authoritative over source or replace
+repository-specific tests and review.
+
 ## Live loop
 
 ```sh
