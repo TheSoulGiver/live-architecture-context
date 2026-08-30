@@ -16,7 +16,7 @@ python archctx.py --config example.archcontext.json canonical snapshot-store
 python archctx.py --config example.archcontext.json trace cli
 ```
 
-`code_graph.refresh` is an optional argv array. It is run without a shell and must succeed before promotion, so CGC (or another graph implementation) remains replaceable.
+`code_graph.refresh` and `gates[]` are optional argv arrays. They run without a shell and must succeed before promotion. Use the latter for `node scripts/architecture.mjs verify`, so Archify remains the renderer/IR validator instead of becoming a copied dependency.
 
 The `trace` and `impact` commands deliberately say `authored_architecture_*`: they do not misrepresent configured architecture relations as compiler-proven call edges. Ask the configured code-graph tool for code-level callers/callees.
 

@@ -152,6 +152,21 @@ def run_graph(config: dict[str, Any], repo: Path, state: Path) -> dict[str, Any]
     return {"configured": True, "command": argv, "stdout_tail": result.stdout.strip()[-1000:]}
 
 
+def run_gates(config: dict[str, Any], repo: Path, state: Path) -> list[dict[str, Any]]:
+    """Run optional deterministic validators such as Archify without a shell."""
+    receipts = []
+    for gate in config.get("gates", []):
+        if not isinstance(gate, dict) or not isinstance(gate.get("name"), str) or not isinstance(gate.get("command"), list):
+            raise ValueError("every gate needs name and command argv")
+        replacements = {"{repo}": str(repo), "{state}": str(state)}
+        argv = [replacements.get(str(part), str(part)) for part in gate["command"]]
+        result = subprocess.run(argv, cwd=repo, text=True, capture_output=True, timeout=gate.get("timeout_seconds", 180))
+        if result.returncode:
+            raise RuntimeError(f"gate {gate['name']} failed ({result.returncode}): {result.stderr.strip()[-1000:]}")
+        receipts.append({"name": gate["name"], "command": argv, "stdout_tail": result.stdout.strip()[-1000:]})
+    return receipts
+
+
 def status(config_path: Path, explicit_state: str | None) -> dict[str, Any]:
     config = load_json(config_path)
     repo = resolve_repo(config_path, config)
@@ -182,10 +197,11 @@ def refresh(config_path: Path, explicit_state: str | None) -> dict[str, Any]:
     candidate = context(config, revision, facts)
     try:
         graph = run_graph(config, repo, state)
+        gates = run_gates(config, repo, state)
     except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
         return {"status": "INVALID", "failures": [str(error)], "last_good_preserved": snapshot_path(state).exists()}
     record = {"created_at": datetime.now(timezone.utc).isoformat(), "repo": str(repo), "revision": revision,
-              "context_hash": semantic_hash(candidate), "context": candidate, "graph": graph}
+              "context_hash": semantic_hash(candidate), "context": candidate, "graph": graph, "gates": gates}
     atomic_write(snapshot_path(state), record)
     atomic_write(state / "snapshots" / f"{record['context_hash']}.json", record)
     return {"status": "PASS", "revision": revision, "context_hash": record["context_hash"], "graph": graph}
