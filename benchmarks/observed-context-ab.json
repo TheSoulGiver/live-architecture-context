@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "title": "Observed new-session context comparison",
+  "repository": "anonymized private long-lived repository",
+  "repository_label": "anonymized dogfood",
+  "workflow": "one real isolated-worktree development workflow",
+  "observed_at": "2026-08-30",
+  "variants": [
+    {"id": "direct_repo_search", "label": "Direct repository exploration", "input_context": 143540, "distinct_file_token_reads": 605},
+    {"id": "live_architecture_context", "label": "Live Architecture Context", "input_context": 107663, "distinct_file_token_reads": 345}
+  ],
+  "method": "Paired fresh Codex sessions on the same isolated worktree. The LAC session used installed architecture-context instructions and source-backed context; the comparison session used normal targeted repository discovery.",
+  "limitations": [
+    "One observed real workflow, not a universal token, latency, cost, or correctness benchmark.",
+    "The private repository, source, configuration, prompts, and raw logs are intentionally excluded from this public repository.",
+    "This artifact makes the published arithmetic and SVG reproducible from the observed aggregate values; it cannot reproduce the private workflow."
+  ],
+  "public_reproduction": {"renderer": "tools/render_benchmark.py", "output": "assets/context-efficiency.svg"}
+}
