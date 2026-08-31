@@ -59,6 +59,17 @@ class ArchitectureContextTest(unittest.TestCase):
             self.assertEqual(archctx.watch(Path("context.json"), None, 50, 1), 0)
         self.assertEqual([call.args[0]["status"] for call in output.call_args_list], ["WATCH_READY", "PASS"])
 
+    def test_watcher_does_not_rewrite_unchanged_live_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); (root / "owner.py").write_text("OWNER\n")
+            config, state = root / "context.json", root / "state"
+            config.write_text(json.dumps({"version": 1, "repo": ".", "components": [{"id": "owner", "evidence": [{"path": "owner.py", "contains": "OWNER"}]}]}))
+            with patch.object(archctx, "atomic", wraps=archctx.atomic) as persist:
+                self.assertEqual(archctx.watch_once(config, str(state))["status"], "WATCH_READY")
+                persist.reset_mock()
+                self.assertEqual(archctx.watch_once(config, str(state))["status"], "NO_RELEVANT_CHANGE")
+                persist.assert_not_called()
+
     def test_failed_gate_preserves_last_good_and_mcp_lists_live_tools(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); (root / "source.py").write_text("OWNER\n")
@@ -99,6 +110,7 @@ class ArchitectureContextTest(unittest.TestCase):
             self.assertEqual(run(config, state, "refresh")["status"], "PASS")
             compact = run(config, state, "status")
             self.assertTrue(compact["last_good_available"]); self.assertNotIn("context", compact); self.assertNotIn("last_good", compact)
+            self.assertNotIn("status", run(config, state, "telemetry")["events"])
             self.assertEqual(len(run(config, state, "snapshot")["context"]["components"]), 4)
             limited = run(config, state, "search", "--query", "service")
             self.assertEqual((limited["match_count"], len(limited["matches"]), limited["omitted_match_count"]), (4, 3, 1))
@@ -118,7 +130,7 @@ class ArchitectureContextTest(unittest.TestCase):
             self.assertTrue((root / ".archctx" / "last-good.json").exists())
             self.assertEqual(json.loads(config.read_text())["repo"], "..")
             self.assertEqual((root / ".gitignore").read_text().count(".archctx/"), 1)
-            installed = (root / "AGENTS.md").read_text(); self.assertIn("# local rules", installed); self.assertIn("archctx --config .archctx/architecture.json status", installed); self.assertIn("If `archctx` is unavailable", installed); self.assertNotIn(str(TOOL.resolve()), installed)
+            installed = (root / "AGENTS.md").read_text(); self.assertIn("# local rules", installed); self.assertIn("archctx --config .archctx/architecture.json status", installed); self.assertIn("skip it for local, obvious work", installed); self.assertNotIn(str(TOOL.resolve()), installed)
             self.assertEqual(run_raw("init", "--repo", str(root))["action"], "updated")
             self.assertEqual((root / ".gitignore").read_text().count(".archctx/"), 1)
             removed = run_raw("--config", str(config), "uninstall-codex", "--target", str(root / "AGENTS.md"))
@@ -133,8 +145,20 @@ class ArchitectureContextTest(unittest.TestCase):
             config.write_text(json.dumps({"version": 1, "repo": ".", "components": [{"id": "owner", "evidence": [{"path": "source.py", "contains": "OWNER"}]}]}))
             run(config, state, "refresh"); run(config, state, "search", "--query", "private product goal")
             summary = run(config, state, "telemetry")
-            self.assertEqual(summary["events"]["search"], 1); self.assertEqual(summary["privacy"], "local metrics only; no source, evidence, or raw task text")
-            self.assertNotIn("private product goal", (state / "telemetry.jsonl").read_text())
+            self.assertEqual(summary["events"]["search"], 1); self.assertEqual(summary["privacy"], "local aggregate metrics only; no source, evidence, query, or task text")
+            self.assertEqual(summary["retention"], "fixed-size aggregate"); self.assertNotIn("private product goal", (state / "telemetry.json").read_text())
+
+    def test_snapshots_are_bounded_without_losing_last_good(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); source = root / "source.py"; source.write_text("OWNER = 'one'\n")
+            config, state = root / "context.json", root / "state"
+            config.write_text(json.dumps({"version": 1, "repo": ".", "components": [{"id": "owner", "evidence": [{"path": "source.py", "contains": "OWNER"}]}]}))
+            with patch.object(archctx, "SNAPSHOT_LIMIT", 2):
+                for value in ("one", "two", "three"):
+                    source.write_text(f"OWNER = '{value}'\n")
+                    self.assertEqual(archctx.refresh(config, str(state))["status"], "PASS")
+            self.assertEqual(len(archctx.snapshot_files(state)), 2)
+            self.assertTrue((state / "last-good.json").exists())
     def test_last_good_is_preserved_and_marked_stale(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); (root / "source.py").write_text("OWNER = 'one'\n")

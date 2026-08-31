@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.1.2
+
+- Made `status` observational; telemetry is now a fixed-size aggregate without
+  source, query, or task text.
+- Stopped no-change watcher state rewrites and retained only the latest 32
+  rebuildable evidence snapshots, while preserving last-good.
+- Narrowed Codex guidance to architecture-relevant work so normal local tasks
+  do not pay an architecture-context preflight.
+
 ## v0.1.1
 
 - Generated Codex guidance now uses the portable `archctx` command and has a

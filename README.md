@@ -107,7 +107,7 @@ archctx --config architecture.json watch --poll-ms 500
 
 The watcher hashes configured evidence plus optional `watch.paths`; `watch
 --once` returns `NO_RELEVANT_CHANGE` for an unrelated watched file, while a
-continuous watcher keeps that heartbeat in state instead of flooding stdout.
+continuous watcher is quiet and only updates its local manifest when it changes.
 A changed canonical source performs one validation/promotion cycle. Invalid
 evidence or a failed external gate leaves `last-good.json` untouched and every
 response is `STALE`/`INVALID`.
@@ -173,9 +173,10 @@ config as trusted code: it intentionally authorizes its argv programs.
 
 `archctx --config .archctx/architecture.json uninstall-codex` removes only the
 managed `AGENTS.md` block. Config, last-good history, and `.gitignore` stay in
-place. CLI and MCP telemetry is local-only aggregate data: command, status,
-latency, response size, and counts. It never stores source, evidence, or raw
-task text; use `telemetry` for a summary.
+place. CLI/MCP telemetry is one fixed-size local aggregate of command, status,
+latency, response size, and counts. It never stores source, evidence, queries,
+or task text; `status` is read-only. The latest 32 source-evidence snapshots
+are retained for delta queries; `last-good.json` is always retained.
 
 ## Boundaries and release notes
 

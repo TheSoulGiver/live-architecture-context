@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import argparse, fnmatch, hashlib, json, os, subprocess, sys, time
-from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-CONFIG_VERSION, PROTOCOL_VERSION, SERVER_VERSION = 1, "1.0", "0.1.0"
+CONFIG_VERSION, PROTOCOL_VERSION, SERVER_VERSION = 1, "1.0", "0.1.2"
+SNAPSHOT_LIMIT = 32
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -35,27 +35,27 @@ def last_path(directory: Path) -> Path: return directory / "last-good.json"
 def atomic(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True); temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"); os.replace(temporary, path)
-def telemetry(directory: Path, event: str, value: dict[str, Any], elapsed_ms: int, query: str | None = None) -> None:
-    """Best-effort local metrics; never retain source, evidence, or raw task text."""
+def telemetry(directory: Path, event: str, value: dict[str, Any], elapsed_ms: int) -> None:
+    """Best-effort fixed-size metrics; never retain source, evidence, query, or task text."""
     try:
-        record: dict[str, Any] = {"version": 1, "at": datetime.now(timezone.utc).isoformat(), "event": event, "status": value.get("status"), "freshness": value.get("freshness"), "revision": value.get("revision"), "elapsed_ms": elapsed_ms, "response_bytes": len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode())}
-        if query is not None: record["query"] = {"sha256": sha(query.encode()), "length": len(query)}
+        path = directory / "telemetry.json"; before = load(path) if path.exists() else {}
+        events = before.get("events") if isinstance(before.get("events"), dict) else {}
+        statuses = before.get("statuses") if isinstance(before.get("statuses"), dict) else {}
+        counts = before.get("counts") if isinstance(before.get("counts"), dict) else {}
+        events[event] = int(events.get(event, 0)) + 1
+        status = str(value.get("status")); statuses[status] = int(statuses.get(status, 0)) + 1
         for key in ("matches", "changed_files", "direct_components", "candidates"):
-            if isinstance(value.get(key), list): record[f"{key}_count"] = len(value[key])
-        directory.mkdir(parents=True, exist_ok=True)
-        with (directory / "telemetry.jsonl").open("a", encoding="utf-8") as output: output.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
-    except OSError: pass
+            if isinstance(value.get(key), list): counts[key] = int(counts.get(key, 0)) + len(value[key])
+        atomic(path, {"version": 1, "updated_at": datetime.now(timezone.utc).isoformat(), "events": events, "statuses": statuses, "counts": counts, "event_count": int(before.get("event_count", 0)) + 1, "response_bytes": int(before.get("response_bytes", 0)) + len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()), "latency_ms": int(before.get("latency_ms", 0)) + elapsed_ms})
+    except (OSError, ValueError): pass
 def telemetry_summary(directory: Path) -> dict[str, Any]:
-    events, statuses, bytes_total, elapsed_total = Counter(), Counter(), 0, 0
-    path = directory / "telemetry.jsonl"
-    if path.exists():
-        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-            try: record = json.loads(line)
-            except json.JSONDecodeError: continue
-            if isinstance(record, dict):
-                events[str(record.get("event"))] += 1; statuses[str(record.get("status"))] += 1; bytes_total += int(record.get("response_bytes", 0)); elapsed_total += int(record.get("elapsed_ms", 0))
-    count = sum(events.values())
-    return {"protocol_version": PROTOCOL_VERSION, "status": "PASS", "privacy": "local metrics only; no source, evidence, or raw task text", "events": dict(sorted(events.items())), "statuses": dict(sorted(statuses.items())), "event_count": count, "response_bytes": bytes_total, "average_latency_ms": elapsed_total // count if count else 0}
+    try: value = load(directory / "telemetry.json") if (directory / "telemetry.json").exists() else {}
+    except ValueError: value = {}
+    events = value.get("events") if isinstance(value.get("events"), dict) else {}
+    statuses = value.get("statuses") if isinstance(value.get("statuses"), dict) else {}
+    counts = value.get("counts") if isinstance(value.get("counts"), dict) else {}
+    count, elapsed_total = int(value.get("event_count", 0)), int(value.get("latency_ms", 0))
+    return {"protocol_version": PROTOCOL_VERSION, "status": "PASS", "privacy": "local aggregate metrics only; no source, evidence, query, or task text", "events": dict(sorted(events.items())), "statuses": dict(sorted(statuses.items())), "counts": dict(sorted(counts.items())), "event_count": count, "response_bytes": int(value.get("response_bytes", 0)), "average_latency_ms": elapsed_total // count if count else 0, "retention": "fixed-size aggregate"}
 
 def repo_for(config_path: Path, config: dict[str, Any]) -> Path:
     raw = config.get("repo", ".")
@@ -159,7 +159,7 @@ def refresh(config_path: Path, explicit: str | None, changed: list[str] | None =
     try: graph, receipts = graph_refresh(config, repo, directory, changed), gates(config, repo, directory)
     except (OSError, RuntimeError, subprocess.TimeoutExpired, ValueError) as e: return {"protocol_version": PROTOCOL_VERSION, "status": "INVALID", "freshness": "stale", "failures": [str(e)], "last_good_preserved": last_path(directory).exists(), "next_action": "repair external validator, then refresh"}
     record = {"record_version": CONFIG_VERSION, "created_at": datetime.now(timezone.utc).isoformat(), "repo": str(repo), "revision": revision(repo, facts), "config_hash": semantic(config), "context_hash": semantic(candidate), "context": candidate, "graph": graph, "gates": receipts}
-    atomic(last_path(directory), record); atomic(directory / "snapshots" / f"{record['context_hash']}.json", record)
+    atomic(last_path(directory), record); atomic(directory / "snapshots" / f"{record['context_hash']}.json", record); prune_snapshots(directory)
     return freshness(record, "PASS") | {"context_hash": record["context_hash"], "graph": graph, "gates": receipts, "changed_files": changed or []}
 
 def snapshot(config_path: Path, explicit: str | None) -> dict[str, Any]:
@@ -193,12 +193,9 @@ def codex_block(relative_config: str) -> str:
     return f'''{CODEX_BEGIN}
 ## Architecture context
 
-For substantive work, first run `archctx --config {relative_config} status`.
-If `archctx` is unavailable, use normal targeted discovery and make no architecture claim.
-If `FRESH`, use `search`, matching `canonical`, or `impact` only when it narrows the task; read only returned evidence.
-If `STALE` or `INVALID`, source wins: verify cited source before relying on last-good. If unavailable, use normal targeted discovery and make no architecture claim.
-Before architecture-relevant edits run `impact --files <paths>`; after relevant edits run `refresh`.
-This is orientation, not a gate: it never bypasses repo safety, tests, or release rules. Authored traces are not CALM code edges.
+For architecture-relevant work, before broad repository discovery run `archctx --config {relative_config} status`; skip it for local, obvious work.
+If `FRESH` and it narrows the task, use `search`, then only matching `canonical`, `impact`, and cited evidence. Otherwise use normal targeted discovery; source wins.
+For architecture-relevant edits, run `impact --files <paths>` before; let the watcher refresh, or run `refresh` when no watcher is active. This is orientation, never a gate.
 {CODEX_END}
 '''
 
@@ -305,8 +302,16 @@ def impact(config_path: Path, explicit: str | None, base: str | None, files: lis
     reach = sorted(set().union(*(set(authored(ctx, x, "downstream")) for x in direct))) if direct else []
     return {"protocol_version": PROTOCOL_VERSION, "kind": "authored_architecture_impact", "provenance": "source_evidence_plus_authored_architecture", "base": base, "changed_files": changed, "direct_components": direct, "reachable_components": reach, "code_graph": {"available": isinstance(config.get("code_graph"), dict), "note": "Code edges remain separate provider facts; use trace --code."}, "next_action": "refresh" if direct else "no canonical evidence owner; no architecture refresh needed"}
 
+def snapshot_files(directory: Path) -> list[Path]:
+    root = directory / "snapshots"
+    if not root.is_dir(): return []
+    return sorted((path for path in root.glob("*.json") if len(path.stem) == 64 and all(char in "0123456789abcdef" for char in path.stem)), key=lambda path: (path.stat().st_mtime_ns, path.name), reverse=True)
+def prune_snapshots(directory: Path) -> None:
+    try:
+        for path in snapshot_files(directory)[SNAPSHOT_LIMIT:]: path.unlink()
+    except OSError: pass
 def retained(directory: Path, rev: str) -> dict[str, Any] | None:
-    matches = [load(path) for path in (directory / "snapshots").glob("*.json") if load(path).get("revision") == rev]
+    matches = [record for path in snapshot_files(directory) if (record := load(path)).get("revision") == rev]
     return min(matches, key=lambda value: str(value.get("created_at", ""))) if matches else None
 def record_diff(old: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
     a, b = {x["id"]: x for x in old["context"]["components"]}, {x["id"]: x for x in new["context"]["components"]}
@@ -346,7 +351,8 @@ def manifest(repo: Path, config: dict[str, Any]) -> dict[str, str | None]:
     return {p: sha((repo / p).read_bytes()) if (repo / p).is_file() else None for p in sorted(paths) if not ignored(p, watch.get("ignore", []))}
 def watch_once(config_path: Path, explicit: str | None) -> dict[str, Any]:
     config = load(config_path); repo, directory = repo_for(config_path, config), state(config_path, explicit); live = directory / "live-state.json"; current = manifest(repo, config)
-    previous = load(live).get("manifest", {}) if live.exists() else None; atomic(live, {"manifest": current, "observed_at": datetime.now(timezone.utc).isoformat()})
+    previous = load(live).get("manifest", {}) if live.exists() else None
+    if previous is None or previous != current: atomic(live, {"manifest": current, "observed_at": datetime.now(timezone.utc).isoformat()})
     if previous is None: return {"protocol_version": PROTOCOL_VERSION, "status": "WATCH_READY", "watched_files": len(current), "next_action": "keep watching"}
     changed = sorted(p for p in set(previous) | set(current) if previous.get(p) != current.get(p)); direct = owners(config, changed)
     if not direct: return {"protocol_version": PROTOCOL_VERSION, "status": "NO_RELEVANT_CHANGE", "changed_files": changed, "direct_components": [], "next_action": "no architecture refresh"}
@@ -386,7 +392,9 @@ def serve_mcp(config_path: Path, explicit: str | None) -> int:
             elif method == "tools/list": result = {"tools": mcp_tools()}
             elif method == "tools/call":
                 name, arguments = str(params.get("name", "")), params.get("arguments", {})
-                value = mcp_value(config_path, explicit, name, arguments); telemetry(state(config_path, explicit), f"mcp:{name}", value, 0, str(arguments.get("query")) if isinstance(arguments.get("query"), str) else None); result = {"content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False, separators=(",", ":"))}], "isError": value.get("status") in ("ERROR", "INVALID")}
+                value = mcp_value(config_path, explicit, name, arguments)
+                if name not in ("architecture_status", "architecture_stale"): telemetry(state(config_path, explicit), f"mcp:{name}", value, 0)
+                result = {"content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False, separators=(",", ":"))}], "isError": value.get("status") in ("ERROR", "INVALID")}
             elif "id" not in request: continue
             else: raise ValueError("method not found")
             if "id" in request: print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}, ensure_ascii=False), flush=True)
@@ -420,6 +428,8 @@ def main() -> int:
         target = Path(args.target) if args.command in ("install-codex", "uninstall-codex") else None
         install_target = target if target and target.is_absolute() else (repo_for(config_path, load(config_path)) / target) if target else None
         actions = {"status": lambda: status(config_path, args.state_dir), "refresh": lambda: refresh(config_path, args.state_dir), "snapshot": lambda: snapshot(config_path, args.state_dir), "canonical": lambda: canonical(config_path, args.state_dir, args.id), "search": lambda: search(config_path, args.state_dir, args.query, args.limit), "evidence": lambda: mcp_value(config_path, args.state_dir, "architecture_evidence", {"id": args.id}), "trace": lambda: trace(config_path, args.state_dir, args.id, args.direction, args.code), "impact": lambda: impact(config_path, args.state_dir, args.base, args.files), "changed-since": lambda: changed_since(config_path, args.state_dir, args.revision), "delta": lambda: delta(config_path, args.state_dir, args.revision), "drift": lambda: drift(config_path, args.base), "install-codex": lambda: install_codex(config_path, install_target.resolve(), args.check), "uninstall-codex": lambda: uninstall_codex(install_target.resolve(), args.check)}
-        started = time.monotonic(); value = actions[args.command](); telemetry(state(config_path, args.state_dir), args.command, value, int((time.monotonic() - started) * 1000), args.query if args.command == "search" else None); dump(value); return 0
+        started = time.monotonic(); value = actions[args.command]()
+        if args.command != "status": telemetry(state(config_path, args.state_dir), args.command, value, int((time.monotonic() - started) * 1000))
+        dump(value); return 0
     except (ValueError, OSError) as e: dump({"protocol_version": PROTOCOL_VERSION, "status": "ERROR", "error": str(e)}); return 2
 if __name__ == "__main__": raise SystemExit(main())
