@@ -147,7 +147,7 @@ def status(config_path: Path, explicit: str | None) -> dict[str, Any]:
     if not old_path.exists(): return {"protocol_version": PROTOCOL_VERSION, "status": "MISSING", "freshness": "missing", "repo": str(repo) if repo else None, "next_action": "run refresh"}
     old = load(old_path); current = context(config, revision(repo, facts), facts) if repo and not failures else None
     fresh = current is not None and semantic(current) == old.get("context_hash") and semantic(config) == old.get("config_hash")
-    return freshness(old, "FRESH" if fresh else "STALE", None if fresh else (failures or ["source revision, config, or architecture context changed"])) | {"last_good": old}
+    return freshness(old, "FRESH" if fresh else "STALE", None if fresh else (failures or ["source revision, config, or architecture context changed"])) | {"last_good_available": True, "last_good_context_hash": old.get("context_hash")}
 
 def refresh(config_path: Path, explicit: str | None, changed: list[str] | None = None) -> dict[str, Any]:
     config, directory = load(config_path), state(config_path, explicit)
@@ -163,15 +163,18 @@ def refresh(config_path: Path, explicit: str | None, changed: list[str] | None =
     return freshness(record, "PASS") | {"context_hash": record["context_hash"], "graph": graph, "gates": receipts, "changed_files": changed or []}
 
 def snapshot(config_path: Path, explicit: str | None) -> dict[str, Any]:
-    value = status(config_path, explicit); old = value.pop("last_good", None)
-    return value if old is None else value | {"context": old["context"], "graph": old.get("graph"), "gates": old.get("gates", [])}
+    value = status(config_path, explicit); path = last_path(state(config_path, explicit))
+    if not path.exists(): return value
+    old = load(path)
+    return value | {"context": old["context"], "graph": old.get("graph"), "gates": old.get("gates", [])}
 def canonical(config_path: Path, explicit: str | None, ident: str) -> dict[str, Any]:
     value = snapshot(config_path, explicit)
     for x in value.get("context", {}).get("components", []):
         if x["id"] == ident: return {k: value[k] for k in ("protocol_version", "status", "revision", "freshness", "confidence", "next_action") if k in value} | {"canonical": x, "warning": value.get("reason")}
     return {k: value[k] for k in ("protocol_version", "status", "revision", "freshness", "next_action") if k in value} | {"error": f"unknown component: {ident}", "warning": value.get("reason")}
 
-def search(config_path: Path, explicit: str | None, query: str) -> dict[str, Any]:
+def search(config_path: Path, explicit: str | None, query: str, limit: int = 3) -> dict[str, Any]:
+    if limit < 0: raise ValueError("search limit must be non-negative")
     value = snapshot(config_path, explicit)
     terms = [term for term in query.casefold().split() if term]
     matches = []
@@ -180,8 +183,9 @@ def search(config_path: Path, explicit: str | None, query: str) -> dict[str, Any
         score = sum(term in haystack for term in terms)
         if score:
             matches.append((score, item))
-    compact = [{key: item[key] for key in ("id", "name", "purpose", "tags", "truth_sources", "evidence") if key in item} for _, item in sorted(matches, key=lambda row: (-row[0], row[1]["id"]))]
-    return {key: value[key] for key in ("protocol_version", "status", "revision", "freshness", "confidence", "next_action") if key in value} | {"query": query, "matches": compact, "warning": value.get("reason")}
+    selected = sorted(matches, key=lambda row: (-row[0], row[1]["id"])); visible = selected if limit == 0 else selected[:limit]
+    compact = [{key: item[key] for key in ("id", "name", "purpose", "tags", "truth_sources", "evidence") if key in item} for _, item in visible]
+    return {key: value[key] for key in ("protocol_version", "status", "revision", "freshness", "confidence", "next_action") if key in value} | {"query": query, "matches": compact, "match_count": len(selected), "omitted_match_count": len(selected) - len(visible), "warning": value.get("reason")}
 
 CODEX_BEGIN, CODEX_END = "<!-- archctx:begin -->", "<!-- archctx:end -->"
 
@@ -356,13 +360,14 @@ def watch(config_path: Path, explicit: str | None, poll_ms: int, max_events: int
 
 def mcp_tools() -> list[dict[str, Any]]:
     empty = {"type": "object", "properties": {}}; ident = {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}
-    return [{"name": "architecture_status", "description": "Freshness and last-known-good status.", "inputSchema": empty}, {"name": "architecture_refresh", "description": "Validate and atomically promote context.", "inputSchema": empty}, {"name": "architecture_snapshot", "description": "Compact last-known-good context.", "inputSchema": empty}, {"name": "architecture_canonical", "description": "Canonical component and evidence.", "inputSchema": ident}, {"name": "architecture_search", "description": "Match the current task to compact canonical components.", "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}, {"name": "architecture_evidence", "description": "Source evidence for one component.", "inputSchema": ident}, {"name": "architecture_trace", "description": "Authored relations; optional code graph stays separate.", "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}, "direction": {"enum": ["upstream", "downstream"]}, "include_code_edges": {"type": "boolean"}}, "required": ["id"]}}, {"name": "architecture_impact", "description": "Changed files to canonical ownership.", "inputSchema": {"type": "object", "properties": {"base": {"type": "string"}, "files": {"type": "array", "items": {"type": "string"}}}}}, {"name": "architecture_changed_since", "description": "Retained architecture delta by revision.", "inputSchema": {"type": "object", "properties": {"revision": {"type": "string"}}, "required": ["revision"]}}, {"name": "architecture_drift", "description": "Configured high-value drift candidates only.", "inputSchema": {"type": "object", "properties": {"base": {"type": "string"}}, "required": ["base"]}}, {"name": "architecture_stale", "description": "Alias for freshness status.", "inputSchema": empty}]
+    search_input = {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 0, "default": 3}}, "required": ["query"]}
+    return [{"name": "architecture_status", "description": "Freshness and last-known-good metadata without context payload.", "inputSchema": empty}, {"name": "architecture_refresh", "description": "Validate and atomically promote context.", "inputSchema": empty}, {"name": "architecture_snapshot", "description": "Compact last-known-good context.", "inputSchema": empty}, {"name": "architecture_canonical", "description": "Canonical component and evidence.", "inputSchema": ident}, {"name": "architecture_search", "description": "Match the current task to compact canonical components; defaults to three results and reports omissions.", "inputSchema": search_input}, {"name": "architecture_evidence", "description": "Source evidence for one component.", "inputSchema": ident}, {"name": "architecture_trace", "description": "Authored relations; optional code graph stays separate.", "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}, "direction": {"enum": ["upstream", "downstream"]}, "include_code_edges": {"type": "boolean"}}, "required": ["id"]}}, {"name": "architecture_impact", "description": "Changed files to canonical ownership.", "inputSchema": {"type": "object", "properties": {"base": {"type": "string"}, "files": {"type": "array", "items": {"type": "string"}}}}}, {"name": "architecture_changed_since", "description": "Retained architecture delta by revision.", "inputSchema": {"type": "object", "properties": {"revision": {"type": "string"}}, "required": ["revision"]}}, {"name": "architecture_drift", "description": "Configured high-value drift candidates only.", "inputSchema": {"type": "object", "properties": {"base": {"type": "string"}}, "required": ["base"]}}, {"name": "architecture_stale", "description": "Alias for freshness status.", "inputSchema": empty}]
 def mcp_value(config_path: Path, explicit: str | None, name: str, args: dict[str, Any]) -> dict[str, Any]:
     if name in ("architecture_status", "architecture_stale"): return status(config_path, explicit)
     if name == "architecture_refresh": return refresh(config_path, explicit)
     if name == "architecture_snapshot": return snapshot(config_path, explicit)
     if name == "architecture_canonical": return canonical(config_path, explicit, str(args.get("id", "")))
-    if name == "architecture_search": return search(config_path, explicit, str(args.get("query", "")))
+    if name == "architecture_search": return search(config_path, explicit, str(args.get("query", "")), int(args.get("limit", 3)))
     if name == "architecture_evidence":
         value = canonical(config_path, explicit, str(args.get("id", ""))); return {k: value[k] for k in value if k != "canonical"} | {"evidence": value.get("canonical", {}).get("evidence", [])}
     if name == "architecture_trace": return trace(config_path, explicit, str(args.get("id", "")), str(args.get("direction", "downstream")), bool(args.get("include_code_edges")))
@@ -390,7 +395,7 @@ def serve_mcp(config_path: Path, explicit: str | None) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(); parser.add_argument("--config"); parser.add_argument("--state-dir"); sub = parser.add_subparsers(dest="command", required=True)
     for name in ("status", "refresh", "snapshot", "mcp", "telemetry"): sub.add_parser(name)
-    x = sub.add_parser("canonical"); x.add_argument("id"); x = sub.add_parser("search"); x.add_argument("--query", required=True); x = sub.add_parser("evidence"); x.add_argument("id")
+    x = sub.add_parser("canonical"); x.add_argument("id"); x = sub.add_parser("search"); x.add_argument("--query", required=True); x.add_argument("--limit", type=int, default=3); x = sub.add_parser("evidence"); x.add_argument("id")
     x = sub.add_parser("trace"); x.add_argument("id"); x.add_argument("--direction", choices=("upstream", "downstream"), default="downstream"); x.add_argument("--code", action="store_true")
     x = sub.add_parser("impact"); x.add_argument("--base"); x.add_argument("--files", nargs="*")
     x = sub.add_parser("changed-since"); x.add_argument("--revision", required=True); x = sub.add_parser("delta"); x.add_argument("--revision", required=True); x = sub.add_parser("drift"); x.add_argument("--base", required=True)
@@ -412,7 +417,7 @@ def main() -> int:
             return watch(config_path, args.state_dir, args.poll_ms, args.max_events)
         target = Path(args.target) if args.command in ("install-codex", "uninstall-codex") else None
         install_target = target if target and target.is_absolute() else (repo_for(config_path, load(config_path)) / target) if target else None
-        actions = {"status": lambda: status(config_path, args.state_dir), "refresh": lambda: refresh(config_path, args.state_dir), "snapshot": lambda: snapshot(config_path, args.state_dir), "canonical": lambda: canonical(config_path, args.state_dir, args.id), "search": lambda: search(config_path, args.state_dir, args.query), "evidence": lambda: mcp_value(config_path, args.state_dir, "architecture_evidence", {"id": args.id}), "trace": lambda: trace(config_path, args.state_dir, args.id, args.direction, args.code), "impact": lambda: impact(config_path, args.state_dir, args.base, args.files), "changed-since": lambda: changed_since(config_path, args.state_dir, args.revision), "delta": lambda: delta(config_path, args.state_dir, args.revision), "drift": lambda: drift(config_path, args.base), "install-codex": lambda: install_codex(config_path, install_target.resolve(), args.check), "uninstall-codex": lambda: uninstall_codex(install_target.resolve(), args.check)}
+        actions = {"status": lambda: status(config_path, args.state_dir), "refresh": lambda: refresh(config_path, args.state_dir), "snapshot": lambda: snapshot(config_path, args.state_dir), "canonical": lambda: canonical(config_path, args.state_dir, args.id), "search": lambda: search(config_path, args.state_dir, args.query, args.limit), "evidence": lambda: mcp_value(config_path, args.state_dir, "architecture_evidence", {"id": args.id}), "trace": lambda: trace(config_path, args.state_dir, args.id, args.direction, args.code), "impact": lambda: impact(config_path, args.state_dir, args.base, args.files), "changed-since": lambda: changed_since(config_path, args.state_dir, args.revision), "delta": lambda: delta(config_path, args.state_dir, args.revision), "drift": lambda: drift(config_path, args.base), "install-codex": lambda: install_codex(config_path, install_target.resolve(), args.check), "uninstall-codex": lambda: uninstall_codex(install_target.resolve(), args.check)}
         started = time.monotonic(); value = actions[args.command](); telemetry(state(config_path, args.state_dir), args.command, value, int((time.monotonic() - started) * 1000), args.query if args.command == "search" else None); dump(value); return 0
     except (ValueError, OSError) as e: dump({"protocol_version": PROTOCOL_VERSION, "status": "ERROR", "error": str(e)}); return 2
 if __name__ == "__main__": raise SystemExit(main())

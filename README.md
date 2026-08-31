@@ -73,6 +73,7 @@ Every CLI/MCP response includes `protocol_version`, `revision`, `freshness`,
 
 ```sh
 archctx --config architecture.json status
+archctx --config architecture.json search --query "identity payment"
 archctx --config architecture.json canonical service
 archctx --config architecture.json evidence service
 archctx --config architecture.json trace service --code
@@ -80,6 +81,12 @@ archctx --config architecture.json changed-since --revision <git-sha>
 archctx --config architecture.json drift --base <git-sha>
 archctx --config architecture.json mcp
 ```
+
+`status` is metadata-only: it reports freshness and whether last-good exists
+without serializing the context. Use `snapshot` only when the complete retained
+context is needed. `search` returns at most three matches by default and always
+reports `match_count` and `omitted_match_count`; pass `--limit 0` only when an
+unbounded result is genuinely needed.
 
 MCP tools: `status`, `refresh`, `snapshot`, `canonical`, `evidence`, `trace`,
 `impact`, `changed-since`, `drift`, and `stale` (all prefixed

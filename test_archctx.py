@@ -79,6 +79,26 @@ class ArchitectureContextTest(unittest.TestCase):
             failed = subprocess.run([PYTHON, str(TOOL), "--config", str(external), "--state-dir", str(state), "install-codex", "--target", str(root / "OTHER.md")], text=True, capture_output=True)
             self.assertEqual(failed.returncode, 2)
 
+    def test_status_is_metadata_only_and_search_discloses_omissions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); config, state = root / "context.json", root / "state"
+            components = []
+            for number in range(4):
+                path = root / f"service-{number}.py"; marker = f"SERVICE_{number}"; path.write_text(marker)
+                components.append({"id": f"service-{number}", "tags": ["service"], "evidence": [{"path": path.name, "contains": marker}]})
+            config.write_text(json.dumps({"version": 1, "repo": ".", "components": components}))
+            self.assertEqual(run(config, state, "refresh")["status"], "PASS")
+            compact = run(config, state, "status")
+            self.assertTrue(compact["last_good_available"]); self.assertNotIn("context", compact); self.assertNotIn("last_good", compact)
+            self.assertEqual(len(run(config, state, "snapshot")["context"]["components"]), 4)
+            limited = run(config, state, "search", "--query", "service")
+            self.assertEqual((limited["match_count"], len(limited["matches"]), limited["omitted_match_count"]), (4, 3, 1))
+            self.assertEqual(run(config, state, "search", "--query", "service", "--limit", "0")["omitted_match_count"], 0)
+            request = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "architecture_search", "arguments": {"query": "service"}}}
+            process = subprocess.run([PYTHON, str(TOOL), "--config", str(config), "--state-dir", str(state), "mcp"], input=json.dumps(request) + "\n", text=True, capture_output=True, check=True)
+            mcp_value = json.loads(json.loads(process.stdout)["result"]["content"][0]["text"])
+            self.assertEqual((len(mcp_value["matches"]), mcp_value["omitted_match_count"]), (3, 1))
+
     def test_init_is_one_time_evidence_bound_and_uninstall_only_removes_managed_block(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); (root / "src").mkdir(); (root / "src" / "service.py").write_text("def serve(): pass\n")
