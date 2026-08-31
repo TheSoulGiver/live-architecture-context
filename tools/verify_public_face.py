@@ -26,7 +26,7 @@ def main() -> int:
             raise SystemExit(f"README benchmark claim drift: {claim}")
     for relative in ASSETS:
         content = (ROOT / relative).read_text(encoding="utf-8")
-        if "<svg" not in content or "http://" in content.replace("http://www.w3.org/2000/svg", ""):
+        if "<svg" not in content or any(url in content.replace("http://www.w3.org/2000/svg", "") for url in ("http://", "https://")):
             raise SystemExit(f"invalid or externally-dependent SVG: {relative}")
         ElementTree.parse(ROOT / relative)
     missing = [relative for relative in REQUIRED_README_REFS if relative not in readme]
