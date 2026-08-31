@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.1.1
+
+- Generated Codex guidance now uses the portable `archctx` command and has a
+  clear fallback when it is unavailable.
+- Continuous watchers retain no-change heartbeats in local state without
+  flooding stdout; `watch --once` retains its JSON result.
+
 ## v0.1.0
 
 - Stable source-grounded architecture context coordinator for coding agents.

@@ -101,14 +101,16 @@ from this repository.
 ## Live loop
 
 ```sh
-<python> archctx.py --config architecture.json refresh
-<python> archctx.py --config architecture.json watch --poll-ms 500
+archctx --config architecture.json refresh
+archctx --config architecture.json watch --poll-ms 500
 ```
 
-The watcher hashes configured evidence plus optional `watch.paths`; an
-unrelated watched file returns `NO_RELEVANT_CHANGE`. A changed canonical source
-performs one validation/promotion cycle. Invalid evidence or a failed external
-gate leaves `last-good.json` untouched and every response is `STALE`/`INVALID`.
+The watcher hashes configured evidence plus optional `watch.paths`; `watch
+--once` returns `NO_RELEVANT_CHANGE` for an unrelated watched file, while a
+continuous watcher keeps that heartbeat in state instead of flooding stdout.
+A changed canonical source performs one validation/promotion cycle. Invalid
+evidence or a failed external gate leaves `last-good.json` untouched and every
+response is `STALE`/`INVALID`.
 `code_graph.incremental` can receive `{changed_files}`; for a persistent CALM
 daemon without that command, the result explicitly says
 `external_daemon_unverified`, rather than claiming a graph refresh occurred.

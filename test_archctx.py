@@ -4,6 +4,9 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+
+import archctx
 
 
 ROOT = Path(__file__).parent
@@ -49,6 +52,12 @@ class ArchitectureContextTest(unittest.TestCase):
             run(config, state, "watch", "--once")
             (root / "owner.py").write_text("OWNER = 'two'\n")
             self.assertEqual(run(config, state, "watch", "--once")["graph"]["freshness"], "refreshed")
+
+    def test_continuous_watcher_does_not_emit_no_relevant_change(self):
+        values = [{"status": "WATCH_READY"}, {"status": "NO_RELEVANT_CHANGE"}, {"status": "PASS"}]
+        with patch.object(archctx, "watch_once", side_effect=values), patch.object(archctx, "dump") as output, patch.object(archctx.time, "sleep"):
+            self.assertEqual(archctx.watch(Path("context.json"), None, 50, 1), 0)
+        self.assertEqual([call.args[0]["status"] for call in output.call_args_list], ["WATCH_READY", "PASS"])
 
     def test_failed_gate_preserves_last_good_and_mcp_lists_live_tools(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -109,7 +118,7 @@ class ArchitectureContextTest(unittest.TestCase):
             self.assertTrue((root / ".archctx" / "last-good.json").exists())
             self.assertEqual(json.loads(config.read_text())["repo"], "..")
             self.assertEqual((root / ".gitignore").read_text().count(".archctx/"), 1)
-            installed = (root / "AGENTS.md").read_text(); self.assertIn("# local rules", installed); self.assertIn(str(PYTHON), installed); self.assertIn("--config .archctx/architecture.json", installed)
+            installed = (root / "AGENTS.md").read_text(); self.assertIn("# local rules", installed); self.assertIn("archctx --config .archctx/architecture.json status", installed); self.assertIn("If `archctx` is unavailable", installed); self.assertNotIn(str(TOOL.resolve()), installed)
             self.assertEqual(run_raw("init", "--repo", str(root))["action"], "updated")
             self.assertEqual((root / ".gitignore").read_text().count(".archctx/"), 1)
             removed = run_raw("--config", str(config), "uninstall-codex", "--target", str(root / "AGENTS.md"))

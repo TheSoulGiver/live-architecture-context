@@ -189,15 +189,16 @@ def search(config_path: Path, explicit: str | None, query: str, limit: int = 3) 
 
 CODEX_BEGIN, CODEX_END = "<!-- archctx:begin -->", "<!-- archctx:end -->"
 
-def codex_block(relative_config: str, command: str) -> str:
+def codex_block(relative_config: str) -> str:
     return f'''{CODEX_BEGIN}
 ## Architecture context
 
-For substantive work, first run `{command} --config {relative_config} status`.
-If `FRESH`, use search or matching canonical/trace only when it narrows the task, then read only returned evidence; otherwise do normal targeted discovery.
-If `STALE`, verify cited source before using last-good; if unavailable, develop normally without architecture claims.
-Before architecture-relevant edits run `impact --files <paths>`; checkpoint with `refresh` and `changed-since` when relevant.
-This narrows first reads only: it never bypasses repo safety, tests, or release rules. Authored traces are not CALM code edges.
+For substantive work, first run `archctx --config {relative_config} status`.
+If `archctx` is unavailable, use normal targeted discovery and make no architecture claim.
+If `FRESH`, use `search`, matching `canonical`, or `impact` only when it narrows the task; read only returned evidence.
+If `STALE` or `INVALID`, source wins: verify cited source before relying on last-good. If unavailable, use normal targeted discovery and make no architecture claim.
+Before architecture-relevant edits run `impact --files <paths>`; after relevant edits run `refresh`.
+This is orientation, not a gate: it never bypasses repo safety, tests, or release rules. Authored traces are not CALM code edges.
 {CODEX_END}
 '''
 
@@ -206,7 +207,7 @@ def install_codex(config_path: Path, target: Path, check: bool) -> dict[str, Any
     components(config)
     try: relative = config_path.relative_to(repo).as_posix()
     except ValueError as error: raise ValueError("Codex config must live inside its repository (normally .archctx/architecture.json)") from error
-    block = codex_block(relative, subprocess.list2cmdline([sys.executable, str(Path(__file__).resolve())]))
+    block = codex_block(relative)
     before = target.read_text(encoding="utf-8") if target.exists() else ""
     start, end = before.find(CODEX_BEGIN), before.find(CODEX_END)
     if (start < 0) != (end < 0): raise ValueError(f"unbalanced archctx markers in {target}")
@@ -353,7 +354,8 @@ def watch_once(config_path: Path, explicit: str | None) -> dict[str, Any]:
 def watch(config_path: Path, explicit: str | None, poll_ms: int, max_events: int | None) -> int:
     count = 0
     while max_events is None or count < max_events:
-        value = watch_once(config_path, explicit); dump(value)
+        value = watch_once(config_path, explicit)
+        if value["status"] != "NO_RELEVANT_CHANGE": dump(value)
         if value["status"] not in ("WATCH_READY", "NO_RELEVANT_CHANGE"): count += 1
         time.sleep(max(50, poll_ms) / 1000)
     return 0
