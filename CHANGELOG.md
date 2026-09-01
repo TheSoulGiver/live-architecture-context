@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.1.5
+
+- Made freshness compare canonical evidence/config semantics rather than the
+  availability or representation of a Git revision, so read-only sandboxes and
+  unrelated commits do not falsely mark context stale.
+
 ## v0.1.4
 
 - Clarified that only `status` labels retained context `FRESH`/`STALE`; an

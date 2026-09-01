@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-CONFIG_VERSION, PROTOCOL_VERSION, SERVER_VERSION = 1, "1.0", "0.1.4"
+CONFIG_VERSION, PROTOCOL_VERSION, SERVER_VERSION = 1, "1.0", "0.1.5"
 SNAPSHOT_LIMIT, USAGE_LIMIT, USAGE_BYTES = 32, 128, 64 * 1024
 USAGE_OPERATIONS = {"refresh", "snapshot", "canonical", "search", "evidence", "trace", "impact", "changed-since", "delta", "drift", "watch"}
 OBSERVATIONAL_OPERATIONS = {"status", "telemetry", "history", "usage"}
@@ -201,6 +201,7 @@ def context(config: dict[str, Any], rev: str, facts: dict[str, list[dict[str, An
         result["components"].append({k: x[k] for k in ("id", "name", "purpose", "truth_sources", "tags", "code_symbol") if k in x} | {"evidence": facts[x["id"]], "confidence": "source_evidence"})
     return result
 def semantic(value: dict[str, Any]) -> str: return sha(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode())
+def architecture_semantic(value: dict[str, Any]) -> str: return semantic({key: item for key, item in value.items() if key != "revision"})
 def substitution(command: list[Any], values: dict[str, str]) -> list[str]: return [values.get(str(x), str(x)) for x in command]
 def run(command: list[Any], repo: Path, timeout: int, values: dict[str, str], extra_env: dict[str, Any] | None = None) -> tuple[list[str], subprocess.CompletedProcess[str]]:
     argv = substitution(command, values); env = os.environ.copy()
@@ -243,7 +244,7 @@ def status(config_path: Path, explicit: str | None) -> dict[str, Any]:
     except ValueError as e: repo, facts, failures = None, {}, [str(e)]
     if not old_path.exists(): return {"protocol_version": PROTOCOL_VERSION, "status": "MISSING", "freshness": "missing", "repo": str(repo) if repo else None, "next_action": "run refresh"}
     old = load(old_path); current = context(config, revision(repo, facts), facts) if repo and not failures else None
-    fresh = current is not None and semantic(current) == old.get("context_hash") and semantic(config) == old.get("config_hash")
+    fresh = current is not None and architecture_semantic(current) == architecture_semantic(old["context"]) and semantic(config) == old.get("config_hash")
     return freshness(old, "FRESH" if fresh else "STALE", None if fresh else (failures or ["source revision, config, or architecture context changed"])) | {"last_good_available": True, "last_good_context_hash": old.get("context_hash")}
 
 def refresh(config_path: Path, explicit: str | None, changed: list[str] | None = None) -> dict[str, Any]:

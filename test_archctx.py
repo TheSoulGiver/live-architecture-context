@@ -223,6 +223,19 @@ class ArchitectureContextTest(unittest.TestCase):
             self.assertEqual(value["status"], "STALE")
             self.assertEqual(value["canonical"]["id"], "owner")
 
+    def test_status_uses_evidence_not_git_availability_or_unrelated_commits(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); (root / "source.py").write_text("OWNER\n")
+            subprocess.run(["git", "init", "-q", str(root)], check=True); subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(root), "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-qm", "base"], check=True)
+            config, state = root / "context.json", root / "state"
+            config.write_text(json.dumps({"version": 1, "repo": ".", "components": [{"id": "owner", "evidence": [{"path": "source.py", "contains": "OWNER"}]}]}))
+            self.assertEqual(archctx.refresh(config, str(state))["status"], "PASS")
+            with patch.object(archctx, "git", return_value=None): self.assertEqual(archctx.status(config, str(state))["status"], "FRESH")
+            (root / "unrelated.txt").write_text("unrelated\n"); subprocess.run(["git", "-C", str(root), "add", "unrelated.txt"], check=True)
+            subprocess.run(["git", "-C", str(root), "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-qm", "unrelated"], check=True)
+            self.assertEqual(archctx.status(config, str(state))["status"], "FRESH")
+
     def test_trace_and_impact_are_authored_not_call_graph_claims(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); (root / "a.py").write_text("a\n"); (root / "b.py").write_text("b\n")
