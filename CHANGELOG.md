@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.1.3
+
+- Added bounded, queryable source-evidence snapshot history and historical
+  context retrieval by `context_hash`.
+- Added a 128-record / 64 KiB local usage ring for meaningful architecture
+  operations; it links outcomes to retained context without retaining prompts,
+  queries, source paths, evidence text, commands, or diagnostic output.
+- Stopped persisting graph/gate command and stdout tails in source-evidence
+  snapshots, and bounded malformed MCP telemetry keys.
+
 ## v0.1.2
 
 - Made `status` observational; telemetry is now a fixed-size aggregate without

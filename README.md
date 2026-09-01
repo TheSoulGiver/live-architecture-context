@@ -122,6 +122,9 @@ Every CLI/MCP response includes `protocol_version`, `revision`, `freshness`,
 
 ```sh
 archctx --config architecture.json status
+archctx --config architecture.json history --limit 8
+archctx --config architecture.json history --context-hash <context-hash>
+archctx --config architecture.json usage --operation impact --limit 8
 archctx --config architecture.json search --query "identity payment"
 archctx --config architecture.json canonical service
 archctx --config architecture.json evidence service
@@ -138,8 +141,8 @@ context is needed. `search` returns at most three matches by default and always
 reports `match_count` and `omitted_match_count`; pass `--limit 0` only when an
 unbounded result is genuinely needed.
 
-MCP tools: `status`, `refresh`, `snapshot`, `canonical`, `evidence`, `trace`,
-`impact`, `changed-since`, `drift`, and `stale` (all prefixed
+MCP tools: `status`, `refresh`, `snapshot`, `history`, `usage`, `canonical`,
+`evidence`, `trace`, `impact`, `changed-since`, `drift`, and `stale` (all prefixed
 `architecture_`). An MCP client configuration is simply:
 
 ```json
@@ -173,10 +176,18 @@ config as trusted code: it intentionally authorizes its argv programs.
 
 `archctx --config .archctx/architecture.json uninstall-codex` removes only the
 managed `AGENTS.md` block. Config, last-good history, and `.gitignore` stay in
-place. CLI/MCP telemetry is one fixed-size local aggregate of command, status,
-latency, response size, and counts. It never stores source, evidence, queries,
-or task text; `status` is read-only. The latest 32 source-evidence snapshots
-are retained for delta queries; `last-good.json` is always retained.
+place. `history` lists the latest 32 source-evidence snapshots and retrieves a
+specific historical typed context by `context_hash`; it never copies that
+context into another store. `usage` keeps at most 128 local operation receipts
+or 64 KiB, whichever is smaller, for meaningful architecture operations. A
+receipt links to its retained context hash and component IDs, but never stores a
+prompt, query, source path, evidence text, command, stdout, or stderr. `status`,
+`history`, `usage`, and idle watcher ticks are read-only. Existing legacy
+`telemetry.jsonl` can be compacted once with `usage --import-legacy`; it is not
+appended. CLI/MCP telemetry remains a fixed-size aggregate. The latest 32
+source-evidence snapshots are retained for delta queries; `last-good.json` is
+always retained. Persisted snapshots retain validator receipts, not diagnostic
+command/output tails.
 
 ## Boundaries and release notes
 

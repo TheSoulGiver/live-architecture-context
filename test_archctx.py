@@ -55,9 +55,10 @@ class ArchitectureContextTest(unittest.TestCase):
 
     def test_continuous_watcher_does_not_emit_no_relevant_change(self):
         values = [{"status": "WATCH_READY"}, {"status": "NO_RELEVANT_CHANGE"}, {"status": "PASS"}]
-        with patch.object(archctx, "watch_once", side_effect=values), patch.object(archctx, "dump") as output, patch.object(archctx.time, "sleep"):
+        with patch.object(archctx, "watch_once", side_effect=values), patch.object(archctx, "dump") as output, patch.object(archctx, "record_usage") as receipt, patch.object(archctx.time, "sleep"):
             self.assertEqual(archctx.watch(Path("context.json"), None, 50, 1), 0)
         self.assertEqual([call.args[0]["status"] for call in output.call_args_list], ["WATCH_READY", "PASS"])
+        self.assertEqual([call.args[1] for call in receipt.call_args_list], ["watch", "watch"])
 
     def test_watcher_does_not_rewrite_unchanged_live_state(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -81,7 +82,7 @@ class ArchitectureContextTest(unittest.TestCase):
             self.assertEqual(run(config, state, "status")["status"], "STALE")
             process = subprocess.run([PYTHON, str(TOOL), "--config", str(config), "--state-dir", str(state), "mcp"], input=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}) + "\n", text=True, capture_output=True, check=True)
             tools = json.loads(process.stdout)["result"]["tools"]
-            self.assertIn("architecture_refresh", {item["name"] for item in tools})
+            self.assertTrue({"architecture_refresh", "architecture_history", "architecture_usage"}.issubset({item["name"] for item in tools}))
 
     def test_search_and_codex_install_are_compact_and_idempotent(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -95,6 +96,7 @@ class ArchitectureContextTest(unittest.TestCase):
             installed = (root / "AGENTS.md").read_text()
             self.assertTrue(installed.startswith("<!-- archctx:begin -->"))
             self.assertIn("archctx:begin", installed)
+            self.assertIn("query `history` or `usage`", installed)
             external = root.parent / "external.json"; external.write_text(json.dumps({"version": 1, "repo": root.name, "components": [{"id": "owner", "evidence": [{"path": "source.py", "contains": "OWNER"}]}]}))
             failed = subprocess.run([PYTHON, str(TOOL), "--config", str(external), "--state-dir", str(state), "install-codex", "--target", str(root / "OTHER.md")], text=True, capture_output=True)
             self.assertEqual(failed.returncode, 2)
@@ -147,6 +149,56 @@ class ArchitectureContextTest(unittest.TestCase):
             summary = run(config, state, "telemetry")
             self.assertEqual(summary["events"]["search"], 1); self.assertEqual(summary["privacy"], "local aggregate metrics only; no source, evidence, query, or task text")
             self.assertEqual(summary["retention"], "fixed-size aggregate"); self.assertNotIn("private product goal", (state / "telemetry.json").read_text())
+
+    def test_history_lists_retained_snapshots_and_reads_one_as_historical(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); source = root / "source.py"; source.write_text("OWNER = 'one'\n")
+            config, state = root / "context.json", root / "state"
+            value = {"version": 1, "repo": ".", "components": [{"id": "owner", "evidence": [{"path": "source.py", "contains": "OWNER"}]}]}
+            config.write_text(json.dumps(value)); first = run(config, state, "refresh")
+            value["components"][0]["name"] = "Renamed owner"; config.write_text(json.dumps(value)); second = run(config, state, "refresh")
+            listed = run(config, state, "history", "--limit", "1")
+            self.assertEqual((listed["snapshot_count"], len(listed["snapshots"]), listed["omitted_snapshot_count"]), (2, 1, 1))
+            self.assertEqual(listed["snapshots"][0]["context_hash"], second["context_hash"])
+            historical = run(config, state, "history", "--context-hash", first["context_hash"])
+            self.assertTrue(historical["not_current_authority"]); self.assertEqual(historical["freshness"], "historical")
+            self.assertEqual(historical["context"]["components"][0]["id"], "owner")
+
+    def test_usage_is_bounded_and_does_not_keep_query_or_source_content(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); (root / "source.py").write_text("OWNER\n")
+            config, state = root / "context.json", root / "state"
+            config.write_text(json.dumps({"version": 1, "repo": ".", "components": [{"id": "owner", "evidence": [{"path": "source.py", "contains": "OWNER"}]}]}))
+            run(config, state, "refresh"); run(config, state, "search", "--query", "owner private product goal")
+            before = (state / "usage.json").read_text(); receipt = run(config, state, "usage", "--operation", "search")
+            self.assertEqual(receipt["records"][0]["result"]["component_ids"], ["owner"])
+            self.assertNotIn("private product goal", before); self.assertNotIn("source.py", before)
+            run(config, state, "status"); run(config, state, "history")
+            self.assertEqual((state / "usage.json").read_text(), before)
+            with patch.object(archctx, "USAGE_LIMIT", 2):
+                for value in ("a", "b", "c"):
+                    archctx.record_usage(state, "canonical", {"status": "FRESH", "canonical": {"id": value}}, 1)
+            self.assertEqual(len(archctx.usage_store(state)["records"]), 2)
+
+    def test_legacy_usage_import_and_telemetry_keys_are_bounded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); (root / "source.py").write_text("OWNER\n")
+            config, state = root / "context.json", root / "state"; state.mkdir()
+            config.write_text(json.dumps({"version": 1, "repo": ".", "components": [{"id": "owner", "evidence": [{"path": "source.py", "contains": "OWNER"}]}]}))
+            (state / "telemetry.jsonl").write_text("\n".join(json.dumps(value) for value in ({"at": "2026-01-01T00:00:00Z", "event": "search", "status": "FRESH", "elapsed_ms": 1}, {"at": "2026-01-01T00:01:00Z", "event": "status", "status": "FRESH", "elapsed_ms": 1})) + "\n")
+            self.assertEqual(run(config, state, "usage", "--import-legacy")["imported"], 1)
+            self.assertEqual(run(config, state, "usage")["records"][0]["origin"], "legacy")
+            self.assertEqual(archctx.telemetry_event("mcp:arbitrary-client-key"), "mcp:unknown")
+
+    def test_persisted_snapshots_exclude_validator_diagnostic_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); (root / "source.py").write_text("OWNER\n")
+            config, state = root / "context.json", root / "state"
+            config.write_text(json.dumps({"version": 1, "repo": ".", "components": [{"id": "owner", "evidence": [{"path": "source.py", "contains": "OWNER"}]}], "code_graph": {"provider": "demo", "refresh": [sys.executable, "-c", "print('graph diagnostics')"]}, "gates": [{"name": "pass", "command": [sys.executable, "-c", "print('gate diagnostics')"]}]}))
+            refreshed = run(config, state, "refresh"); record = json.loads((state / "last-good.json").read_text())
+            self.assertIn("stdout_tail", refreshed["graph"]); self.assertNotIn("stdout_tail", record["graph"]); self.assertNotIn("command", record["graph"])
+            self.assertEqual(record["gates"], [{"name": "pass", "status": "PASS"}])
+            self.assertNotIn("stdout_tail", run(config, state, "snapshot")["graph"])
 
     def test_snapshots_are_bounded_without_losing_last_good(self):
         with tempfile.TemporaryDirectory() as directory:
