@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-CONFIG_VERSION, PROTOCOL_VERSION, SERVER_VERSION = 1, "1.0", "0.1.3"
+CONFIG_VERSION, PROTOCOL_VERSION, SERVER_VERSION = 1, "1.0", "0.1.4"
 SNAPSHOT_LIMIT, USAGE_LIMIT, USAGE_BYTES = 32, 128, 64 * 1024
 USAGE_OPERATIONS = {"refresh", "snapshot", "canonical", "search", "evidence", "trace", "impact", "changed-since", "delta", "drift", "watch"}
 OBSERVATIONAL_OPERATIONS = {"status", "telemetry", "history", "usage"}
@@ -290,7 +290,7 @@ def codex_block(relative_config: str) -> str:
     return f'''{CODEX_BEGIN}
 ## Architecture context
 
-For architecture-relevant work, before broad repository discovery run `archctx --config {relative_config} status`; skip it for local, obvious work.
+For architecture-relevant work, before broad repository discovery run `archctx --config {relative_config} status`; skip it for local, obvious work. Use its `FRESH`/`STALE` label; do not infer index freshness from unrelated Git dirtiness.
 If `FRESH` and it narrows the task, use `search`, then only matching `canonical`, `impact`, and cited evidence. Otherwise use normal targeted discovery; source wins.
 For architecture-relevant edits, run `impact --files <paths>` before; let the watcher refresh, or run `refresh` when no watcher is active. This is orientation, never a gate.
 For recent architecture changes or prior architecture investigation, query `history` or `usage`; do not read raw `.archctx` state.

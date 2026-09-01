@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.1.4
+
+- Clarified that only `status` labels retained context `FRESH`/`STALE`; an
+  unrelated Git diff is not an index-freshness signal.
+
 ## v0.1.3
 
 - Added bounded, queryable source-evidence snapshot history and historical

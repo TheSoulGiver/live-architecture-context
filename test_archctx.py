@@ -97,6 +97,7 @@ class ArchitectureContextTest(unittest.TestCase):
             self.assertTrue(installed.startswith("<!-- archctx:begin -->"))
             self.assertIn("archctx:begin", installed)
             self.assertIn("query `history` or `usage`", installed)
+            self.assertIn("do not infer index freshness from unrelated Git dirtiness", installed)
             external = root.parent / "external.json"; external.write_text(json.dumps({"version": 1, "repo": root.name, "components": [{"id": "owner", "evidence": [{"path": "source.py", "contains": "OWNER"}]}]}))
             failed = subprocess.run([PYTHON, str(TOOL), "--config", str(external), "--state-dir", str(state), "install-codex", "--target", str(root / "OTHER.md")], text=True, capture_output=True)
             self.assertEqual(failed.returncode, 2)
