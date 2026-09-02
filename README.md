@@ -27,7 +27,7 @@ checked in: [benchmark data](benchmarks/observed-context-ab.json) ·
 ## Install in 30 seconds
 
 ```sh
-python -m pip install live-architecture-context
+python -m pip install "git+https://github.com/TheSoulGiver/live-architecture-context.git@v0.1.6"
 cd your-repository
 archctx init --component service --evidence 'src/service.py::def serve'
 ```

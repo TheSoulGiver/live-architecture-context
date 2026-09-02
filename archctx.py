@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-CONFIG_VERSION, PROTOCOL_VERSION, SERVER_VERSION = 1, "1.0", "0.1.5"
+CONFIG_VERSION, PROTOCOL_VERSION, SERVER_VERSION = 1, "1.0", "0.1.6"
 SNAPSHOT_LIMIT, USAGE_LIMIT, USAGE_BYTES = 32, 128, 64 * 1024
 USAGE_OPERATIONS = {"refresh", "snapshot", "canonical", "search", "evidence", "trace", "impact", "changed-since", "delta", "drift", "watch"}
 OBSERVATIONAL_OPERATIONS = {"status", "telemetry", "history", "usage"}

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.1.6
 
 - Let the CLI use only the current repository's standard
   `.archctx/architecture.json` when `--config` is omitted, so an on-demand

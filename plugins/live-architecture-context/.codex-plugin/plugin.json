@@ -1,6 +1,6 @@
 {
   "name": "live-architecture-context",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "On-demand, source-grounded architecture context for coding agents.",
   "author": {
     "name": "SNGX",
