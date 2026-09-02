@@ -11,6 +11,7 @@
 - Added fixed-size anonymous result categories to telemetry and usage receipts.
   `actionable_result_rate` is explicitly a result proxy, not a claim that an
   Agent used the result or that a task succeeded.
+- Excluded Codex guidance install/uninstall setup from architecture-use telemetry.
 
 ## v0.1.5
 

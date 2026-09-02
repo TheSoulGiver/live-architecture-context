@@ -582,7 +582,7 @@ def main() -> int:
         actions = {"status": lambda: status(config_path, args.state_dir), "refresh": lambda: refresh(config_path, args.state_dir), "snapshot": lambda: snapshot(config_path, args.state_dir), "canonical": lambda: canonical(config_path, args.state_dir, args.id), "search": lambda: search(config_path, args.state_dir, args.query, args.limit), "evidence": lambda: mcp_value(config_path, args.state_dir, "architecture_evidence", {"id": args.id}), "trace": lambda: trace(config_path, args.state_dir, args.id, args.direction, args.code), "impact": lambda: impact(config_path, args.state_dir, args.base, args.files), "changed-since": lambda: changed_since(config_path, args.state_dir, args.revision), "delta": lambda: delta(config_path, args.state_dir, args.revision), "drift": lambda: drift(config_path, args.base), "install-codex": lambda: install_codex(config_path, install_target.resolve(), args.check), "uninstall-codex": lambda: uninstall_codex(install_target.resolve(), args.check)}
         started = time.monotonic(); value = actions[args.command]()
         elapsed = int((time.monotonic() - started) * 1000)
-        if args.command != "status": telemetry(state(config_path, args.state_dir), args.command, value, elapsed)
+        if args.command not in ("status", "install-codex", "uninstall-codex"): telemetry(state(config_path, args.state_dir), args.command, value, elapsed)
         record_usage(state(config_path, args.state_dir), args.command, value, elapsed, subject_id=args.id if args.command in ("canonical", "evidence", "trace") else None)
         dump(value); return 0
     except (ValueError, OSError) as e: dump({"protocol_version": PROTOCOL_VERSION, "status": "ERROR", "error": str(e)}); return 2

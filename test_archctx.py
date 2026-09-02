@@ -150,9 +150,11 @@ class ArchitectureContextTest(unittest.TestCase):
             config, state = root / "context.json", root / "state"
             config.write_text(json.dumps({"version": 1, "repo": ".", "components": [{"id": "owner", "evidence": [{"path": "source.py", "contains": "OWNER"}]}]}))
             run(config, state, "refresh"); run(config, state, "search", "--query", "owner private product goal"); run(config, state, "search", "--query", "no-match")
+            run(config, state, "install-codex", "--target", str(root / "AGENTS.md"))
             summary = run(config, state, "telemetry")
             self.assertEqual(summary["events"]["search"], 2); self.assertEqual(summary["outcomes"]["matched"], 1); self.assertEqual(summary["outcomes"]["empty"], 1); self.assertEqual(summary["privacy"], "local aggregate metrics only; no source, evidence, query, or task text")
             self.assertEqual((summary["actionable_result_count"], summary["eligible_result_count"]), (2, 3)); self.assertAlmostEqual(summary["actionable_result_rate"], 2 / 3)
+            self.assertNotIn("install-codex", summary["events"])
             self.assertEqual(summary["retention"], "fixed-size aggregate"); self.assertNotIn("private product goal", (state / "telemetry.json").read_text())
 
     def test_history_lists_retained_snapshots_and_reads_one_as_historical(self):
