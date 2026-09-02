@@ -96,8 +96,10 @@ class ArchitectureContextTest(unittest.TestCase):
             installed = (root / "AGENTS.md").read_text()
             self.assertTrue(installed.startswith("<!-- archctx:begin -->"))
             self.assertIn("archctx:begin", installed)
-            self.assertIn("query `history` or `usage`", installed)
-            self.assertIn("do not infer index freshness from unrelated Git dirtiness", installed)
+            self.assertIn("shrinks the next broad source read", installed)
+            self.assertIn("`canonical`/`evidence` for a known component", installed)
+            self.assertIn("`changed-since`/`drift` only with a supplied base revision", installed)
+            self.assertIn("not unrelated Git dirtiness", installed)
             external = root.parent / "external.json"; external.write_text(json.dumps({"version": 1, "repo": root.name, "components": [{"id": "owner", "evidence": [{"path": "source.py", "contains": "OWNER"}]}]}))
             failed = subprocess.run([PYTHON, str(TOOL), "--config", str(external), "--state-dir", str(state), "install-codex", "--target", str(root / "OTHER.md")], text=True, capture_output=True)
             self.assertEqual(failed.returncode, 2)
@@ -122,6 +124,7 @@ class ArchitectureContextTest(unittest.TestCase):
             process = subprocess.run([PYTHON, str(TOOL), "--config", str(config), "--state-dir", str(state), "mcp"], input=json.dumps(request) + "\n", text=True, capture_output=True, check=True)
             mcp_value = json.loads(json.loads(process.stdout)["result"]["content"][0]["text"])
             self.assertEqual((len(mcp_value["matches"]), mcp_value["omitted_match_count"]), (3, 1))
+            self.assertEqual(run(config, state, "telemetry")["outcomes"]["matched"], 3)
 
     def test_init_is_one_time_evidence_bound_and_uninstall_only_removes_managed_block(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -133,7 +136,7 @@ class ArchitectureContextTest(unittest.TestCase):
             self.assertTrue((root / ".archctx" / "last-good.json").exists())
             self.assertEqual(json.loads(config.read_text())["repo"], "..")
             self.assertEqual((root / ".gitignore").read_text().count(".archctx/"), 1)
-            installed = (root / "AGENTS.md").read_text(); self.assertIn("# local rules", installed); self.assertIn("archctx --config .archctx/architecture.json status", installed); self.assertIn("skip it for local, obvious work", installed); self.assertNotIn(str(TOOL.resolve()), installed)
+            installed = (root / "AGENTS.md").read_text(); self.assertIn("# local rules", installed); self.assertIn("archctx --config .archctx/architecture.json status", installed); self.assertIn("skip obvious local work", installed); self.assertNotIn(str(TOOL.resolve()), installed)
             self.assertEqual(run_raw("init", "--repo", str(root))["action"], "updated")
             self.assertEqual((root / ".gitignore").read_text().count(".archctx/"), 1)
             removed = run_raw("--config", str(config), "uninstall-codex", "--target", str(root / "AGENTS.md"))
@@ -146,9 +149,10 @@ class ArchitectureContextTest(unittest.TestCase):
             root = Path(directory); (root / "source.py").write_text("OWNER\n")
             config, state = root / "context.json", root / "state"
             config.write_text(json.dumps({"version": 1, "repo": ".", "components": [{"id": "owner", "evidence": [{"path": "source.py", "contains": "OWNER"}]}]}))
-            run(config, state, "refresh"); run(config, state, "search", "--query", "private product goal")
+            run(config, state, "refresh"); run(config, state, "search", "--query", "owner private product goal"); run(config, state, "search", "--query", "no-match")
             summary = run(config, state, "telemetry")
-            self.assertEqual(summary["events"]["search"], 1); self.assertEqual(summary["privacy"], "local aggregate metrics only; no source, evidence, query, or task text")
+            self.assertEqual(summary["events"]["search"], 2); self.assertEqual(summary["outcomes"]["matched"], 1); self.assertEqual(summary["outcomes"]["empty"], 1); self.assertEqual(summary["privacy"], "local aggregate metrics only; no source, evidence, query, or task text")
+            self.assertEqual((summary["actionable_result_count"], summary["eligible_result_count"]), (2, 3)); self.assertAlmostEqual(summary["actionable_result_rate"], 2 / 3)
             self.assertEqual(summary["retention"], "fixed-size aggregate"); self.assertNotIn("private product goal", (state / "telemetry.json").read_text())
 
     def test_history_lists_retained_snapshots_and_reads_one_as_historical(self):
@@ -173,6 +177,7 @@ class ArchitectureContextTest(unittest.TestCase):
             run(config, state, "refresh"); run(config, state, "search", "--query", "owner private product goal")
             before = (state / "usage.json").read_text(); receipt = run(config, state, "usage", "--operation", "search")
             self.assertEqual(receipt["records"][0]["result"]["component_ids"], ["owner"])
+            self.assertEqual(receipt["records"][0]["result"]["outcome"], "matched")
             self.assertNotIn("private product goal", before); self.assertNotIn("source.py", before)
             run(config, state, "status"); run(config, state, "history")
             self.assertEqual((state / "usage.json").read_text(), before)

@@ -1,0 +1,29 @@
+{
+  "name": "live-architecture-context",
+  "version": "0.1.5",
+  "description": "On-demand, source-grounded architecture context for coding agents.",
+  "author": {
+    "name": "SNGX",
+    "url": "https://github.com/TheSoulGiver"
+  },
+  "homepage": "https://github.com/TheSoulGiver/live-architecture-context",
+  "repository": "https://github.com/TheSoulGiver/live-architecture-context",
+  "license": "MIT",
+  "keywords": ["architecture", "coding-agent", "canonical", "evidence"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Live Architecture Context",
+    "shortDescription": "Find the source-backed architecture answer that matters now",
+    "longDescription": "Use compact, freshness-labelled canonical context only when it narrows a coding investigation. One observed workflow used 25% less input context and 43% fewer distinct file-token reads; it is not a universal benchmark.",
+    "developerName": "SNGX",
+    "category": "Productivity",
+    "capabilities": ["Instructions"],
+    "websiteURL": "https://github.com/TheSoulGiver/live-architecture-context",
+    "defaultPrompt": [
+      "Find the canonical implementation for this capability.",
+      "What architecture components will this change affect?",
+      "Is this architecture context still trustworthy?"
+    ],
+    "brandColor": "#0F766E"
+  }
+}

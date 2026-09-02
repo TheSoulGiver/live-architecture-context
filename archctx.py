@@ -11,6 +11,8 @@ CONFIG_VERSION, PROTOCOL_VERSION, SERVER_VERSION = 1, "1.0", "0.1.5"
 SNAPSHOT_LIMIT, USAGE_LIMIT, USAGE_BYTES = 32, 128, 64 * 1024
 USAGE_OPERATIONS = {"refresh", "snapshot", "canonical", "search", "evidence", "trace", "impact", "changed-since", "delta", "drift", "watch"}
 OBSERVATIONAL_OPERATIONS = {"status", "telemetry", "history", "usage"}
+ACTIONABLE_OUTCOMES = {"promoted", "context_available", "matched", "evidence", "related", "affected", "changed", "candidate", "recovery_required"}
+NO_FINDING_OUTCOMES = {"empty", "unrelated", "unaffected", "unchanged", "none"}
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -44,6 +46,21 @@ def telemetry_event(event: str) -> str:
         name = event.removeprefix("mcp:").removeprefix("architecture_")
         return f"mcp:{name}" if name in allowed else "mcp:unknown"
     return event if event in allowed else "unknown"
+def has_items(value: dict[str, Any], key: str) -> bool: return isinstance(value.get(key), list) and bool(value[key])
+def result_outcome(event: str, value: dict[str, Any]) -> str | None:
+    operation = usage_operation(event)
+    if operation is None or operation == "watch": return None
+    if str(value.get("status", "")) in ("ERROR", "INVALID", "MISSING", "STALE"): return "recovery_required"
+    if operation == "refresh": return "promoted" if value.get("status") == "PASS" else "none"
+    if operation == "snapshot": return "context_available" if isinstance(value.get("context"), dict) else "empty"
+    if operation == "search": return "matched" if isinstance(value.get("match_count"), int) and value["match_count"] > 0 else "empty"
+    if operation == "canonical": return "evidence" if isinstance(value.get("canonical"), dict) else "empty"
+    if operation == "evidence": return "evidence" if has_items(value, "evidence") else "empty"
+    if operation == "trace": return "related" if isinstance(value.get("components"), list) and len(value["components"]) > 1 else "unrelated"
+    if operation == "impact": return "affected" if has_items(value, "direct_components") else "unaffected"
+    if operation in ("changed-since", "delta"): return "changed" if any(has_items(value, key) for key in ("changed_components", "added_relations", "removed_relations")) else "unchanged"
+    if operation == "drift": return "candidate" if has_items(value, "candidates") else "none"
+    return None
 def telemetry(directory: Path, event: str, value: dict[str, Any], elapsed_ms: int) -> None:
     """Best-effort fixed-size metrics; never retain source, evidence, query, or task text."""
     try:
@@ -51,11 +68,14 @@ def telemetry(directory: Path, event: str, value: dict[str, Any], elapsed_ms: in
         events = before.get("events") if isinstance(before.get("events"), dict) else {}
         statuses = before.get("statuses") if isinstance(before.get("statuses"), dict) else {}
         counts = before.get("counts") if isinstance(before.get("counts"), dict) else {}
+        outcomes = before.get("outcomes") if isinstance(before.get("outcomes"), dict) else {}
         event = telemetry_event(event); events[event] = int(events.get(event, 0)) + 1
         status = str(value.get("status")); statuses[status] = int(statuses.get(status, 0)) + 1
+        outcome = result_outcome(event, value)
+        if outcome: outcomes[outcome] = int(outcomes.get(outcome, 0)) + 1
         for key in ("matches", "changed_files", "direct_components", "candidates"):
             if isinstance(value.get(key), list): counts[key] = int(counts.get(key, 0)) + len(value[key])
-        atomic(path, {"version": 1, "updated_at": datetime.now(timezone.utc).isoformat(), "events": events, "statuses": statuses, "counts": counts, "event_count": int(before.get("event_count", 0)) + 1, "response_bytes": int(before.get("response_bytes", 0)) + len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()), "latency_ms": int(before.get("latency_ms", 0)) + elapsed_ms})
+        atomic(path, {"version": 1, "updated_at": datetime.now(timezone.utc).isoformat(), "events": events, "statuses": statuses, "counts": counts, "outcomes": outcomes, "event_count": int(before.get("event_count", 0)) + 1, "response_bytes": int(before.get("response_bytes", 0)) + len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()), "latency_ms": int(before.get("latency_ms", 0)) + elapsed_ms})
     except (OSError, ValueError): pass
 def telemetry_summary(directory: Path) -> dict[str, Any]:
     try: value = load(directory / "telemetry.json") if (directory / "telemetry.json").exists() else {}
@@ -63,8 +83,10 @@ def telemetry_summary(directory: Path) -> dict[str, Any]:
     events = value.get("events") if isinstance(value.get("events"), dict) else {}
     statuses = value.get("statuses") if isinstance(value.get("statuses"), dict) else {}
     counts = value.get("counts") if isinstance(value.get("counts"), dict) else {}
+    outcomes = value.get("outcomes") if isinstance(value.get("outcomes"), dict) else {}
     count, elapsed_total = int(value.get("event_count", 0)), int(value.get("latency_ms", 0))
-    return {"protocol_version": PROTOCOL_VERSION, "status": "PASS", "privacy": "local aggregate metrics only; no source, evidence, query, or task text", "events": dict(sorted(events.items())), "statuses": dict(sorted(statuses.items())), "counts": dict(sorted(counts.items())), "event_count": count, "response_bytes": int(value.get("response_bytes", 0)), "average_latency_ms": elapsed_total // count if count else 0, "retention": "fixed-size aggregate"}
+    actionable = sum(int(outcomes.get(key, 0)) for key in ACTIONABLE_OUTCOMES); eligible = actionable + sum(int(outcomes.get(key, 0)) for key in NO_FINDING_OUTCOMES)
+    return {"protocol_version": PROTOCOL_VERSION, "status": "PASS", "privacy": "local aggregate metrics only; no source, evidence, query, or task text", "measurement": "outcome is a result proxy, not proof an agent used it", "events": dict(sorted(events.items())), "statuses": dict(sorted(statuses.items())), "counts": dict(sorted(counts.items())), "outcomes": dict(sorted(outcomes.items())), "actionable_result_count": actionable, "eligible_result_count": eligible, "actionable_result_rate": actionable / eligible if eligible else None, "event_count": count, "response_bytes": int(value.get("response_bytes", 0)), "average_latency_ms": elapsed_total // count if count else 0, "retention": "fixed-size aggregate"}
 
 def usage_path(directory: Path) -> Path: return directory / "usage.json"
 def bounded_strings(values: Any, limit: int = 8) -> list[str]:
@@ -78,7 +100,7 @@ def bounded_strings(values: Any, limit: int = 8) -> list[str]:
 def usage_operation(event: str) -> str | None:
     name = event.removeprefix("mcp:").removeprefix("architecture_")
     return name if name in USAGE_OPERATIONS else None
-def usage_result(value: dict[str, Any]) -> dict[str, Any]:
+def usage_result(event: str, value: dict[str, Any]) -> dict[str, Any]:
     result = {key: value[key] for key in ("status", "freshness", "revision", "from_revision", "to_revision", "context_hash", "last_good_context_hash") if isinstance(value.get(key), (str, int, float, bool))}
     component_ids = []
     canonical = value.get("canonical")
@@ -94,6 +116,7 @@ def usage_result(value: dict[str, Any]) -> dict[str, Any]:
     for key, target in (("changed_files", "changed_file_count"), ("watch_changed_files", "watch_changed_file_count"), ("candidates", "candidate_count"), ("failures", "failure_count"), ("evidence", "evidence_count")):
         if isinstance(value.get(key), list): result[target] = len(value[key])
     if isinstance(value.get("graph"), dict): result["graph_freshness"] = value["graph"].get("freshness")
+    if outcome := result_outcome(event, value): result["outcome"] = outcome
     return result
 def usage_store(directory: Path) -> dict[str, Any]:
     try: value = load(usage_path(directory)) if usage_path(directory).exists() else {}
@@ -109,7 +132,7 @@ def record_usage(directory: Path, event: str, value: dict[str, Any], elapsed_ms:
     if operation is None: return
     try:
         current = usage_store(directory); last = load(last_path(directory)) if last_path(directory).exists() else {}
-        result = usage_result(value)
+        result = usage_result(event, value)
         record = {"at": datetime.now(timezone.utc).isoformat(), "origin": origin, "operation": operation, "elapsed_ms": elapsed_ms, "result": result}
         if isinstance(subject_id, str) and subject_id: record["subject_id"] = subject_id[:160]
         if isinstance(last.get("revision"), str) and "revision" not in result: record["context_revision"] = last["revision"]
@@ -291,10 +314,9 @@ def codex_block(relative_config: str) -> str:
     return f'''{CODEX_BEGIN}
 ## Architecture context
 
-For architecture-relevant work, before broad repository discovery run `archctx --config {relative_config} status`; skip it for local, obvious work. Use its `FRESH`/`STALE` label; do not infer index freshness from unrelated Git dirtiness.
-If `FRESH` and it narrows the task, use `search`, then only matching `canonical`, `impact`, and cited evidence. Otherwise use normal targeted discovery; source wins.
-For architecture-relevant edits, run `impact --files <paths>` before; let the watcher refresh, or run `refresh` when no watcher is active. This is orientation, never a gate.
-For recent architecture changes or prior architecture investigation, query `history` or `usage`; do not read raw `.archctx` state.
+Use Archctx only when it shrinks the next broad source read (canonical/truth/evidence, cross-component path, freshness/delta, or legacy ambiguity); skip obvious local work.
+Run `archctx --config {relative_config} status`. Use its `FRESH`/`STALE` label, not unrelated Git dirtiness. If `FRESH`, use the smallest matching query: `search` to locate; `canonical`/`evidence` for a known component; `impact --files <paths>` before cross-component edits; `history` for prior context; `changed-since`/`drift` only with a supplied base revision.
+Source wins; stale, missing, or irrelevant context means normal targeted discovery. Let the watcher refresh; use `refresh` only without one. Orientation, never a gate.
 {CODEX_END}
 '''
 

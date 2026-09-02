@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Added three on-demand Codex skills (context, impact, recovery) and a thin
+  no-hook plugin manifest; the managed AGENTS fallback now uses a short
+  architecture reflex instead of a per-task procedure.
+- Added fixed-size anonymous result categories to telemetry and usage receipts.
+  `actionable_result_rate` is explicitly a result proxy, not a claim that an
+  Agent used the result or that a task succeeded.
+
 ## v0.1.5
 
 - Made freshness compare canonical evidence/config semantics rather than the

@@ -1,11 +1,7 @@
 <!-- archctx:begin -->
 ## Architecture context
 
-For each substantive task, before broad repository archaeology:
-
-1. Run `<python> ../archctx.py --config architecture.json status` (`py -3` on Windows; `python3` on Linux/macOS).
-2. Run `<python> ../archctx.py --config architecture.json search --query "<current task>"`; query `canonical` and `trace` only for matches.
-3. Before an architecture-relevant edit, use `impact --files <changed paths>`; after the checkpoint run `refresh` and, when relevant, `changed-since`.
-
-Treat `STALE` as last-known-good context, not current truth: inspect the cited source before relying on it. If archctx is unavailable or has no config, continue normal development and do not invent architecture facts. Authored traces are not CALM code edges; request code edges separately with `trace --code` when configured.
+Use Archctx only when it shrinks the next broad source read (canonical/truth/evidence, cross-component path, freshness/delta, or legacy ambiguity); skip obvious local work.
+Run `archctx --config architecture.json status`. Use its `FRESH`/`STALE` label, not unrelated Git dirtiness. If `FRESH`, use the smallest matching query: `search` to locate; `canonical`/`evidence` for a known component; `impact --files <paths>` before cross-component edits; `history` for prior context; `changed-since`/`drift` only with a supplied base revision.
+Source wins; stale, missing, or irrelevant context means normal targeted discovery. Let the watcher refresh; use `refresh` only without one. Orientation, never a gate.
 <!-- archctx:end -->

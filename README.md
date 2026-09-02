@@ -34,9 +34,23 @@ archctx init --component service --evidence 'src/service.py::def serve'
 
 `init` creates private `.archctx/architecture.json`, records a passing
 last-known-good snapshot, and adds a small managed instruction block to the
-existing `AGENTS.md`. A fresh Codex session then runs `status` before
-substantive work and asks for canonical evidence only when it narrows the task.
-It never invents a canonical system from filenames.
+existing `AGENTS.md`. A fresh Codex session learns Archctx exists, but calls it
+only when a system-level question can shrink the next source read. It never
+invents a canonical system from filenames.
+
+## On-demand Codex skills
+
+The bundled `.codex-plugin/plugin.json` points only at three small skills. It
+has no lifecycle hook and registers no always-on MCP tool set:
+
+- `architecture-context` for canonical/truth/evidence, unfamiliar cross-module
+  systems, recent changes, and legacy ambiguity.
+- `architecture-impact` for a boundary-crossing edit or diff.
+- `architecture-recovery` for stale, invalid, missing, or contradicted context.
+
+Each skill reuses the existing CLI/MCP and starts with one test: will this
+remove the next broad source read? If not, it stays out of the way. The managed
+`AGENTS.md` block is the same compact fallback for hosts without plugin skills.
 
 ## Why LAC exists
 
@@ -187,7 +201,9 @@ prompt, query, source path, evidence text, command, stdout, or stderr. `status`,
 appended. CLI/MCP telemetry remains a fixed-size aggregate. The latest 32
 source-evidence snapshots are retained for delta queries; `last-good.json` is
 always retained. Persisted snapshots retain validator receipts, not diagnostic
-command/output tails.
+command/output tails. Telemetry also reports bounded result categories and an
+`actionable_result_rate`; it is a result proxy, not evidence that an Agent used
+the result or that a task succeeded.
 
 ## Boundaries and release notes
 
