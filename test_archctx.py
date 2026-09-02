@@ -144,6 +144,16 @@ class ArchitectureContextTest(unittest.TestCase):
             self.assertEqual((root / "AGENTS.md").read_text(), "# local rules\n")
             self.assertEqual(run_raw("--config", str(config), "uninstall-codex", "--target", str(root / "AGENTS.md"))["action"], "unchanged")
 
+    def test_cli_uses_only_standard_repo_config_when_omitted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); (root / "source.py").write_text("OWNER\n")
+            config = root / ".archctx" / "architecture.json"; config.parent.mkdir()
+            config.write_text(json.dumps({"version": 1, "repo": "..", "components": [{"id": "owner", "evidence": [{"path": "source.py", "contains": "OWNER"}]}]}))
+            process = subprocess.run([PYTHON, str(TOOL), "refresh"], cwd=root, text=True, capture_output=True, check=True)
+            self.assertEqual(json.loads(process.stdout)["status"], "PASS")
+            missing = subprocess.run([PYTHON, str(TOOL), "status"], cwd=root.parent, text=True, capture_output=True)
+            self.assertEqual(missing.returncode, 2); self.assertIn(".archctx/architecture.json", missing.stdout)
+
     def test_telemetry_is_local_compact_and_never_keeps_raw_task_text(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); (root / "source.py").write_text("OWNER\n")

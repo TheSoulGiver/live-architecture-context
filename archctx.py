@@ -548,7 +548,7 @@ def serve_mcp(config_path: Path, explicit: str | None) -> int:
     return 0
 
 def main() -> int:
-    parser = argparse.ArgumentParser(); parser.add_argument("--config"); parser.add_argument("--state-dir"); sub = parser.add_subparsers(dest="command", required=True)
+    parser = argparse.ArgumentParser(); parser.add_argument("--config", help="defaults to .archctx/architecture.json in the current repository"); parser.add_argument("--state-dir"); sub = parser.add_subparsers(dest="command", required=True)
     for name in ("status", "refresh", "snapshot", "mcp", "telemetry"): sub.add_parser(name)
     x = sub.add_parser("history"); x.add_argument("--context-hash"); x.add_argument("--limit", type=int, default=10)
     x = sub.add_parser("usage"); x.add_argument("--operation"); x.add_argument("--limit", type=int, default=10); x.add_argument("--import-legacy", action="store_true")
@@ -565,8 +565,8 @@ def main() -> int:
         if args.command == "init":
             repo = Path(args.repo).resolve(); target = Path(args.target); target = target if target.is_absolute() else repo / target
             dump(init(repo, target, args.component, args.truth_source, args.evidence, args.check)); return 0
-        if not args.config: raise ValueError("--config is required except for init")
-        config_path = Path(args.config).resolve()
+        config_path = Path(args.config).resolve() if args.config else (Path.cwd() / ".archctx" / "architecture.json").resolve()
+        if not config_path.is_file(): raise ValueError("--config is required except for init (or run from a repository with .archctx/architecture.json)")
         if args.command == "mcp": return serve_mcp(config_path, args.state_dir)
         if args.command == "telemetry": dump(telemetry_summary(state(config_path, args.state_dir))); return 0
         if args.command == "history": dump(history(state(config_path, args.state_dir), args.context_hash, args.limit)); return 0

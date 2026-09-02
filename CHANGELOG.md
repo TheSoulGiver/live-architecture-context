@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Let the CLI use only the current repository's standard
+  `.archctx/architecture.json` when `--config` is omitted, so an on-demand
+  Codex skill can make its first compact query without a broad config search.
 - Added three on-demand Codex skills (context, impact, recovery) and a thin
   no-hook plugin manifest; the managed AGENTS fallback now uses a short
   architecture reflex instead of a per-task procedure.

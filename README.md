@@ -167,6 +167,11 @@ context is needed. `search` returns at most three matches by default and always
 reports `match_count` and `omitted_match_count`; pass `--limit 0` only when an
 unbounded result is genuinely needed.
 
+In a repository initialized with the standard `.archctx/architecture.json`, the
+CLI accepts `archctx status` (and the other non-`init` commands) without
+`--config`; it never searches elsewhere for a config. Explicit `--config`
+remains the portable form for a nonstandard location.
+
 MCP tools: `status`, `refresh`, `snapshot`, `history`, `usage`, `canonical`,
 `evidence`, `trace`, `impact`, `changed-since`, `drift`, and `stale` (all prefixed
 `architecture_`). An MCP client configuration is simply:

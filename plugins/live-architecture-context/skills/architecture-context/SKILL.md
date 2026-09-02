@@ -12,7 +12,7 @@ license: MIT
 
 Use architecture context only when it will eliminate the next broad source read.
 
-1. If this repository has an Archctx command/config, run its small `status` query.
+1. If this repository has `.archctx/architecture.json`, run `archctx status`; if its local guidance names another config, use that exact path instead.
 2. When it is `FRESH`, make one smallest query: `search` to locate a capability; `canonical` or
    `evidence` for a known component; `trace` only when the declared component relation is the
    question; `changed-since` or `drift` only with a supplied base revision.

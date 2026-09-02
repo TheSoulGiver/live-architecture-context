@@ -9,7 +9,7 @@ license: MIT
 
 # Architecture recovery
 
-Start with the repository's Archctx `status` result. A `STALE`, `INVALID`, or missing index is a warning,
+Start with `archctx status` when `.archctx/architecture.json` exists (or the exact configured command from local guidance). A `STALE`, `INVALID`, or missing index is a warning,
 not a prompt to guess architecture.
 
 - Verify the cited canonical source directly before relying on retained context.
