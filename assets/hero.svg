@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 920" role="img" aria-labelledby="title desc">
+  <title id="title">Live Architecture Context gives coding agents a trusted starting point</title>
+  <desc id="desc">Without Live Architecture Context a new coding agent searches broadly and can follow legacy or parallel code. With it, the agent starts from a current goal, compact canonical context, and exact evidence.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#08111f"/><stop offset="1" stop-color="#142440"/></linearGradient>
+    <linearGradient id="good" x1="0" y1="0" x2="1" y2="0"><stop stop-color="#35d4ba"/><stop offset="1" stop-color="#89f1d7"/></linearGradient>
+    <marker id="a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="m0 0 8 4-8 4z" fill="#68dec7"/></marker>
+    <marker id="w" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="m0 0 8 4-8 4z" fill="#fa9d88"/></marker>
+    <style>.k{font:600 15px ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:1.4px;fill:#a2b3ce}.h{font:700 28px Inter,Segoe UI,Arial,sans-serif;fill:#f8fafc}.l{font:700 18px Inter,Segoe UI,Arial,sans-serif;fill:#f8fafc}.s{font:500 15px Inter,Segoe UI,Arial,sans-serif;fill:#c5d1e3}.m{font:600 13px ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.5px;fill:#aebbd1}.node{fill:#13233a;stroke:#445775;stroke-width:1.5}.bad{fill:#31202b;stroke:#b2696e;stroke-width:1.5}.ok{fill:#103a36;stroke:#45d4b9;stroke-width:1.5}</style>
+  </defs>
+  <rect width="640" height="920" rx="20" fill="url(#bg)"/>
+  <text x="36" y="44" class="k">LIVE ARCHITECTURE CONTEXT</text><text x="36" y="82" class="h">Give every new Agent a trusted starting point.</text>
+  <g transform="translate(36 118)"><rect width="568" height="314" rx="18" fill="#0d182a" stroke="#40506a"/><rect x="22" y="20" width="148" height="28" rx="14" fill="#4b2730"/><text x="40" y="40" class="k" fill="#ffc0b2">WITHOUT LAC</text><text x="22" y="80" class="l">Repeated repository archaeology</text><text x="22" y="105" class="s">A new session reconstructs system intent from a broad search.</text>
+    <rect x="22" y="142" width="156" height="72" rx="12" class="node"/><text x="38" y="171" class="l" style="font-size:16px">New session</text><text x="38" y="194" class="m">no orientation</text>
+    <rect x="206" y="142" width="156" height="72" rx="12" class="bad"/><text x="222" y="171" class="l" style="font-size:16px">Broad search</text><text x="222" y="194" class="m">many files</text>
+    <rect x="390" y="142" width="156" height="72" rx="12" class="bad"/><text x="406" y="171" class="l" style="font-size:16px">More context</text><text x="406" y="194" class="m">weak signal</text>
+    <path d="M180 178h20M364 178h20" stroke="#fa9d88" stroke-width="2" marker-end="url(#w)"/>
+    <rect x="22" y="246" width="524" height="46" rx="10" fill="#331f2b" stroke="#b2696e"/><text x="40" y="275" class="l" style="font-size:16px">canonical vs legacy ambiguity → possible parallel implementation</text>
+  </g>
+  <g transform="translate(36 458)"><rect width="568" height="378" rx="18" fill="#0b2428" stroke="#42cdb3"/><rect x="22" y="20" width="126" height="28" rx="14" fill="#12443f"/><text x="40" y="40" class="k" fill="#a9f7df">WITH LAC</text><text x="22" y="80" class="l">Evidence-bound orientation</text><text x="22" y="105" class="s">Start narrow. Read source only where the task needs proof.</text>
+    <rect x="22" y="142" width="156" height="72" rx="12" class="ok"/><text x="38" y="171" class="l" style="font-size:16px">New session</text><text x="38" y="194" class="m">current goal</text>
+    <rect x="206" y="142" width="156" height="72" rx="12" class="ok"/><text x="222" y="171" class="l" style="font-size:16px">Canonical context</text><text x="222" y="194" class="m">compact + typed</text>
+    <rect x="390" y="142" width="156" height="72" rx="12" class="ok"/><text x="406" y="171" class="l" style="font-size:16px">Source evidence</text><text x="406" y="194" class="m">exact proof</text>
+    <path d="M180 178h20M364 178h20" stroke="#68dec7" stroke-width="2" marker-end="url(#a)"/>
+    <rect x="22" y="246" width="524" height="52" rx="10" fill="#123e38" stroke="#45d4b9"/><text x="40" y="276" class="l" style="font-size:16px">Focused source reading → development from a current starting point</text>
+    <g transform="translate(22 326)"><circle cx="8" cy="0" r="7" fill="#56dfc2"/><text x="24" y="5" class="k" fill="#b8f8e6">FRESH</text><circle cx="188" cy="0" r="7" fill="#f2bd55"/><text x="204" y="5" class="k" fill="#ffe0a2">STALE</text><circle cx="352" cy="0" r="7" fill="#a6b2c8"/><text x="368" y="5" class="k" fill="#e1e7f0">LAST-KNOWN-GOOD</text></g>
+  </g>
+  <text x="36" y="881" class="m">SOURCE IS TRUTH. LAC IS A REBUILDABLE, FAIL-CLOSED INDEX.</text>
+</svg>
