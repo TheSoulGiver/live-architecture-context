@@ -5,6 +5,9 @@
 - Added three on-demand Codex skills (context, impact, recovery) and a thin
   no-hook plugin manifest; the managed AGENTS fallback now uses a short
   architecture reflex instead of a per-task procedure.
+- Added a repo-local Codex marketplace that packages those same skills from one
+  source directory; it is an optional discovery/install path, not a hook or
+  approval gate.
 - Added fixed-size anonymous result categories to telemetry and usage receipts.
   `actionable_result_rate` is explicitly a result proxy, not a claim that an
   Agent used the result or that a task succeeded.

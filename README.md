@@ -40,8 +40,9 @@ invents a canonical system from filenames.
 
 ## On-demand Codex skills
 
-The bundled `.codex-plugin/plugin.json` points only at three small skills. It
-has no lifecycle hook and registers no always-on MCP tool set:
+The bundled `plugins/live-architecture-context/.codex-plugin/plugin.json`
+points only at three small skills. It has no lifecycle hook and registers no
+always-on MCP tool set:
 
 - `architecture-context` for canonical/truth/evidence, unfamiliar cross-module
   systems, recent changes, and legacy ambiguity.
@@ -51,6 +52,17 @@ has no lifecycle hook and registers no always-on MCP tool set:
 Each skill reuses the existing CLI/MCP and starts with one test: will this
 remove the next broad source read? If not, it stays out of the way. The managed
 `AGENTS.md` block is the same compact fallback for hosts without plugin skills.
+
+For a local checkout, Codex can install the repo-local marketplace once, then
+load the skills in a new session:
+
+```sh
+codex plugin marketplace add .
+codex plugin add live-architecture-context@live-architecture-context
+```
+
+This optional plugin install is separate from `pip install`, which supplies the
+`archctx` CLI.
 
 ## Why LAC exists
 

@@ -1,0 +1,20 @@
+{
+  "name": "live-architecture-context",
+  "interface": {
+    "displayName": "Live Architecture Context"
+  },
+  "plugins": [
+    {
+      "name": "live-architecture-context",
+      "source": {
+        "source": "local",
+        "path": "./plugins/live-architecture-context"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
