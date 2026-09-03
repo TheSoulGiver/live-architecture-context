@@ -25,6 +25,18 @@ def run_raw(*args):
 
 
 class ArchitectureContextTest(unittest.TestCase):
+    @staticmethod
+    def receipt_program(fresh=True):
+        return "\n".join((
+            "import json, sys",
+            "mode, context_hash, revision = sys.argv[1:4]",
+            f"receipt = {{'receipt_version': 1, 'provider': 'test', 'context_hash': context_hash, 'revision': revision, 'mode': mode, 'fresh': {fresh!r}, 'graph_revision': 'graph-1'}}",
+            "if len(sys.argv) > 4:",
+            "    receipt['changed_files_sha256'] = sys.argv[4]",
+            "    receipt['changed_file_count'] = len(json.loads(sys.argv[5]))",
+            "print(json.dumps(receipt))",
+        ))
+
     def test_watcher_skips_unrelated_and_marks_evidence_owner_stale(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); (root / "owner.py").write_text("OWNER = 'one'\n"); (root / "other.py").write_text("other\n")
@@ -57,8 +69,9 @@ class ArchitectureContextTest(unittest.TestCase):
             (root / "owner.py").write_text("OWNER = 'two'\n")
             watched = run(config, state, "watch", "--once")
             self.assertEqual(watched["status"], "STALE")
-            self.assertNotIn("graph", watched)
-            self.assertEqual(run(config, state, "refresh")["graph"]["freshness"], "refreshed")
+            self.assertEqual(watched["graph"]["freshness"], "unverified")
+            refreshed = run(config, state, "refresh")["graph"]
+            self.assertEqual((refreshed["freshness"], refreshed["confidence"], refreshed["execution"]["requested_mode"]), ("unverified", "provider_unverified", "full"))
 
     def test_apply_watcher_promotes_declared_context_and_keeps_visual_last_good(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -71,17 +84,62 @@ class ArchitectureContextTest(unittest.TestCase):
             self.assertTrue(output.is_file()); self.assertEqual(archctx.watch_once(config, str(state), True)["status"], "WATCH_READY")
             source.write_text("def run(): return 'two'\n")
             promoted = archctx.watch_once(config, str(state), True)
-            self.assertEqual((promoted["status"], promoted["event"], promoted["graph"]["freshness"], promoted["archify"]["validation"]), ("PASS", "ARCHITECTURE_CONTEXT_REFRESHED", "incremental", "PASS"))
+            self.assertEqual((promoted["status"], promoted["event"], promoted["graph"]["freshness"], promoted["archify"]["validation"]), ("PASS", "ARCHITECTURE_CONTEXT_REFRESHED", "unverified", "PASS"))
+            self.assertEqual(promoted["graph"]["execution"]["requested_mode"], "incremental")
             self.assertEqual(archctx.status(config, str(state))["status"], "FRESH")
             self.assertEqual(archctx.impact(config, str(state), None, ["src/runtime.py"])["next_action"], "inspect affected evidence and test")
             view.write_text(json.dumps({"title": "Runtime v2", "nodes": [{"id": "runtime", "pos": [0, 0]}]}))
             visual = archctx.watch_once(config, str(state), True)
-            self.assertEqual((visual["status"], visual["graph"]["freshness"]), ("PASS", "unchanged"))
+            self.assertEqual((visual["status"], visual["graph"]["freshness"], visual["graph"]["execution"]["requested_mode"]), ("PASS", "unverified", "not_run"))
             last_visual = output.read_bytes()
             value["archify"]["validate"] = [PYTHON, "-c", "raise SystemExit(3)"]; config.write_text(json.dumps(value))
             blocked = archctx.watch_once(config, str(state), True)
             self.assertEqual((blocked["status"], blocked["event"]), ("INVALID", "ARCHITECTURE_REFRESH_FAILED"))
             self.assertTrue(blocked["last_good_preserved"]); self.assertEqual(output.read_bytes(), last_visual)
+
+    def test_graph_receipt_binds_verified_context_and_never_persists_command_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); source = root / "source.py"; source.write_text("OWNER = 'one'\n")
+            config, state = root / "context.json", root / "state"
+            value = {"version": 1, "repo": ".", "components": [{"id": "owner", "evidence": [{"path": "source.py", "contains": "OWNER"}]}], "code_graph": {"provider": "test", "receipt": "stdout_json_v1", "refresh": [PYTHON, "-c", self.receipt_program(), "full", "{context_hash}", "{revision}"]}}
+            config.write_text(json.dumps(value))
+            refreshed = run(config, state, "refresh")
+            graph = refreshed["graph"]
+            self.assertEqual((refreshed["status"], graph["freshness"], graph["receipt"]["mode"]), ("PASS", "receipt_verified", "full"))
+            self.assertEqual(graph["receipt"]["context_hash"], refreshed["context_hash"])
+            stored = run(config, state, "snapshot")["graph"]
+            self.assertNotIn("command", stored); self.assertNotIn("stdout_tail", stored)
+            self.assertEqual(run(config, state, "status")["graph"]["receipt"]["graph_revision"], "graph-1")
+
+    def test_graph_receipt_reports_actual_mode_and_fails_closed_when_not_fresh(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); source = root / "source.py"; source.write_text("OWNER = 'one'\n")
+            config, state = root / "context.json", root / "state"
+            program = self.receipt_program()
+            value = {"version": 1, "repo": ".", "components": [{"id": "owner", "evidence": [{"path": "source.py", "contains": "OWNER"}]}], "watch": {"paths": ["source.py"]}, "code_graph": {"provider": "test", "receipt": "stdout_json_v1", "refresh": [PYTHON, "-c", program, "full", "{context_hash}", "{revision}"], "incremental": [PYTHON, "-c", program, "full", "{context_hash}", "{revision}", "{changed_files_sha256}", "{changed_files}"]}}
+            config.write_text(json.dumps(value)); run(config, state, "refresh")
+            self.assertEqual(run(config, state, "watch", "--once")["status"], "WATCH_READY")
+            source.write_text("OWNER = 'two'\n")
+            promoted = run(config, state, "watch", "--once", "--apply")
+            self.assertEqual((promoted["status"], promoted["graph"]["execution"]["requested_mode"], promoted["graph"]["execution"]["actual_mode"]), ("PASS", "incremental", "full"))
+            last_good_hash = promoted["context_hash"]
+            value["code_graph"]["refresh"] = [PYTHON, "-c", self.receipt_program(False), "full", "{context_hash}", "{revision}"]
+            config.write_text(json.dumps(value))
+            failed = run(config, state, "refresh")
+            self.assertEqual((failed["status"], failed["freshness"], failed["last_good_preserved"]), ("INVALID", "stale", True))
+            self.assertEqual(run(config, state, "status")["last_good_context_hash"], last_good_hash)
+
+    def test_graph_contract_change_forces_full_refresh_on_control_only_watch_event(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); source = root / "source.py"; source.write_text("OWNER\n")
+            config, state = root / "context.json", root / "state"; program = self.receipt_program()
+            value = {"version": 1, "repo": ".", "components": [{"id": "owner", "evidence": [{"path": "source.py", "contains": "OWNER"}]}], "code_graph": {"provider": "test", "receipt": "stdout_json_v1", "refresh": [PYTHON, "-c", program, "full", "{context_hash}", "{revision}"]}}
+            config.write_text(json.dumps(value)); self.assertEqual(run(config, state, "refresh")["status"], "PASS")
+            self.assertEqual(run(config, state, "watch", "--once")["status"], "WATCH_READY")
+            value["code_graph"]["timeout_seconds"] = 179
+            config.write_text(json.dumps(value))
+            refreshed = run(config, state, "watch", "--once", "--apply")
+            self.assertEqual((refreshed["status"], refreshed["graph"]["execution"]["requested_mode"], refreshed["graph"]["receipt"]["mode"]), ("PASS", "full", "full"))
 
     def test_watch_scope_cap_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -375,7 +433,7 @@ class ArchitectureContextTest(unittest.TestCase):
             config, state = root / "context.json", root / "state"
             config.write_text(json.dumps({"version": 1, "repo": ".", "components": [{"id": "owner", "evidence": [{"path": "source.py", "contains": "OWNER"}]}], "code_graph": {"provider": "demo", "refresh": [sys.executable, "-c", "print('graph diagnostics')"]}, "gates": [{"name": "pass", "command": [sys.executable, "-c", "print('gate diagnostics')"]}]}))
             refreshed = run(config, state, "refresh"); record = json.loads((state / "last-good.json").read_text())
-            self.assertIn("stdout_tail", refreshed["graph"]); self.assertNotIn("stdout_tail", record["graph"]); self.assertNotIn("command", record["graph"])
+            self.assertNotIn("stdout_tail", refreshed["graph"]); self.assertNotIn("command", refreshed["graph"]); self.assertNotIn("stdout_tail", record["graph"]); self.assertNotIn("command", record["graph"])
             self.assertEqual(record["gates"], [{"name": "pass", "status": "PASS"}])
             self.assertNotIn("stdout_tail", run(config, state, "snapshot")["graph"])
 

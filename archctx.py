@@ -259,17 +259,66 @@ def run(command: list[Any], repo: Path, timeout: int, values: dict[str, str], ex
         env.update(extra_env)
     return argv, subprocess.run(argv, cwd=repo, text=True, encoding="utf-8", errors="replace", capture_output=True, timeout=timeout, env=env)
 
-def graph_refresh(config: dict[str, Any], repo: Path, directory: Path, changed: list[str] | None) -> dict[str, Any]:
+def graph_changed_files(changed: list[str] | None) -> list[str]: return sorted({str(path).replace("\\", "/") for path in changed or []})
+def graph_changed_files_hash(changed: list[str] | None) -> str: return sha(json.dumps(graph_changed_files(changed), ensure_ascii=False, separators=(",", ":")).encode())
+def graph_command(graph: dict[str, Any], name: str) -> list[str] | None:
+    command = graph.get(name)
+    if command is None: return None
+    if not isinstance(command, list) or not command or not all(isinstance(item, str) and item for item in command): raise ValueError(f"code_graph.{name} must be a non-empty argv string list")
+    return command
+def graph_provider(graph: dict[str, Any]) -> str:
+    provider = graph.get("provider", "external")
+    if not isinstance(provider, str) or not provider: raise ValueError("code_graph.provider must be a non-empty string")
+    return provider
+def graph_receipt_contract(graph: dict[str, Any]) -> str | None:
+    contract = graph.get("receipt")
+    if contract not in (None, "stdout_json_v1"): raise ValueError("code_graph.receipt must be stdout_json_v1 when configured")
+    return contract
+def graph_receipt(stdout: str, provider: str, candidate: dict[str, Any], context_hash: str, requested_mode: str, changed: list[str] | None) -> dict[str, Any]:
+    try: receipt = json.loads(stdout)
+    except json.JSONDecodeError as error: raise ValueError("code graph receipt must be one JSON object") from error
+    if not isinstance(receipt, dict): raise ValueError("code graph receipt must be one JSON object")
+    required = {"receipt_version": 1, "provider": provider, "context_hash": context_hash, "revision": candidate["revision"]}
+    for key, expected in required.items():
+        if receipt.get(key) != expected: raise ValueError(f"code graph receipt {key} does not bind this validated context")
+    mode = receipt.get("mode")
+    if mode not in ("full", "incremental"): raise ValueError("code graph receipt mode must be full or incremental")
+    if requested_mode == "full" and mode != "full": raise ValueError("code graph receipt cannot report incremental for a full request")
+    if receipt.get("fresh") is not True: raise ValueError("code graph receipt is not fresh")
+    graph_revision = receipt.get("graph_revision")
+    if not isinstance(graph_revision, str) or not graph_revision or len(graph_revision) > 256: raise ValueError("code graph receipt graph_revision must be a non-empty short string")
+    normalized = {"receipt_version": 1, "provider": provider, "context_hash": context_hash, "revision": candidate["revision"], "mode": mode, "fresh": True, "graph_revision": graph_revision}
+    if requested_mode == "incremental":
+        observed = graph_changed_files(changed); digest = graph_changed_files_hash(observed)
+        if receipt.get("changed_files_sha256") != digest or receipt.get("changed_file_count") != len(observed): raise ValueError("code graph receipt does not bind observed changed files")
+        normalized |= {"changed_files_sha256": digest, "changed_file_count": len(observed)}
+    return normalized
+def graph_refresh(config: dict[str, Any], repo: Path, directory: Path, changed: list[str] | None, candidate: dict[str, Any], previous: dict[str, Any] | None) -> dict[str, Any]:
     graph = config.get("code_graph")
     if not graph: return {"configured": False, "freshness": "not_configured"}
     if not isinstance(graph, dict): raise ValueError("code_graph must be an object")
-    if changed == []: return {"configured": True, "provider": graph.get("provider", "external"), "freshness": "unchanged"}
-    incremental = changed and isinstance(graph.get("incremental"), list)
-    command = graph.get("incremental") if incremental else graph.get("refresh")
-    if not isinstance(command, list): return {"configured": True, "provider": graph.get("provider", "external"), "endpoint": graph.get("endpoint"), "index": graph.get("index"), "freshness": "external_daemon_unverified"}
-    argv, r = run(command, repo, int(graph.get("timeout_seconds", 180)), {"{repo}": str(repo), "{state}": str(directory / "codegraph"), "{changed_files}": json.dumps(changed or [])})
-    if r.returncode: raise RuntimeError(f"code graph command failed ({r.returncode}): {r.stderr.strip()[-1000:]}")
-    return {"configured": True, "provider": graph.get("provider", "external"), "freshness": "incremental" if incremental else "refreshed", "command": argv, "stdout_tail": r.stdout.strip()[-1000:]}
+    provider, contract, contract_hash = graph_provider(graph), graph_receipt_contract(graph), semantic(graph)
+    refresh_command, incremental_command = graph_command(graph, "refresh"), graph_command(graph, "incremental")
+    prior_graph = persistent_graph(previous.get("graph", {})) if isinstance(previous, dict) else {}
+    context_hash = semantic(candidate); prior_context_hash = previous.get("context_hash") if isinstance(previous, dict) else None
+    observed = graph_changed_files(changed)
+    run_required = changed is None or bool(observed) or prior_context_hash != context_hash or prior_graph.get("contract_hash") != contract_hash
+    if not run_required: return prior_graph | {"execution": {"requested_mode": "not_run"}}
+    requested_mode = "incremental" if observed and incremental_command else "full"
+    command = incremental_command if requested_mode == "incremental" else refresh_command
+    if command is None:
+        if contract: raise ValueError("code_graph.receipt needs a refresh command")
+        return {"configured": True, "provider": provider, "contract_hash": contract_hash, "freshness": "external_daemon_unverified", "confidence": "provider_unverified"}
+    if contract:
+        required = ("{context_hash}", "{revision}") + (("{changed_files_sha256}",) if requested_mode == "incremental" else ())
+        if any(token not in command for token in required): raise ValueError("code graph receipt command is missing required binding placeholders")
+    values = {"{repo}": str(repo), "{state}": str(directory / "codegraph"), "{changed_files}": json.dumps(observed, ensure_ascii=False, separators=(",", ":")), "{changed_files_sha256}": graph_changed_files_hash(observed), "{context_hash}": context_hash, "{revision}": str(candidate["revision"])}
+    _, result = run(command, repo, int(graph.get("timeout_seconds", 180)), values)
+    if result.returncode: raise RuntimeError(f"code graph command failed ({result.returncode}): {result.stderr.strip()[-1000:]}")
+    execution = {"requested_mode": requested_mode}
+    if not contract: return {"configured": True, "provider": provider, "contract_hash": contract_hash, "freshness": "unverified", "confidence": "provider_unverified", "execution": execution}
+    receipt = graph_receipt(result.stdout, provider, candidate, context_hash, requested_mode, observed)
+    return {"configured": True, "provider": provider, "contract_hash": contract_hash, "freshness": "receipt_verified", "confidence": "provider_reported", "receipt": receipt, "execution": execution | {"actual_mode": receipt["mode"]}}
 
 def gates(config: dict[str, Any], repo: Path, directory: Path) -> list[dict[str, Any]]:
     receipts = []
@@ -280,7 +329,10 @@ def gates(config: dict[str, Any], repo: Path, directory: Path) -> list[dict[str,
         receipts.append({"name": gate["name"], "command": argv, "stdout_tail": r.stdout.strip()[-1000:]})
     return receipts
 def persistent_graph(value: dict[str, Any]) -> dict[str, Any]:
-    return {key: value[key] for key in ("configured", "provider", "freshness") if key in value}
+    if not isinstance(value, dict): return {}
+    if not value.get("configured"): return {"configured": False} if "configured" in value else {}
+    if "confidence" not in value: return {"configured": True, "provider": value.get("provider", "external"), "freshness": "unverified_legacy", "confidence": "provider_unverified"}
+    return {key: value[key] for key in ("configured", "provider", "contract_hash", "freshness", "confidence", "receipt") if key in value}
 def persistent_gates(values: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [{"name": value["name"], "status": "PASS"} for value in values if isinstance(value, dict) and isinstance(value.get("name"), str)]
 
@@ -510,7 +562,7 @@ def status(config_path: Path, explicit: str | None) -> dict[str, Any]:
     elif candidate_state in ("incomplete", "baseline_incomplete"): reason = ["candidate observation incomplete; tighten configured drift rules before trusting this context"]
     elif candidate_state == "baseline_missing": reason = ["candidate baseline missing; run refresh to establish it"]
     elif candidate_state == "rules_changed": reason = ["candidate rules changed; run refresh to establish a new reviewed baseline"]
-    result = freshness(old, "FRESH" if fresh and not blocked else "STALE", None if fresh and not blocked else reason) | {"last_good_available": True, "last_good_context_hash": old.get("context_hash")} | candidate_fields(observation)
+    result = freshness(old, "FRESH" if fresh and not blocked else "STALE", None if fresh and not blocked else reason) | {"last_good_available": True, "last_good_context_hash": old.get("context_hash"), "graph": persistent_graph(old.get("graph", {}))} | candidate_fields(observation)
     if candidates: result["next_action"] = "inspect candidates, update canonical config/evidence if accepted, then run accept or reject"
     elif candidate_state in ("baseline_missing", "rules_changed"): result["next_action"] = "review current source, then run refresh with reset_candidate_baseline"
     return result
@@ -534,7 +586,7 @@ def refresh(config_path: Path, explicit: str | None, changed: list[str] | None =
     if pending and set(candidate["id"] for candidate in pending) != set(acknowledged):
         return {"protocol_version": PROTOCOL_VERSION, "status": "CANDIDATE_REVIEW_REQUIRED", "freshness": "stale", "last_good_preserved": bool(old), "next_action": "inspect every candidate, then accept or reject it before refresh"} | candidate_fields(observation)
     candidate = context(config, revision(repo, {"components": facts, "relations": relation_facts}), facts, relation_facts)
-    try: graph, receipts, archify = graph_refresh(config, repo, directory, changed), gates(config, repo, directory), archify_projection(config, repo, directory)
+    try: graph, receipts, archify = graph_refresh(config, repo, directory, changed, candidate, old), gates(config, repo, directory), archify_projection(config, repo, directory)
     except (OSError, RuntimeError, subprocess.TimeoutExpired, ValueError) as e: return {"protocol_version": PROTOCOL_VERSION, "status": "INVALID", "freshness": "stale", "failures": [str(e)], "last_good_preserved": last_path(directory).exists(), "next_action": "repair external validator, then refresh"}
     decisions = [{key: value[key] for key in ("id", "kind", "rule_id", "decision") if key in value} for value in acknowledged.values()]
     record = {"record_version": CONFIG_VERSION, "created_at": datetime.now(timezone.utc).isoformat(), "repo": str(repo), "revision": revision(repo, {"components": facts, "relations": relation_facts}), "config_hash": semantic(config), "context_hash": semantic(candidate), "context": candidate, "graph": persistent_graph(graph), "gates": persistent_gates(receipts), "archify": archify, "candidate_baseline": observation["current"]}

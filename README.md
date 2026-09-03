@@ -141,14 +141,19 @@ config, an optional Archify view, and configured high-value candidate paths.
 `watch --once` returns `NO_RELEVANT_CHANGE` for an unrelated watched file, while
 a continuous watcher is quiet and only updates its local manifest when it
 changes. Default `watch` observes and marks stale. Opt-in `watch --apply`
-promotes only an already-declared context after source validation, configured
-incremental graph refresh, gates, and optional Archify validation pass. It never
+promotes only an already-declared context after source validation, a configured
+graph receipt (when one is available), gates, and optional Archify validation pass. It never
 writes components or relations: a high-value candidate remains
 `CANDIDATE_REVIEW_REQUIRED` until an Agent explicitly accepts or rejects it.
 Invalid evidence or a failed external validator leaves both `last-good.json` and
 the previous Archify output untouched.
-`code_graph.incremental` can receive `{changed_files}`; for a persistent CALM
-daemon without that command, the result explicitly says
+`code_graph.incremental` can receive `{changed_files}`. An argv name or exit code
+does not prove an incremental graph update: legacy commands are labelled
+`unverified`. To bind a graph fact, opt into `receipt: "stdout_json_v1"`; the
+provider must emit one JSON object with the validated `{context_hash}`,
+`{revision}`, actual `mode`, a short `graph_revision`, and `fresh: true`
+(plus `{changed_files_sha256}` and a count for an incremental request). For a
+persistent CALM daemon without that receipt, the result explicitly says
 `external_daemon_unverified`, rather than claiming a graph refresh occurred.
 The watcher refuses scopes above 512 files or 8 MiB of configured source; narrow
 `watch.paths` instead of turning each polling tick into a repository scan.

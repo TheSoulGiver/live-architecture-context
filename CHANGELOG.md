@@ -12,9 +12,13 @@
   cannot promote last-good; accepted bindings must point to the exact detected
   source signal.
 - Keep default watchers observational, and add opt-in `watch --apply` for
-  source-validated, already-declared context. It runs configured incremental
-  graph/gate/Archify validation before promotion; candidates remain manual.
+  source-validated, already-declared context. It runs configured graph/gate/
+  Archify validation before promotion; candidates remain manual.
   Candidate baseline resets are explicit and recorded in snapshot history.
+- Treat a graph command exit code as unverified. A provider may opt into a
+  compact, context-bound stdout receipt; only that receipt can report the
+  provider's actual full/incremental mode, while failed or non-fresh receipts
+  preserve last-good.
 - Bound watcher scope (512 files / 8 MiB), watch architecture config and optional
   Archify view changes, and preserve the previous derived Archify JSON on a
   failed validation.
