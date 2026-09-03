@@ -1,0 +1,9 @@
+{
+  "title": "Demo service blueprint",
+  "subtitle": "Accepted source-grounded architecture projected for people",
+  "nodes": [
+    {"id": "service", "type": "backend", "pos": [80, 180], "tag": "canonical"},
+    {"id": "store", "type": "database", "pos": [360, 180], "tag": "truth source"}
+  ],
+  "relation_variants": {"reads": "emphasis"}
+}

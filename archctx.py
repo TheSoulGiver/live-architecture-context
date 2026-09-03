@@ -27,7 +27,7 @@ def load(path: Path) -> dict[str, Any]:
 def git(repo: Path, *args: str) -> str | None:
     r = subprocess.run(["git", "-C", str(repo), *args], text=True, encoding="utf-8", errors="replace", capture_output=True)
     return r.stdout.strip() if r.returncode == 0 else None
-def revision(repo: Path, facts: dict[str, list[dict[str, Any]]] | None = None) -> str:
+def revision(repo: Path, facts: Any = None) -> str:
     """Prefer an immutable commit; read-only/dubious worktrees get an explicit evidence binding."""
     return git(repo, "rev-parse", "HEAD") or "SOURCE_EVIDENCE:" + semantic(facts or {})[:16]
 def state(config_path: Path, explicit: str | None) -> Path:
@@ -58,7 +58,7 @@ def result_outcome(event: str, value: dict[str, Any]) -> str | None:
     if operation == "evidence": return "evidence" if has_items(value, "evidence") else "empty"
     if operation == "trace": return "related" if isinstance(value.get("components"), list) and len(value["components"]) > 1 else "unrelated"
     if operation == "impact": return "affected" if has_items(value, "direct_components") else "unaffected"
-    if operation in ("changed-since", "delta"): return "changed" if any(has_items(value, key) for key in ("changed_components", "added_relations", "removed_relations")) else "unchanged"
+    if operation in ("changed-since", "delta"): return "changed" if any(has_items(value, key) for key in ("changed_components", "added_relations", "removed_relations", "changed_relations")) else "unchanged"
     if operation == "drift": return "candidate" if has_items(value, "candidates") else "none"
     return None
 def telemetry(directory: Path, event: str, value: dict[str, Any], elapsed_ms: int) -> None:
@@ -191,10 +191,20 @@ def components(config: dict[str, Any]) -> list[dict[str, Any]]:
         ids.append(x["id"])
     if len(ids) != len(set(ids)): raise ValueError("component ids must be unique")
     known = set(ids)
+    relation_ids = set()
     for relation in config.get("relations", []):
         if not isinstance(relation, dict) or relation.get("from") not in known or relation.get("to") not in known: raise ValueError("relations must use declared component ids")
         if not isinstance(relation.get("kind"), str) or not relation["kind"]: raise ValueError("every relation needs explicit kind")
+        if "evidence" in relation and (not isinstance(relation["evidence"], list) or not relation["evidence"]): raise ValueError("relation evidence must be a non-empty array when supplied")
+        ident = relation_id(relation)
+        if ident in relation_ids: raise ValueError(f"relation ids must be unique: {ident}")
+        relation_ids.add(ident)
     return xs
+
+def relation_id(relation: dict[str, Any]) -> str:
+    value = relation.get("id")
+    if isinstance(value, str) and value: return value
+    return f"{relation['from']}--{relation['kind']}--{relation['to']}"
 
 def evidence(repo: Path, component: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
     facts, failures = [], []
@@ -210,16 +220,27 @@ def evidence(repo: Path, component: dict[str, Any]) -> tuple[list[dict[str, Any]
         facts.append({"path": item["path"].replace("\\", "/"), "contains": item["contains"], "line": text.count("\n", 0, offset) + 1, "sha256": sha(text.encode())})
     return facts, failures
 
-def validate(repo: Path, config: dict[str, Any]) -> tuple[dict[str, list[dict[str, Any]]], list[str]]:
-    facts, failures = {}, []
+def validate(repo: Path, config: dict[str, Any]) -> tuple[dict[str, list[dict[str, Any]]], list[list[dict[str, Any]]], list[str]]:
+    facts, relation_facts, failures = {}, [], []
     try: xs = components(config)
-    except ValueError as e: return facts, [str(e)]
+    except ValueError as e: return facts, relation_facts, [str(e)]
     for x in xs:
         facts[x["id"]], errors = evidence(repo, x); failures.extend(errors)
-    return facts, failures
+    for relation in config.get("relations", []):
+        if "evidence" not in relation:
+            relation_facts.append([]); continue
+        value, errors = evidence(repo, {"id": relation_id(relation), "evidence": relation["evidence"]})
+        relation_facts.append(value); failures.extend(errors)
+    return facts, relation_facts, failures
 
-def context(config: dict[str, Any], rev: str, facts: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
-    result: dict[str, Any] = {"schema_version": CONFIG_VERSION, "revision": rev, "components": [], "relations": [{**r, "provenance": "authored_architecture"} for r in config.get("relations", [])]}
+def context(config: dict[str, Any], rev: str, facts: dict[str, list[dict[str, Any]]], relation_facts: list[list[dict[str, Any]]]) -> dict[str, Any]:
+    relations = []
+    for index, relation in enumerate(config.get("relations", [])):
+        value = {**relation, "provenance": "authored_architecture"}
+        if "evidence" in relation:
+            value["evidence"] = relation_facts[index]; value["confidence"] = "source_evidence"
+        relations.append(value)
+    result: dict[str, Any] = {"schema_version": CONFIG_VERSION, "revision": rev, "components": [], "relations": relations}
     for x in components(config):
         result["components"].append({k: x[k] for k in ("id", "name", "purpose", "truth_sources", "tags", "code_symbol") if k in x} | {"evidence": facts[x["id"]], "confidence": "source_evidence"})
     return result
@@ -263,23 +284,23 @@ def freshness(record: dict[str, Any], status: str, reason: Any = None) -> dict[s
 def status(config_path: Path, explicit: str | None) -> dict[str, Any]:
     config = load(config_path); directory = state(config_path, explicit); old_path = last_path(directory)
     try:
-        repo = repo_for(config_path, config); facts, failures = validate(repo, config)
-    except ValueError as e: repo, facts, failures = None, {}, [str(e)]
+        repo = repo_for(config_path, config); facts, relation_facts, failures = validate(repo, config)
+    except ValueError as e: repo, facts, relation_facts, failures = None, {}, [], [str(e)]
     if not old_path.exists(): return {"protocol_version": PROTOCOL_VERSION, "status": "MISSING", "freshness": "missing", "repo": str(repo) if repo else None, "next_action": "run refresh"}
-    old = load(old_path); current = context(config, revision(repo, facts), facts) if repo and not failures else None
+    old = load(old_path); current = context(config, revision(repo, {"components": facts, "relations": relation_facts}), facts, relation_facts) if repo and not failures else None
     fresh = current is not None and architecture_semantic(current) == architecture_semantic(old["context"]) and semantic(config) == old.get("config_hash")
     return freshness(old, "FRESH" if fresh else "STALE", None if fresh else (failures or ["source revision, config, or architecture context changed"])) | {"last_good_available": True, "last_good_context_hash": old.get("context_hash")}
 
 def refresh(config_path: Path, explicit: str | None, changed: list[str] | None = None) -> dict[str, Any]:
     config, directory = load(config_path), state(config_path, explicit)
     try:
-        repo = repo_for(config_path, config); facts, failures = validate(repo, config)
-    except ValueError as e: repo, facts, failures = None, {}, [str(e)]
+        repo = repo_for(config_path, config); facts, relation_facts, failures = validate(repo, config)
+    except ValueError as e: repo, facts, relation_facts, failures = None, {}, [], [str(e)]
     if failures: return {"protocol_version": PROTOCOL_VERSION, "status": "INVALID", "freshness": "stale", "failures": failures, "last_good_preserved": last_path(directory).exists(), "next_action": "repair evidence/config, then refresh"}
-    candidate = context(config, revision(repo, facts), facts)
+    candidate = context(config, revision(repo, {"components": facts, "relations": relation_facts}), facts, relation_facts)
     try: graph, receipts = graph_refresh(config, repo, directory, changed), gates(config, repo, directory)
     except (OSError, RuntimeError, subprocess.TimeoutExpired, ValueError) as e: return {"protocol_version": PROTOCOL_VERSION, "status": "INVALID", "freshness": "stale", "failures": [str(e)], "last_good_preserved": last_path(directory).exists(), "next_action": "repair external validator, then refresh"}
-    record = {"record_version": CONFIG_VERSION, "created_at": datetime.now(timezone.utc).isoformat(), "repo": str(repo), "revision": revision(repo, facts), "config_hash": semantic(config), "context_hash": semantic(candidate), "context": candidate, "graph": persistent_graph(graph), "gates": persistent_gates(receipts)}
+    record = {"record_version": CONFIG_VERSION, "created_at": datetime.now(timezone.utc).isoformat(), "repo": str(repo), "revision": revision(repo, {"components": facts, "relations": relation_facts}), "config_hash": semantic(config), "context_hash": semantic(candidate), "context": candidate, "graph": persistent_graph(graph), "gates": persistent_gates(receipts)}
     atomic(last_path(directory), record); atomic(directory / "snapshots" / f"{record['context_hash']}.json", record); prune_snapshots(directory)
     return freshness(record, "PASS") | {"context_hash": record["context_hash"], "graph": graph, "gates": receipts, "changed_files": changed or []}
 
@@ -395,6 +416,9 @@ def authored(context_value: dict[str, Any], ident: str, direction: str) -> list[
             neighbor = r.get("to") if direction == "downstream" and r.get("from") == current else r.get("from") if direction == "upstream" and r.get("to") == current else None
             if neighbor and neighbor not in seen: seen.add(neighbor); todo.append(neighbor)
     return sorted(seen)
+def direct_relations(context_value: dict[str, Any], ident: str, direction: str) -> list[dict[str, Any]]:
+    key = "from" if direction == "downstream" else "to"
+    return [relation for relation in context_value.get("relations", []) if relation.get(key) == ident]
 def code_query(config: dict[str, Any], repo: Path, directory: Path, symbol: str, direction: str) -> dict[str, Any]:
     graph = config.get("code_graph", {})
     if not isinstance(graph, dict) or not isinstance(graph.get("query"), list): return {"available": False, "reason": "no code_graph.query configured"}
@@ -405,7 +429,7 @@ def code_query(config: dict[str, Any], repo: Path, directory: Path, symbol: str,
     return {"available": True, "kind": "code_graph_query", "provider": graph.get("provider", "external"), "confidence": "provider_reported", "result": result}
 def trace(config_path: Path, explicit: str | None, ident: str, direction: str, include_code: bool = False) -> dict[str, Any]:
     value = snapshot(config_path, explicit); ctx = value.get("context", {})
-    answer = {k: value[k] for k in ("protocol_version", "status", "revision", "freshness", "next_action") if k in value} | {"kind": "authored_architecture_trace", "provenance": "authored_architecture", "origin": ident, "direction": direction, "components": authored(ctx, ident, direction), "warning": value.get("reason")}
+    answer = {k: value[k] for k in ("protocol_version", "status", "revision", "freshness", "next_action") if k in value} | {"kind": "authored_architecture_trace", "provenance": "authored_architecture", "origin": ident, "direction": direction, "components": authored(ctx, ident, direction), "relations": direct_relations(ctx, ident, direction), "warning": value.get("reason")}
     if include_code and ident in {x["id"] for x in ctx.get("components", [])}:
         config = load(config_path); component = next(x for x in ctx["components"] if x["id"] == ident); answer["code_graph"] = code_query(config, repo_for(config_path, config), state(config_path, explicit), component.get("code_symbol", ident), direction)
     return answer
@@ -439,10 +463,24 @@ def prune_snapshots(directory: Path) -> None:
 def retained(directory: Path, rev: str) -> dict[str, Any] | None:
     matches = [record for path in snapshot_files(directory) if (record := load(path)).get("revision") == rev]
     return min(matches, key=lambda value: str(value.get("created_at", ""))) if matches else None
+def semantic_component(component: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in component.items() if key != "evidence"}
+def semantic_relation(relation: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in relation.items() if key not in ("evidence", "confidence")}
+def relation_map(relations: list[Any]) -> dict[str, dict[str, Any]]:
+    return {relation_id(relation): relation for relation in relations if isinstance(relation, dict)}
 def record_diff(old: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
     a, b = {x["id"]: x for x in old["context"]["components"]}, {x["id"]: x for x in new["context"]["components"]}
-    ar, br = set(json.dumps(x, sort_keys=True) for x in old["context"].get("relations", [])), set(json.dumps(x, sort_keys=True) for x in new["context"].get("relations", []))
-    return {"changed_components": sorted(x for x in a.keys() | b.keys() if a.get(x) != b.get(x)), "added_relations": [json.loads(x) for x in sorted(br-ar)], "removed_relations": [json.loads(x) for x in sorted(ar-br)]}
+    ar, br = relation_map(old["context"].get("relations", [])), relation_map(new["context"].get("relations", []))
+    shared, shared_relations = a.keys() & b.keys(), ar.keys() & br.keys()
+    return {
+        "changed_components": sorted(x for x in shared if semantic_component(a[x]) != semantic_component(b[x])) + sorted(a.keys() ^ b.keys()),
+        "evidence_changed_components": sorted(x for x in shared if a[x].get("evidence") != b[x].get("evidence")),
+        "added_relations": [br[x] for x in sorted(br.keys() - ar.keys())],
+        "removed_relations": [ar[x] for x in sorted(ar.keys() - br.keys())],
+        "changed_relations": sorted(x for x in shared_relations if semantic_relation(ar[x]) != semantic_relation(br[x])),
+        "evidence_changed_relations": sorted(x for x in shared_relations if ar[x].get("evidence") != br[x].get("evidence")),
+    }
 def history(directory: Path, context_hash: str | None, limit: int) -> dict[str, Any]:
     if context_hash is not None:
         record = snapshot_record(directory, context_hash)
@@ -453,7 +491,7 @@ def history(directory: Path, context_hash: str | None, limit: int) -> dict[str, 
     summaries = []
     for index, record in enumerate(records):
         previous = records[index - 1] if index else None; delta = record_diff(previous, record) if previous else None
-        summaries.append({"created_at": record.get("created_at"), "revision": record.get("revision"), "context_hash": record.get("context_hash"), "component_count": len(record.get("context", {}).get("components", [])), "relation_count": len(record.get("context", {}).get("relations", [])), "graph": persistent_graph(record.get("graph", {})) if isinstance(record.get("graph"), dict) else {}, "gates": persistent_gates(record.get("gates", [])) if isinstance(record.get("gates"), list) else [], "delta_from_previous": {"changed_components": delta["changed_components"], "relation_change_count": len(delta["added_relations"]) + len(delta["removed_relations"])} if delta else None})
+        summaries.append({"created_at": record.get("created_at"), "revision": record.get("revision"), "context_hash": record.get("context_hash"), "component_count": len(record.get("context", {}).get("components", [])), "relation_count": len(record.get("context", {}).get("relations", [])), "graph": persistent_graph(record.get("graph", {})) if isinstance(record.get("graph"), dict) else {}, "gates": persistent_gates(record.get("gates", [])) if isinstance(record.get("gates"), list) else [], "delta_from_previous": {"changed_components": delta["changed_components"], "evidence_changed_components": delta["evidence_changed_components"], "changed_relations": delta["changed_relations"], "evidence_changed_relations": delta["evidence_changed_relations"], "relation_change_count": len(delta["added_relations"]) + len(delta["removed_relations"]) + len(delta["changed_relations"])} if delta else None})
     visible = list(reversed(summaries)) if limit == 0 else list(reversed(summaries[-limit:]))
     return {"protocol_version": PROTOCOL_VERSION, "status": "PASS", "kind": "architecture_history", "snapshots": visible, "snapshot_count": len(summaries), "omitted_snapshot_count": len(summaries) - len(visible), "retention": {"max_snapshots": SNAPSHOT_LIMIT, "content": "source-evidence snapshots; use context_hash to retrieve one"}}
 def changed_since(config_path: Path, explicit: str | None, rev: str) -> dict[str, Any]:

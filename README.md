@@ -88,7 +88,7 @@ small, source-evidence-bound answer to all of these at once:
 | `status` / `stale` | A tiny freshness result, not a hidden full snapshot. |
 | `canonical` / `evidence` | One declared implementation and its exact source proof. |
 | `search` | At most three candidates by default, plus explicit omitted counts. |
-| `trace` / `impact` | Authored architecture relations stay separate from graph facts. |
+| `trace` / `impact` | Authored relations (with optional source evidence) stay separate from graph facts. |
 | `refresh` / `snapshot` | Validate before atomic promotion; preserve last-good on failure. |
 | `changed-since` / `drift` | Evidence-bound delta and configured high-value drift candidates. |
 
@@ -193,12 +193,26 @@ incremental.
 
 `example.archcontext.json` is the complete minimal form. Components declare
 `truth_sources` for humans and required `evidence` (`path` + exact `contains`)
-for machines. Relations must have an explicit `kind` and are returned with
-`provenance: authored_architecture`. `gates` and optional CALM commands are
-argv arrays, never shell strings.
+for machines. Relations must have an explicit `kind`; they may carry the same
+evidence form, which is validated and returned by `trace`. A relation without
+it remains explicitly `authored_architecture`, not a claimed code-graph fact.
+`gates` and optional CALM commands are argv arrays, never shell strings.
 
 ```json
 {"version":1,"repo":".","components":[{"id":"service","truth_sources":["src/service.py"],"evidence":[{"path":"src/service.py","contains":"def serve"}]}],"relations":[]}
+```
+
+## Experimental Archify projection
+
+`prototype/archctx_to_archify.py` is a thin, standalone projection from an
+accepted Archctx config plus a human-authored view to Archify architecture IR.
+It never parses source, changes canonical state, or invents a relation: every
+visible node and connection must exist in the config. It derives stable
+connection IDs so Archify can compare two accepted views.
+
+```sh
+python prototype/archctx_to_archify.py --config demo-repo/architecture.json --view demo-repo/architecture.view.json --output /tmp/architecture.json
+archify validate architecture /tmp/architecture.json --quality showcase --json
 ```
 
 Supported command substitutions are `{repo}`, `{state}`, `{changed_files}`;

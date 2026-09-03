@@ -265,6 +265,39 @@ class ArchitectureContextTest(unittest.TestCase):
             self.assertEqual(run(config, state, "trace", "a")["kind"], "authored_architecture_trace")
             self.assertEqual(run(config, state, "impact", "--base", base)["kind"], "authored_architecture_impact")
 
+    def test_relation_evidence_is_validated_and_traceable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "runtime.py").write_text("from provider import send\n\ndef run(): return send()\n")
+            (root / "provider.py").write_text("def send(): return 'ok'\n")
+            config, state = root / "context.json", root / "state"
+            config.write_text(json.dumps({"version": 1, "repo": ".", "components": [{"id": "runtime", "evidence": [{"path": "runtime.py", "contains": "def run"}]}, {"id": "provider", "evidence": [{"path": "provider.py", "contains": "def send"}]}], "relations": [{"from": "runtime", "to": "provider", "kind": "uses-provider", "evidence": [{"path": "runtime.py", "contains": "from provider import send"}]}]}))
+            self.assertEqual(run(config, state, "refresh")["status"], "PASS")
+            relation = run(config, state, "trace", "runtime")["relations"][0]
+            self.assertEqual(relation["confidence"], "source_evidence")
+            self.assertEqual(relation["evidence"][0]["line"], 1)
+            (root / "runtime.py").write_text("def run(): return 'not wired'\n")
+            failed = run(config, state, "refresh")
+            self.assertEqual(failed["status"], "INVALID")
+            self.assertTrue(failed["last_good_preserved"])
+
+    def test_relation_evidence_refresh_is_not_a_topology_delta(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = root / "runtime.py"; runtime.write_text("from provider import send\n\ndef run(): return send()\n")
+            (root / "provider.py").write_text("def send(): return 'ok'\n")
+            subprocess.run(["git", "init", "-q", str(root)], check=True); subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(root), "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-qm", "base"], check=True)
+            base = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
+            config, state = root / "context.json", root / "state"
+            config.write_text(json.dumps({"version": 1, "repo": ".", "components": [{"id": "runtime", "evidence": [{"path": "runtime.py", "contains": "def run"}]}, {"id": "provider", "evidence": [{"path": "provider.py", "contains": "def send"}]}], "relations": [{"from": "runtime", "to": "provider", "kind": "uses-provider", "evidence": [{"path": "runtime.py", "contains": "from provider import send"}]}]}))
+            run(config, state, "refresh"); runtime.write_text("from provider import send\n\n# implementation detail\ndef run(): return send()\n"); run(config, state, "refresh")
+            delta = run(config, state, "changed-since", "--revision", base)
+            self.assertEqual(delta["added_relations"], [])
+            self.assertEqual(delta["removed_relations"], [])
+            self.assertEqual(delta["changed_relations"], [])
+            self.assertEqual(delta["evidence_changed_relations"], ["runtime--uses-provider--provider"])
+
     def test_changed_since_compares_retained_source_evidence(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); (root / "source.py").write_text("OWNER = 'one'\n")
@@ -276,7 +309,23 @@ class ArchitectureContextTest(unittest.TestCase):
             run(config, state, "refresh"); (root / "source.py").write_text("OWNER = 'two'\n")
             subprocess.run(["git", "-C", str(root), "add", "source.py"], check=True); subprocess.run(["git", "-C", str(root), "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-qm", "change"], check=True)
             run(config, state, "refresh")
-            self.assertEqual(run(config, state, "changed-since", "--revision", base)["changed_components"], ["owner"])
+            delta = run(config, state, "changed-since", "--revision", base)
+            self.assertEqual(delta["changed_components"], [])
+            self.assertEqual(delta["evidence_changed_components"], ["owner"])
+
+    def test_evidence_only_refresh_is_not_an_architecture_component_delta(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); source = root / "source.py"; source.write_text("OWNER\n")
+            subprocess.run(["git", "init", "-q", str(root)], check=True); subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(root), "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-qm", "base"], check=True)
+            base = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
+            config, state = root / "context.json", root / "state"
+            config.write_text(json.dumps({"version": 1, "repo": ".", "components": [{"id": "owner", "evidence": [{"path": "source.py", "contains": "OWNER"}]}]}))
+            run(config, state, "refresh"); source.write_text("OWNER\n# implementation detail\n"); run(config, state, "refresh")
+            delta = run(config, state, "changed-since", "--revision", base)
+            self.assertEqual(delta["changed_components"], [])
+            self.assertEqual(delta["evidence_changed_components"], ["owner"])
+            self.assertEqual(run(config, state, "history")["snapshots"][0]["delta_from_previous"]["changed_components"], [])
 
     def test_changed_since_uses_first_snapshot_for_an_unchanged_git_revision(self):
         with tempfile.TemporaryDirectory() as directory:

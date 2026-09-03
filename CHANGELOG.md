@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Validate optional relation-level source evidence, expose it through `trace`,
+  and distinguish evidence-only relation refreshes from topology changes.
+- Add an experimental, dependency-free Archctx-to-Archify projection that only
+  renders accepted canonical nodes and relations with deterministic connection
+  IDs for visual comparison.
+
 ## v0.1.6
 
 - Let the CLI use only the current repository's standard
