@@ -59,6 +59,15 @@ class ArchitectureContextTest(unittest.TestCase):
             self.assertEqual(failed["status"], "INVALID")
             self.assertTrue(failed["last_good_preserved"])
 
+    def test_search_accepts_a_positional_query_or_the_compatible_flag(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); source = root / "store.py"; source.write_text("class Store: pass\n")
+            config, state = root / "context.json", root / "state"
+            config.write_text(json.dumps({"version": 1, "repo": ".", "components": [{"id": "store", "evidence": [{"path": "store.py", "contains": "class Store"}]}]}))
+            self.assertEqual(run(config, state, "refresh")["status"], "PASS")
+            self.assertEqual(run(config, state, "search", "store")["matches"][0]["id"], "store")
+            self.assertEqual(run(config, state, "search", "--query", "store")["matches"][0]["id"], "store")
+
     def test_watcher_never_labels_a_full_graph_refresh_incremental(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); (root / "owner.py").write_text("OWNER = 'one'\n")

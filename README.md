@@ -172,7 +172,7 @@ archctx --config architecture.json status
 archctx --config architecture.json history --limit 8
 archctx --config architecture.json history --context-hash <context-hash>
 archctx --config architecture.json usage --operation impact --limit 8
-archctx --config architecture.json search --query "identity payment"
+archctx --config architecture.json search "identity payment"
 archctx --config architecture.json canonical service
 archctx --config architecture.json evidence service
 archctx --config architecture.json trace service --code
@@ -189,7 +189,8 @@ archctx --config architecture.json mcp
 `status` is metadata-only: it reports freshness and whether last-good exists
 without serializing context. Use `snapshot` only when the complete retained
 context is needed. `search` returns at most three matches by default and always
-reports `match_count` and `omitted_match_count`; pass `--limit 0` only when an
+reports `match_count` and `omitted_match_count`; `search --query "…"` remains
+compatible, but the positional form is shorter for Agents. Pass `--limit 0` only when an
 unbounded result is genuinely needed.
 
 In a repository initialized with the standard `.archctx/architecture.json`, the
