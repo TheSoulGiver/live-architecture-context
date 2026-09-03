@@ -4,9 +4,9 @@
 
 - Validate optional relation-level source evidence, expose it through `trace`,
   and distinguish evidence-only relation refreshes from topology changes.
-- Add an experimental, dependency-free Archctx-to-Archify projection that only
-  renders accepted canonical nodes and relations with deterministic connection
-  IDs for visual comparison.
+- Add an experimental, dependency-free Archctx-to-Archify projection that
+  revalidates source evidence before output, maps IDs injectively into the
+  Archify grammar, and selects parallel relations only by canonical ID.
 
 ## v0.1.6
 

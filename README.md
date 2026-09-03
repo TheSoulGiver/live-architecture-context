@@ -204,11 +204,14 @@ it remains explicitly `authored_architecture`, not a claimed code-graph fact.
 
 ## Experimental Archify projection
 
-`prototype/archctx_to_archify.py` is a thin, standalone projection from an
-accepted Archctx config plus a human-authored view to Archify architecture IR.
-It never parses source, changes canonical state, or invents a relation: every
-visible node and connection must exist in the config. It derives stable
-connection IDs so Archify can compare two accepted views.
+`prototype/archctx_to_archify.py` is a thin, standalone projection from a
+declared Archctx config plus a human-authored view to Archify architecture IR.
+The CLI revalidates source evidence before it writes output. It never parses
+source, changes canonical state, or invents a relation: every visible node and
+connection must exist in the config. It maps arbitrary Archctx IDs injectively
+into Archify-safe IDs, and an explicit view selects a relation only by its
+canonical ID. The prototype deliberately does not pass through arbitrary
+Archify cards, boundaries, or routing fields.
 
 ```sh
 python prototype/archctx_to_archify.py --config demo-repo/architecture.json --view demo-repo/architecture.view.json --output /tmp/architecture.json
