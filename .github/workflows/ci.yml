@@ -15,4 +15,5 @@ jobs:
       - run: python -m pip install .
       - run: archctx --config demo-repo/architecture.json refresh
       - run: archctx --config demo-repo/architecture.json canonical service
+      - run: archctx-to-archify --config demo-repo/architecture.json --view demo-repo/architecture.view.json --output "${{ runner.temp }}/architecture.json"
       - run: git diff --check

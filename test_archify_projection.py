@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from prototype.archctx_to_archify import archify_id, project, validate_source
+from archctx_to_archify import archify_id, project, validate_source
 
 
 def component(ident, **extra):
@@ -76,7 +76,7 @@ class ArchifyProjectionTest(unittest.TestCase):
             view_path = root / "view.json"
             view_path.write_text(json.dumps({"nodes": [{"id": "a", "pos": [0, 0]}]}), encoding="utf-8")
             output_path = root / "output.json"
-            script = Path(__file__).parent / "prototype" / "archctx_to_archify.py"
+            script = Path(__file__).parent / "archctx_to_archify.py"
             passed = subprocess.run([sys.executable, str(script), "--config", str(config_path), "--view", str(view_path), "--output", str(output_path)], capture_output=True, text=True)
             self.assertEqual(passed.returncode, 0, passed.stderr)
             self.assertTrue(output_path.is_file())

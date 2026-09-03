@@ -25,7 +25,7 @@ def run_raw(*args):
 
 
 class ArchitectureContextTest(unittest.TestCase):
-    def test_watcher_skips_unrelated_then_refreshes_only_evidence_owner(self):
+    def test_watcher_skips_unrelated_and_marks_evidence_owner_stale(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); (root / "owner.py").write_text("OWNER = 'one'\n"); (root / "other.py").write_text("other\n")
             config, state = root / "context.json", root / "state"
@@ -36,12 +36,16 @@ class ArchitectureContextTest(unittest.TestCase):
             self.assertEqual(run(config, state, "watch", "--once")["status"], "NO_RELEVANT_CHANGE")
             (root / "owner.py").write_text("OWNER = 'two'\n")
             result = run(config, state, "watch", "--once")
-            self.assertEqual(result["status"], "PASS")
+            self.assertEqual(result["status"], "STALE")
             self.assertEqual(result["direct_components"], ["owner"])
+            self.assertEqual(result["event"], "CANONICAL_EVIDENCE_CHANGED")
+            self.assertEqual(run(config, state, "refresh")["status"], "PASS")
             (root / "owner.py").rename(root / "owner-renamed.py")
             result = run(config, state, "watch", "--once")
-            self.assertEqual(result["status"], "INVALID")
-            self.assertTrue(result["last_good_preserved"])
+            self.assertEqual(result["status"], "STALE")
+            failed = run(config, state, "refresh")
+            self.assertEqual(failed["status"], "INVALID")
+            self.assertTrue(failed["last_good_preserved"])
 
     def test_watcher_never_labels_a_full_graph_refresh_incremental(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -51,14 +55,50 @@ class ArchitectureContextTest(unittest.TestCase):
             self.assertEqual(run(config, state, "refresh")["status"], "PASS")
             run(config, state, "watch", "--once")
             (root / "owner.py").write_text("OWNER = 'two'\n")
-            self.assertEqual(run(config, state, "watch", "--once")["graph"]["freshness"], "refreshed")
+            watched = run(config, state, "watch", "--once")
+            self.assertEqual(watched["status"], "STALE")
+            self.assertNotIn("graph", watched)
+            self.assertEqual(run(config, state, "refresh")["graph"]["freshness"], "refreshed")
+
+    def test_apply_watcher_promotes_declared_context_and_keeps_visual_last_good(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); source = root / "src" / "runtime.py"; source.parent.mkdir(); source.write_text("def run(): return 'one'\n")
+            config, state, view, output = root / "architecture.json", root / "state", root / "architecture.view.json", root / "architecture.archify.json"
+            view.write_text(json.dumps({"title": "Runtime", "nodes": [{"id": "runtime", "pos": [0, 0]}]}))
+            validator = [PYTHON, "-c", "import json,sys; json.load(open(sys.argv[1], encoding='utf-8'))", "{archify_output}"]
+            value = {"version": 1, "repo": ".", "components": [{"id": "runtime", "evidence": [{"path": "src/runtime.py", "contains": "def run"}]}], "watch": {"paths": ["src/*.py"]}, "code_graph": {"provider": "test", "refresh": [PYTHON, "-c", "print('full')"], "incremental": [PYTHON, "-c", "print('incremental')"]}, "archify": {"view": view.name, "output": output.name, "validate": validator}}
+            config.write_text(json.dumps(value)); self.assertEqual(run(config, state, "refresh")["status"], "PASS")
+            self.assertTrue(output.is_file()); self.assertEqual(archctx.watch_once(config, str(state), True)["status"], "WATCH_READY")
+            source.write_text("def run(): return 'two'\n")
+            promoted = archctx.watch_once(config, str(state), True)
+            self.assertEqual((promoted["status"], promoted["event"], promoted["graph"]["freshness"], promoted["archify"]["validation"]), ("PASS", "ARCHITECTURE_CONTEXT_REFRESHED", "incremental", "PASS"))
+            self.assertEqual(archctx.status(config, str(state))["status"], "FRESH")
+            self.assertEqual(archctx.impact(config, str(state), None, ["src/runtime.py"])["next_action"], "inspect affected evidence and test")
+            view.write_text(json.dumps({"title": "Runtime v2", "nodes": [{"id": "runtime", "pos": [0, 0]}]}))
+            visual = archctx.watch_once(config, str(state), True)
+            self.assertEqual((visual["status"], visual["graph"]["freshness"]), ("PASS", "unchanged"))
+            last_visual = output.read_bytes()
+            value["archify"]["validate"] = [PYTHON, "-c", "raise SystemExit(3)"]; config.write_text(json.dumps(value))
+            blocked = archctx.watch_once(config, str(state), True)
+            self.assertEqual((blocked["status"], blocked["event"]), ("INVALID", "ARCHITECTURE_REFRESH_FAILED"))
+            self.assertTrue(blocked["last_good_preserved"]); self.assertEqual(output.read_bytes(), last_visual)
+
+    def test_watch_scope_cap_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); (root / "a.py").write_text("A\n"); (root / "b.py").write_text("B\n")
+            config, state = root / "context.json", root / "state"
+            config.write_text(json.dumps({"version": 1, "repo": ".", "components": [{"id": "a", "evidence": [{"path": "a.py", "contains": "A"}]}], "watch": {"paths": ["*.py"]}}))
+            self.assertEqual(run(config, state, "refresh")["status"], "PASS")
+            with patch.object(archctx, "WATCH_FILE_LIMIT", 1):
+                failed = archctx.watch_once(config, str(state))
+            self.assertEqual(failed["status"], "INVALID"); self.assertTrue(failed["last_good_preserved"])
 
     def test_continuous_watcher_does_not_emit_no_relevant_change(self):
         values = [{"status": "WATCH_READY"}, {"status": "NO_RELEVANT_CHANGE"}, {"status": "PASS"}]
         with patch.object(archctx, "watch_once", side_effect=values), patch.object(archctx, "dump") as output, patch.object(archctx, "record_usage") as receipt, patch.object(archctx.time, "sleep"):
             self.assertEqual(archctx.watch(Path("context.json"), None, 50, 1), 0)
         self.assertEqual([call.args[0]["status"] for call in output.call_args_list], ["WATCH_READY", "PASS"])
-        self.assertEqual([call.args[1] for call in receipt.call_args_list], ["watch", "watch"])
+        self.assertEqual([call.args[1] for call in receipt.call_args_list], ["watch"])
 
     def test_watcher_does_not_rewrite_unchanged_live_state(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -71,6 +111,125 @@ class ArchitectureContextTest(unittest.TestCase):
                 self.assertEqual(archctx.watch_once(config, str(state))["status"], "NO_RELEVANT_CHANGE")
                 persist.assert_not_called()
 
+    def test_dirty_candidate_stales_last_good_until_manual_source_bound_acceptance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); runtime = root / "runtime.py"; runtime.write_text("def run(): return 'ok'\n")
+            subprocess.run(["git", "init", "-q", str(root)], check=True); subprocess.run(["git", "-C", str(root), "add", "runtime.py"], check=True)
+            subprocess.run(["git", "-C", str(root), "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-qm", "base"], check=True)
+            config, state, marker = root / "context.json", root / "state", root / "graph-ran"
+            graph_program = f"from pathlib import Path; Path({str(marker)!r}).write_text('ran')"
+            value = {"version": 1, "repo": ".", "components": [{"id": "runtime", "evidence": [{"path": "runtime.py", "contains": "def run"}]}], "watch": {"paths": ["runtime.py"]}, "drift_rules": [{"id": "provider-boundary", "kind": "new-provider", "paths": ["provider.py"], "added_contains": ["def send_to_provider"]}], "code_graph": {"refresh": [sys.executable, "-c", graph_program]}}
+            config.write_text(json.dumps(value)); first = run(config, state, "refresh"); self.assertEqual(first["status"], "PASS"); marker.unlink()
+            self.assertEqual(run(config, state, "watch", "--once")["status"], "WATCH_READY")
+            (root / "provider.py").write_text("def send_to_provider(): return 'ok'\n")
+            observed = run(config, state, "watch", "--once", "--apply")
+            self.assertEqual((observed["status"], observed["event"], observed["candidate_count"]), ("CANDIDATE_REVIEW_REQUIRED", "ARCHITECTURE_CANDIDATE_OBSERVED", 1))
+            self.assertFalse(marker.exists())
+            self.assertEqual(run(config, state, "status")["status"], "STALE")
+            self.assertEqual(run(config, state, "refresh")["status"], "CANDIDATE_REVIEW_REQUIRED")
+            self.assertFalse(marker.exists())
+            candidate = run(config, state, "candidates")["candidates"][0]
+            self.assertEqual(candidate["evidence"]["path"], "provider.py")
+            runtime.write_text("from provider import send_to_provider\n\ndef run(): return send_to_provider()\n")
+            value["components"].append({"id": "provider", "evidence": [{"path": "provider.py", "contains": "def send_to_provider"}]})
+            value["relations"] = [{"from": "runtime", "to": "provider", "kind": "uses-provider", "evidence": [{"path": "runtime.py", "contains": "return send_to_provider()"}]}]
+            config.write_text(json.dumps(value))
+            with self.assertRaisesRegex(ValueError, "accept it instead"):
+                archctx.reject_candidate(config, str(state), candidate["id"], "false_match")
+            accepted = run(config, state, "accept", candidate["id"], "--bind", "component:provider", "--bind", "relation:runtime--uses-provider--provider")
+            self.assertEqual(accepted["status"], "PASS")
+            self.assertTrue(marker.exists())
+            self.assertEqual(run(config, state, "status")["status"], "FRESH")
+            self.assertEqual(run(config, state, "candidates")["status"], "PASS")
+            self.assertEqual(run(config, state, "refresh")["status"], "PASS")
+            self.assertEqual(run(config, state, "history", "--limit", "1")["snapshots"][0]["candidate_decisions"][0]["decision"], "accepted")
+            decisions = (state / "candidate-decisions.json").read_text()
+            self.assertIn('"decision": "accepted"', decisions); self.assertNotIn("def send_to_provider", decisions)
+
+    def test_multiple_candidates_can_be_reviewed_one_at_a_time(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); (root / "runtime.py").write_text("def run(): pass\n")
+            config, state = root / "context.json", root / "state"
+            config.write_text(json.dumps({"version": 1, "repo": ".", "components": [{"id": "runtime", "evidence": [{"path": "runtime.py", "contains": "def run"}]}], "drift_rules": [{"id": "provider-boundary", "kind": "new-provider", "paths": ["provider-*.py"], "added_contains": ["def send"]}]}))
+            self.assertEqual(run(config, state, "refresh")["status"], "PASS")
+            (root / "provider-a.py").write_text("def send(): pass\n"); (root / "provider-b.py").write_text("def send(): pass\n")
+            self.assertEqual(run(config, state, "watch", "--once")["status"], "CANDIDATE_REVIEW_REQUIRED")
+            candidates = run(config, state, "candidates")["candidates"]
+            self.assertEqual(len(candidates), 2)
+            first = run(config, state, "reject", candidates[0]["id"], "--reason", "false_match")
+            self.assertEqual((first["status"], first["remaining_candidate_count"]), ("CANDIDATE_REVIEW_REQUIRED", 1))
+            second = run(config, state, "reject", candidates[1]["id"], "--reason", "false_match")
+            self.assertEqual(second["status"], "PASS")
+            self.assertEqual(run(config, state, "status")["status"], "FRESH")
+
+    def test_candidate_acceptance_needs_exact_signal_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); provider = root / "provider.py"; provider.write_text("def legacy(): pass\n")
+            config, state = root / "context.json", root / "state"
+            value = {"version": 1, "repo": ".", "components": [{"id": "provider", "evidence": [{"path": "provider.py", "contains": "def"}]}], "drift_rules": [{"id": "provider-boundary", "kind": "new-provider", "paths": ["provider.py"], "added_contains": ["send_to_provider"]}]}
+            config.write_text(json.dumps(value)); self.assertEqual(run(config, state, "refresh")["status"], "PASS")
+            provider.write_text("def send_to_provider(): pass\n")
+            candidate = run(config, state, "candidates")["candidates"][0]
+            value["components"][0]["name"] = "Renamed provider"; config.write_text(json.dumps(value))
+            with self.assertRaisesRegex(ValueError, "exact candidate signal"):
+                archctx.accept_candidate(config, str(state), candidate["id"], ["component:provider"])
+
+    def test_candidate_baseline_reset_is_explicit_and_audited(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); (root / "source.py").write_text("OWNER\n")
+            config, state = root / "context.json", root / "state"
+            value = {"version": 1, "repo": ".", "components": [{"id": "owner", "evidence": [{"path": "source.py", "contains": "OWNER"}]}]}
+            config.write_text(json.dumps(value)); self.assertEqual(run(config, state, "refresh")["status"], "PASS")
+            value["drift_rules"] = [{"id": "owner-rule", "kind": "new-owner", "paths": ["source.py"], "added_contains": ["OWNER"]}]; config.write_text(json.dumps(value))
+            self.assertEqual(run(config, state, "refresh")["status"], "CANDIDATE_CHECK_INCOMPLETE")
+            reset = run(config, state, "refresh", "--reset-candidate-baseline")
+            self.assertEqual((reset["status"], reset["candidate_baseline_reset"]), ("PASS", True))
+            self.assertTrue(run(config, state, "history", "--limit", "1")["snapshots"][0]["candidate_baseline_reset"])
+
+    def test_candidate_output_expands_only_on_explicit_request_and_patterns_stay_out_of_baseline(self):
+        values = {"candidates": [{"id": str(number)} for number in range(9)]}
+        self.assertEqual((len(archctx.candidate_fields(values)["candidates"]), len(archctx.candidate_fields(values, 0)["candidates"])), (8, 9))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); (root / "provider.py").write_text("def send_to_provider(): pass\n")
+            config, state = root / "context.json", root / "state"
+            config.write_text(json.dumps({"version": 1, "repo": ".", "components": [{"id": "provider", "evidence": [{"path": "provider.py", "contains": "def send_to_provider"}]}], "drift_rules": [{"id": "provider-boundary", "kind": "new-provider", "paths": ["provider.py"], "added_contains": ["def send_to_provider"]}]}))
+            self.assertEqual(run(config, state, "refresh")["status"], "PASS")
+            baseline = json.loads((state / "last-good.json").read_text())["candidate_baseline"]
+            self.assertNotIn("def send_to_provider", json.dumps(baseline))
+
+    def test_absolute_drift_rule_is_stale_not_a_windows_glob_crash(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); (root / "source.py").write_text("OWNER\n")
+            config, state = root / "context.json", root / "state"
+            value = {"version": 1, "repo": ".", "components": [{"id": "owner", "evidence": [{"path": "source.py", "contains": "OWNER"}]}]}
+            config.write_text(json.dumps(value)); self.assertEqual(run(config, state, "refresh")["status"], "PASS")
+            value["drift_rules"] = [{"id": "bad", "kind": "new-provider", "paths": [str(root / "source.py")], "added_contains": ["OWNER"]}]; config.write_text(json.dumps(value))
+            self.assertEqual(run(config, state, "status")["status"], "STALE")
+            self.assertEqual(run(config, state, "candidates")["status"], "CANDIDATE_CHECK_INCOMPLETE")
+
+    def test_drift_rule_ids_are_unique(self):
+        with self.assertRaisesRegex(ValueError, "ids must be unique"):
+            archctx.normalized_drift_rules({"drift_rules": [{"id": "same", "kind": "new-provider", "paths": ["a.py"], "added_contains": ["one"]}, {"id": "same", "kind": "new-provider", "paths": ["a.py"], "added_contains": ["two"]}]})
+
+    def test_candidate_scan_cap_fails_closed_before_reading_a_broad_rule(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); (root / "a.py").write_text("def provider(): pass\n"); (root / "b.py").write_text("def provider(): pass\n")
+            config = {"version": 1, "watch": {"ignore": []}, "drift_rules": [{"id": "provider", "kind": "new-provider", "paths": ["*.py"], "added_contains": ["provider"]}]}
+            with patch.object(archctx, "CANDIDATE_FILE_LIMIT", 1):
+                baseline = archctx.candidate_baseline(config, root)
+            self.assertFalse(baseline["complete"]); self.assertEqual(baseline["entries"], [])
+
+    def test_corrupt_candidate_decision_store_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); (root / "runtime.py").write_text("def run(): pass\n")
+            config, state = root / "context.json", root / "state"
+            config.write_text(json.dumps({"version": 1, "repo": ".", "components": [{"id": "runtime", "evidence": [{"path": "runtime.py", "contains": "def run"}]}], "drift_rules": [{"id": "provider", "kind": "new-provider", "paths": ["provider.py"], "added_contains": ["def send"]}]}))
+            self.assertEqual(run(config, state, "refresh")["status"], "PASS")
+            (root / "provider.py").write_text("def send(): pass\n"); candidate = run(config, state, "candidates")["candidates"][0]
+            (state / "candidate-decisions.json").write_text("not json")
+            with self.assertRaisesRegex(ValueError, "invalid JSON"):
+                archctx.reject_candidate(config, str(state), candidate["id"], "false_match")
+
     def test_failed_gate_preserves_last_good_and_mcp_lists_live_tools(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); (root / "source.py").write_text("OWNER\n")
@@ -82,7 +241,7 @@ class ArchitectureContextTest(unittest.TestCase):
             self.assertEqual(run(config, state, "status")["status"], "STALE")
             process = subprocess.run([PYTHON, str(TOOL), "--config", str(config), "--state-dir", str(state), "mcp"], input=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}) + "\n", text=True, capture_output=True, check=True)
             tools = json.loads(process.stdout)["result"]["tools"]
-            self.assertTrue({"architecture_refresh", "architecture_history", "architecture_usage"}.issubset({item["name"] for item in tools}))
+            self.assertTrue({"architecture_refresh", "architecture_history", "architecture_usage", "architecture_candidates", "architecture_accept_candidate", "architecture_reject_candidate"}.issubset({item["name"] for item in tools}))
 
     def test_search_and_codex_install_are_compact_and_idempotent(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -100,6 +259,8 @@ class ArchitectureContextTest(unittest.TestCase):
             self.assertIn("`canonical`/`evidence` for a known component", installed)
             self.assertIn("`changed-since`/`drift` only with a supplied base revision", installed)
             self.assertIn("not unrelated Git dirtiness", installed)
+            self.assertIn("Read only returned evidence", installed)
+            self.assertIn("opt-in `watch --apply`", installed)
             external = root.parent / "external.json"; external.write_text(json.dumps({"version": 1, "repo": root.name, "components": [{"id": "owner", "evidence": [{"path": "source.py", "contains": "OWNER"}]}]}))
             failed = subprocess.run([PYTHON, str(TOOL), "--config", str(external), "--state-dir", str(state), "install-codex", "--target", str(root / "OTHER.md")], text=True, capture_output=True)
             self.assertEqual(failed.returncode, 2)

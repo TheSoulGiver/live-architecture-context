@@ -4,13 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "live-architecture-context"
-version = "0.1.6"
+version = "0.1.7"
 description = "Source-grounded live architecture context for coding agents"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 
 [project.scripts]
 archctx = "archctx:main"
+archctx-to-archify = "archctx_to_archify:main"
 
 [tool.setuptools]
-py-modules = ["archctx"]
+py-modules = ["archctx", "archctx_to_archify"]

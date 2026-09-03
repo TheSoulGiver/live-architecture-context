@@ -4,9 +4,22 @@
 
 - Validate optional relation-level source evidence, expose it through `trace`,
   and distinguish evidence-only relation refreshes from topology changes.
-- Add an experimental, dependency-free Archctx-to-Archify projection that
+- Add an installed, dependency-free Archctx-to-Archify projection that
   revalidates source evidence before output, maps IDs injectively into the
   Archify grammar, and selects parallel relations only by canonical ID.
+- Add deterministic, bounded dirty-worktree candidates with explicit
+  accept/reject decisions. Pending candidates make retained context stale and
+  cannot promote last-good; accepted bindings must point to the exact detected
+  source signal.
+- Keep default watchers observational, and add opt-in `watch --apply` for
+  source-validated, already-declared context. It runs configured incremental
+  graph/gate/Archify validation before promotion; candidates remain manual.
+  Candidate baseline resets are explicit and recorded in snapshot history.
+- Bound watcher scope (512 files / 8 MiB), watch architecture config and optional
+  Archify view changes, and preserve the previous derived Archify JSON on a
+  failed validation.
+- Package the Archify projector as `archctx-to-archify` in the same wheel as
+  `archctx`; it remains a source-validated projection, not a renderer fork.
 
 ## v0.1.6
 

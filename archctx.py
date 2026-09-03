@@ -7,9 +7,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-CONFIG_VERSION, PROTOCOL_VERSION, SERVER_VERSION = 1, "1.0", "0.1.6"
+CONFIG_VERSION, PROTOCOL_VERSION, SERVER_VERSION = 1, "1.0", "0.1.7"
 SNAPSHOT_LIMIT, USAGE_LIMIT, USAGE_BYTES = 32, 128, 64 * 1024
-USAGE_OPERATIONS = {"refresh", "snapshot", "canonical", "search", "evidence", "trace", "impact", "changed-since", "delta", "drift", "watch"}
+CANDIDATE_ENTRY_LIMIT, CANDIDATE_BYTES, CANDIDATE_OUTPUT_LIMIT = 64, 32 * 1024, 8
+CANDIDATE_FILE_LIMIT, CANDIDATE_SOURCE_BYTES = 256, 4 * 1024 * 1024
+WATCH_FILE_LIMIT, WATCH_SOURCE_BYTES = 512, 8 * 1024 * 1024
+DECISION_LIMIT, DECISION_BYTES = 64, 64 * 1024
+USAGE_OPERATIONS = {"refresh", "snapshot", "canonical", "search", "evidence", "trace", "impact", "changed-since", "delta", "drift", "candidates", "accept", "reject", "watch"}
 OBSERVATIONAL_OPERATIONS = {"status", "telemetry", "history", "usage"}
 ACTIONABLE_OUTCOMES = {"promoted", "context_available", "matched", "evidence", "related", "affected", "changed", "candidate", "recovery_required"}
 NO_FINDING_OUTCOMES = {"empty", "unrelated", "unaffected", "unchanged", "none"}
@@ -59,7 +63,8 @@ def result_outcome(event: str, value: dict[str, Any]) -> str | None:
     if operation == "trace": return "related" if isinstance(value.get("components"), list) and len(value["components"]) > 1 else "unrelated"
     if operation == "impact": return "affected" if has_items(value, "direct_components") else "unaffected"
     if operation in ("changed-since", "delta"): return "changed" if any(has_items(value, key) for key in ("changed_components", "added_relations", "removed_relations", "changed_relations")) else "unchanged"
-    if operation == "drift": return "candidate" if has_items(value, "candidates") else "none"
+    if operation in ("drift", "candidates"): return "candidate" if has_items(value, "candidates") else "none"
+    if operation in ("accept", "reject"): return "promoted" if value.get("status") == "PASS" else "recovery_required"
     return None
 def telemetry(directory: Path, event: str, value: dict[str, Any], elapsed_ms: int) -> None:
     """Best-effort fixed-size metrics; never retain source, evidence, query, or task text."""
@@ -258,6 +263,7 @@ def graph_refresh(config: dict[str, Any], repo: Path, directory: Path, changed: 
     graph = config.get("code_graph")
     if not graph: return {"configured": False, "freshness": "not_configured"}
     if not isinstance(graph, dict): raise ValueError("code_graph must be an object")
+    if changed == []: return {"configured": True, "provider": graph.get("provider", "external"), "freshness": "unchanged"}
     incremental = changed and isinstance(graph.get("incremental"), list)
     command = graph.get("incremental") if incremental else graph.get("refresh")
     if not isinstance(command, list): return {"configured": True, "provider": graph.get("provider", "external"), "endpoint": graph.get("endpoint"), "index": graph.get("index"), "freshness": "external_daemon_unverified"}
@@ -278,6 +284,209 @@ def persistent_graph(value: dict[str, Any]) -> dict[str, Any]:
 def persistent_gates(values: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [{"name": value["name"], "status": "PASS"} for value in values if isinstance(value, dict) and isinstance(value.get("name"), str)]
 
+def relative_glob(value: str, field: str) -> str:
+    path = value.replace("\\", "/")
+    if path.startswith("/") or (len(path) >= 2 and path[1] == ":") or ".." in path.split("/"):
+        raise ValueError(f"{field} must be repo-relative")
+    return path
+
+def repo_file(repo: Path, value: Any, field: str) -> tuple[Path, str]:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{field} must be a non-empty repo-relative path")
+    relative = relative_glob(value, field)
+    if any(marker in relative for marker in "*?["):
+        raise ValueError(f"{field} must name one file, not a glob")
+    path = (repo / relative).resolve()
+    try: path.relative_to(repo.resolve())
+    except ValueError as error: raise ValueError(f"{field} must stay inside repository") from error
+    return path, relative
+
+def archify_config(config: dict[str, Any], repo: Path) -> dict[str, Any] | None:
+    value = config.get("archify")
+    if value is None: return None
+    if not isinstance(value, dict): raise ValueError("archify must be an object")
+    extra = sorted(set(value) - {"view", "output", "validate", "timeout_seconds"})
+    if extra: raise ValueError(f"archify has unsupported fields: {', '.join(extra)}")
+    view, view_relative = repo_file(repo, value.get("view"), "archify.view")
+    output, output_relative = repo_file(repo, value.get("output"), "archify.output")
+    if view == output: raise ValueError("archify.view and archify.output must differ")
+    command = value.get("validate")
+    if not isinstance(command, list) or not command or not all(isinstance(item, str) and item for item in command):
+        raise ValueError("archify.validate must be a non-empty command argv")
+    timeout = value.get("timeout_seconds", 180)
+    if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
+        raise ValueError("archify.timeout_seconds must be a positive integer")
+    return {"view": view, "view_relative": view_relative, "output": output, "output_relative": output_relative, "validate": command, "timeout_seconds": timeout}
+
+def archify_projection(config: dict[str, Any], repo: Path, directory: Path) -> dict[str, Any]:
+    settings = archify_config(config, repo)
+    if settings is None: return {"configured": False}
+    from archctx_to_archify import project
+    view = load(settings["view"])
+    projected = project(config, view)
+    staged = settings["output"].with_suffix(settings["output"].suffix + ".next")
+    atomic(staged, projected)
+    argv, result = run(settings["validate"], repo, settings["timeout_seconds"], {"{repo}": str(repo), "{state}": str(directory), "{archify_output}": str(staged)})
+    if result.returncode:
+        raise RuntimeError(f"Archify validation failed ({result.returncode}): {result.stderr.strip()[-1000:]}")
+    os.replace(staged, settings["output"])
+    return {"configured": True, "view": settings["view_relative"], "view_sha256": sha(settings["view"].read_bytes()), "output": settings["output_relative"], "output_sha256": sha(settings["output"].read_bytes()), "validation": "PASS"}
+
+def archify_stale_reason(config: dict[str, Any], repo: Path, record: dict[str, Any]) -> str | None:
+    settings = archify_config(config, repo)
+    if settings is None: return None
+    receipt = record.get("archify")
+    if not isinstance(receipt, dict) or not receipt.get("configured"):
+        return "Archify projection is missing; run refresh"
+    if receipt.get("view") != settings["view_relative"] or receipt.get("output") != settings["output_relative"]:
+        return "Archify projection configuration changed; run refresh"
+    try:
+        if sha(settings["view"].read_bytes()) != receipt.get("view_sha256"):
+            return "Archify view changed; run refresh"
+        if sha(settings["output"].read_bytes()) != receipt.get("output_sha256"):
+            return "Archify projection output is missing or changed; run refresh"
+    except OSError:
+        return "Archify projection output is missing or unreadable; run refresh"
+    return None
+
+def normalized_drift_rules(config: dict[str, Any]) -> list[dict[str, Any]]:
+    raw = config.get("drift_rules", [])
+    if not isinstance(raw, list): raise ValueError("drift_rules must be an array")
+    result = []; seen = set()
+    for index, rule in enumerate(raw):
+        if not isinstance(rule, dict): raise ValueError("every drift rule must be an object")
+        paths = rule.get("paths", ["*"])
+        if not isinstance(paths, list) or not paths or not all(isinstance(path, str) and path for path in paths): raise ValueError("drift rule paths must be a non-empty string array")
+        paths = [relative_glob(path, "drift rule paths") for path in paths]
+        added = rule.get("added_contains")
+        if added is None: added = [rule["pattern"]] if isinstance(rule.get("pattern"), str) and rule["pattern"] else []
+        removed = rule.get("removed_contains", [])
+        if not isinstance(added, list) or not isinstance(removed, list) or not all(isinstance(value, str) and value for value in added + removed): raise ValueError("drift rule signals must be non-empty string arrays")
+        if not added and not removed: raise ValueError("drift rule needs pattern, added_contains, or removed_contains")
+        ident = rule.get("id")
+        if not isinstance(ident, str) or not ident: ident = f"rule-{index}-{sha(json.dumps({k: rule[k] for k in sorted(rule)}, ensure_ascii=False, separators=(',', ':')).encode())[:12]}"
+        if ident in seen: raise ValueError(f"drift rule ids must be unique: {ident}")
+        seen.add(ident)
+        kind = rule.get("kind", "unspecified")
+        if not isinstance(kind, str) or not kind: raise ValueError("drift rule kind must be a non-empty string")
+        result.append({"id": ident, "kind": kind, "paths": sorted(set(paths)), "added_contains": sorted(set(added)), "removed_contains": sorted(set(removed))})
+    return result
+
+def candidate_files(repo: Path, rules: list[dict[str, Any]], ignore: list[Any] | None = None) -> tuple[list[Path], bool]:
+    found: dict[str, Path] = {}
+    for rule in rules:
+        for pattern in rule["paths"]:
+            for path in repo.glob(pattern):
+                if not path.is_file(): continue
+                try: relative = path.resolve().relative_to(repo.resolve()).as_posix()
+                except ValueError: continue
+                if ignored(relative, ignore or []): continue
+                found[relative] = path
+                if len(found) > CANDIDATE_FILE_LIMIT: return [found[key] for key in sorted(found)[:CANDIDATE_FILE_LIMIT]], False
+    return [found[key] for key in sorted(found)], True
+
+def signal_signature(text: str, pattern: str) -> dict[str, Any] | None:
+    matches = [(number, sha(line.encode())) for number, line in enumerate(text.splitlines(), 1) if pattern in line]
+    if not matches: return None
+    return {"count": len(matches), "sha256": sha(json.dumps(sorted(value for _, value in matches), separators=(",", ":")).encode()), "first_line": matches[0][0]}
+
+def signal_key(direction: str, pattern: str) -> str:
+    return f"{direction}:{sha(pattern.encode())}"
+
+def candidate_baseline(config: dict[str, Any], repo: Path) -> dict[str, Any]:
+    rules = normalized_drift_rules(config); rule_hash = semantic(rules); entries = []
+    watch = config.get("watch", {})
+    if not isinstance(watch, dict): raise ValueError("watch must be an object")
+    ignore = watch.get("ignore", [])
+    if not isinstance(ignore, list) or not all(isinstance(pattern, str) for pattern in ignore): raise ValueError("watch.ignore must contain strings")
+    files, complete = candidate_files(repo, rules, ignore); scanned_bytes = 0
+    if not complete: return {"version": 2, "rules_hash": rule_hash, "entries": [], "complete": False, "scanned_file_count": len(files), "scanned_source_bytes": scanned_bytes}
+    for path in files:
+        scanned_bytes += path.stat().st_size
+        if scanned_bytes > CANDIDATE_SOURCE_BYTES: return {"version": 2, "rules_hash": rule_hash, "entries": [], "complete": False, "scanned_file_count": len(files), "scanned_source_bytes": scanned_bytes}
+        relative = path.resolve().relative_to(repo.resolve()).as_posix(); text = path.read_text(encoding="utf-8", errors="replace")
+        for rule in rules:
+            if not any(fnmatch.fnmatch(relative, pattern) for pattern in rule["paths"]): continue
+            signals: dict[str, dict[str, Any]] = {}
+            for direction, patterns in (("added", rule["added_contains"]), ("removed", rule["removed_contains"])):
+                for pattern in patterns:
+                    if value := signal_signature(text, pattern): signals[signal_key(direction, pattern)] = value
+            if signals: entries.append({"rule_id": rule["id"], "path": relative, "signals": signals})
+    complete = complete and len(entries) <= CANDIDATE_ENTRY_LIMIT
+    entries = entries[:CANDIDATE_ENTRY_LIMIT]
+    value = {"version": 2, "rules_hash": rule_hash, "entries": entries, "complete": complete, "scanned_file_count": len(files), "scanned_source_bytes": scanned_bytes}
+    while entries and len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()) > CANDIDATE_BYTES:
+        entries.pop(); complete = False; value["complete"] = False
+    return value
+
+def baseline_entries(value: dict[str, Any]) -> dict[tuple[str, str], dict[str, Any]]:
+    entries = value.get("entries") if isinstance(value.get("entries"), list) else []
+    return {(entry.get("rule_id"), entry.get("path")): entry for entry in entries if isinstance(entry, dict) and isinstance(entry.get("rule_id"), str) and isinstance(entry.get("path"), str) and isinstance(entry.get("signals"), dict)}
+
+def candidate_changes(previous: dict[str, Any], current: dict[str, Any], rules: list[dict[str, Any]], base_context_hash: str) -> list[dict[str, Any]]:
+    kinds = {rule["id"]: rule["kind"] for rule in rules}; before, after = baseline_entries(previous), baseline_entries(current); found = []
+    for rule_id, path in sorted(set(before) | set(after)):
+        left, right = before.get((rule_id, path), {}), after.get((rule_id, path), {})
+        for signal in sorted(set(left.get("signals", {})) | set(right.get("signals", {}))):
+            old, new = left.get("signals", {}).get(signal), right.get("signals", {}).get(signal)
+            if old == new: continue
+            evidence = new or old or {}; payload = {"base_context_hash": base_context_hash, "rule_id": rule_id, "path": path, "signal": signal, "before": old, "after": new}
+            found.append({"id": sha(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()), "kind": kinds.get(rule_id, "unspecified"), "rule_id": rule_id, "signal": signal, "status": "CANDIDATE_REVIEW_REQUIRED", "provenance": "deterministic_rule_derived_source_fact", "change": "introduced" if new else "removed", "evidence": {"path": path, "line": evidence.get("first_line"), "sha256": evidence.get("sha256")}})
+    return found
+
+def candidate_observation(config: dict[str, Any], repo: Path, record: dict[str, Any] | None) -> dict[str, Any]:
+    rules = normalized_drift_rules(config); current = candidate_baseline(config, repo)
+    if not current["complete"]: return {"state": "incomplete", "current": current, "candidates": []}
+    if not rules: return {"state": "ready", "current": current, "candidates": []}
+    previous = record.get("candidate_baseline") if isinstance(record, dict) else None
+    if not isinstance(previous, dict) or previous.get("version") != 2: return {"state": "baseline_missing", "current": current, "candidates": []}
+    if not previous.get("complete", False): return {"state": "baseline_incomplete", "current": current, "candidates": []}
+    if previous.get("rules_hash") != current["rules_hash"]: return {"state": "rules_changed", "current": current, "candidates": []}
+    changes = candidate_changes(previous, current, rules, str(record.get("context_hash", "")))
+    if len(changes) > DECISION_LIMIT: return {"state": "incomplete", "current": current, "candidates": []}
+    return {"state": "ready", "current": current, "candidates": changes}
+
+def candidate_fields(observation: dict[str, Any], limit: int = CANDIDATE_OUTPUT_LIMIT) -> dict[str, Any]:
+    if limit < 0: raise ValueError("candidate limit must be non-negative")
+    candidates = observation.get("candidates", []) if isinstance(observation.get("candidates"), list) else []
+    visible = candidates[:CANDIDATE_ENTRY_LIMIT] if limit == 0 else candidates[:min(limit, CANDIDATE_ENTRY_LIMIT)]
+    return {"candidate_state": observation.get("state"), "candidate_count": len(candidates), "candidates": visible, "omitted_candidate_count": len(candidates) - len(visible)}
+
+def candidate_decision_path(directory: Path) -> Path: return directory / "candidate-decisions.json"
+def decision_store(directory: Path) -> list[dict[str, Any]]:
+    path = candidate_decision_path(directory)
+    if not path.exists(): return []
+    value = load(path)
+    if not isinstance(value.get("records"), list): raise ValueError("candidate decision store records must be an array")
+    return [record for record in value["records"] if isinstance(record, dict)]
+def bounded_decisions(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    retained = list(records)
+    while len(retained) > DECISION_LIMIT or len(json.dumps({"version": 1, "records": retained}, ensure_ascii=False, separators=(",", ":")).encode()) > DECISION_BYTES:
+        index = next((index for index, record in enumerate(retained) if record.get("state") != "pending"), None)
+        if index is None: raise ValueError("candidate decision capacity exceeded; narrow drift rules")
+        retained.pop(index)
+    return retained
+def save_decisions(directory: Path, records: list[dict[str, Any]]) -> None:
+    retained = bounded_decisions(records)
+    atomic(candidate_decision_path(directory), {"version": 1, "updated_at": datetime.now(timezone.utc).isoformat(), "records": retained})
+def record_decision(directory: Path, decision: dict[str, Any]) -> None:
+    records = decision_store(directory)
+    if decision.get("state") == "pending":
+        records = [record for record in records if not (record.get("state") == "pending" and record.get("id") == decision.get("id") and record.get("base_context_hash") == decision.get("base_context_hash"))]
+    save_decisions(directory, records + [decision])
+def pending_decisions(directory: Path, base_context_hash: str, candidates: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    ids = {candidate["id"] for candidate in candidates}
+    found: dict[str, dict[str, Any]] = {}
+    for record in decision_store(directory):
+        if record.get("state") == "pending" and record.get("base_context_hash") == base_context_hash and record.get("id") in ids:
+            found[record["id"]] = record
+    return found
+def finalize_decisions(directory: Path, base_context_hash: str, decisions: dict[str, dict[str, Any]], context_hash: str) -> None:
+    ids = set(decisions)
+    records = [record for record in decision_store(directory) if not (record.get("state") == "pending" and record.get("base_context_hash") == base_context_hash and record.get("id") in ids)]
+    final = [{key: value for key, value in decision.items() if key != "state"} | {"state": "final", "context_hash": context_hash, "finalized_at": datetime.now(timezone.utc).isoformat()} for decision in decisions.values()]
+    save_decisions(directory, records + final)
+
 def freshness(record: dict[str, Any], status: str, reason: Any = None) -> dict[str, Any]:
     return {"protocol_version": PROTOCOL_VERSION, "status": status, "revision": record.get("revision"), "freshness": "fresh" if status in ("FRESH", "PASS") else "stale", "last_good_at": record.get("created_at"), "confidence": "source_evidence", "reason": reason, "next_action": "query normally" if status in ("FRESH", "PASS") else "run refresh after fixing the reported change"}
 
@@ -288,27 +497,63 @@ def status(config_path: Path, explicit: str | None) -> dict[str, Any]:
     except ValueError as e: repo, facts, relation_facts, failures = None, {}, [], [str(e)]
     if not old_path.exists(): return {"protocol_version": PROTOCOL_VERSION, "status": "MISSING", "freshness": "missing", "repo": str(repo) if repo else None, "next_action": "run refresh"}
     old = load(old_path); current = context(config, revision(repo, {"components": facts, "relations": relation_facts}), facts, relation_facts) if repo and not failures else None
-    fresh = current is not None and architecture_semantic(current) == architecture_semantic(old["context"]) and semantic(config) == old.get("config_hash")
-    return freshness(old, "FRESH" if fresh else "STALE", None if fresh else (failures or ["source revision, config, or architecture context changed"])) | {"last_good_available": True, "last_good_context_hash": old.get("context_hash")}
+    try: visual_failure = archify_stale_reason(config, repo, old) if repo and not failures else None
+    except (OSError, ValueError) as error: visual_failure = f"Archify projection check failed: {error}"
+    try: observation = candidate_observation(config, repo, old) if repo and not failures else {"state": "not_checked", "candidates": []}
+    except (OSError, ValueError) as error: observation = {"state": "incomplete", "candidates": [], "error": str(error)}
+    fresh = current is not None and architecture_semantic(current) == architecture_semantic(old["context"]) and semantic(config) == old.get("config_hash") and visual_failure is None
+    candidate_state = observation.get("state")
+    candidates = observation.get("candidates", [])
+    blocked = candidate_state in ("incomplete", "baseline_missing", "baseline_incomplete", "rules_changed") or bool(candidates)
+    reason = failures or ([visual_failure] if visual_failure else ["source revision, config, or architecture context changed"])
+    if candidates: reason = ["high-value architecture candidate requires review"]
+    elif candidate_state in ("incomplete", "baseline_incomplete"): reason = ["candidate observation incomplete; tighten configured drift rules before trusting this context"]
+    elif candidate_state == "baseline_missing": reason = ["candidate baseline missing; run refresh to establish it"]
+    elif candidate_state == "rules_changed": reason = ["candidate rules changed; run refresh to establish a new reviewed baseline"]
+    result = freshness(old, "FRESH" if fresh and not blocked else "STALE", None if fresh and not blocked else reason) | {"last_good_available": True, "last_good_context_hash": old.get("context_hash")} | candidate_fields(observation)
+    if candidates: result["next_action"] = "inspect candidates, update canonical config/evidence if accepted, then run accept or reject"
+    elif candidate_state in ("baseline_missing", "rules_changed"): result["next_action"] = "review current source, then run refresh with reset_candidate_baseline"
+    return result
 
-def refresh(config_path: Path, explicit: str | None, changed: list[str] | None = None) -> dict[str, Any]:
+def refresh(config_path: Path, explicit: str | None, changed: list[str] | None = None, acknowledged: dict[str, dict[str, Any]] | None = None, expected_context_hash: str | None = None, reset_candidate_baseline: bool = False) -> dict[str, Any]:
     config, directory = load(config_path), state(config_path, explicit)
     try:
         repo = repo_for(config_path, config); facts, relation_facts, failures = validate(repo, config)
     except ValueError as e: repo, facts, relation_facts, failures = None, {}, [], [str(e)]
     if failures: return {"protocol_version": PROTOCOL_VERSION, "status": "INVALID", "freshness": "stale", "failures": failures, "last_good_preserved": last_path(directory).exists(), "next_action": "repair evidence/config, then refresh"}
+    old = load(last_path(directory)) if last_path(directory).exists() else None
+    if expected_context_hash is not None and (not isinstance(old, dict) or old.get("context_hash") != expected_context_hash): return {"protocol_version": PROTOCOL_VERSION, "status": "INVALID", "freshness": "stale", "failures": ["last-good changed while candidate was being reviewed"], "last_good_preserved": bool(old), "next_action": "re-run candidate review"}
+    try: observation = candidate_observation(config, repo, old)
+    except (OSError, ValueError) as error: return {"protocol_version": PROTOCOL_VERSION, "status": "INVALID", "freshness": "stale", "failures": [f"candidate observation failed: {error}"], "last_good_preserved": bool(old), "next_action": "repair configured drift rules, then refresh"}
+    if observation.get("state") in ("incomplete", "baseline_incomplete"):
+        return {"protocol_version": PROTOCOL_VERSION, "status": "CANDIDATE_CHECK_INCOMPLETE", "freshness": "stale", "last_good_preserved": bool(old), "next_action": "tighten configured drift rules before refresh"} | candidate_fields(observation)
+    if old is not None and observation.get("state") in ("baseline_missing", "rules_changed") and not reset_candidate_baseline:
+        return {"protocol_version": PROTOCOL_VERSION, "status": "CANDIDATE_CHECK_INCOMPLETE", "freshness": "stale", "last_good_preserved": True, "next_action": "review current source, then refresh with reset_candidate_baseline"} | candidate_fields(observation)
+    pending = observation.get("candidates", []) if isinstance(observation.get("candidates"), list) else []
+    acknowledged = acknowledged or {}
+    if pending and set(candidate["id"] for candidate in pending) != set(acknowledged):
+        return {"protocol_version": PROTOCOL_VERSION, "status": "CANDIDATE_REVIEW_REQUIRED", "freshness": "stale", "last_good_preserved": bool(old), "next_action": "inspect every candidate, then accept or reject it before refresh"} | candidate_fields(observation)
     candidate = context(config, revision(repo, {"components": facts, "relations": relation_facts}), facts, relation_facts)
-    try: graph, receipts = graph_refresh(config, repo, directory, changed), gates(config, repo, directory)
+    try: graph, receipts, archify = graph_refresh(config, repo, directory, changed), gates(config, repo, directory), archify_projection(config, repo, directory)
     except (OSError, RuntimeError, subprocess.TimeoutExpired, ValueError) as e: return {"protocol_version": PROTOCOL_VERSION, "status": "INVALID", "freshness": "stale", "failures": [str(e)], "last_good_preserved": last_path(directory).exists(), "next_action": "repair external validator, then refresh"}
-    record = {"record_version": CONFIG_VERSION, "created_at": datetime.now(timezone.utc).isoformat(), "repo": str(repo), "revision": revision(repo, {"components": facts, "relations": relation_facts}), "config_hash": semantic(config), "context_hash": semantic(candidate), "context": candidate, "graph": persistent_graph(graph), "gates": persistent_gates(receipts)}
+    decisions = [{key: value[key] for key in ("id", "kind", "rule_id", "decision") if key in value} for value in acknowledged.values()]
+    record = {"record_version": CONFIG_VERSION, "created_at": datetime.now(timezone.utc).isoformat(), "repo": str(repo), "revision": revision(repo, {"components": facts, "relations": relation_facts}), "config_hash": semantic(config), "context_hash": semantic(candidate), "context": candidate, "graph": persistent_graph(graph), "gates": persistent_gates(receipts), "archify": archify, "candidate_baseline": observation["current"]}
+    previous_snapshot = snapshot_record(directory, record["context_hash"])
+    previous_decisions = previous_snapshot.get("candidate_decisions", []) if isinstance(previous_snapshot, dict) and isinstance(previous_snapshot.get("candidate_decisions"), list) else []
+    merged_decisions = []
+    for decision in previous_decisions + decisions:
+        if isinstance(decision, dict) and decision not in merged_decisions: merged_decisions.append(decision)
+    if merged_decisions: record["candidate_decisions"] = merged_decisions[-DECISION_LIMIT:]
+    if reset_candidate_baseline: record["candidate_baseline_reset"] = True
+    elif isinstance(previous_snapshot, dict) and previous_snapshot.get("candidate_baseline_reset"): record["candidate_baseline_reset"] = True
     atomic(last_path(directory), record); atomic(directory / "snapshots" / f"{record['context_hash']}.json", record); prune_snapshots(directory)
-    return freshness(record, "PASS") | {"context_hash": record["context_hash"], "graph": graph, "gates": receipts, "changed_files": changed or []}
+    return freshness(record, "PASS") | {"context_hash": record["context_hash"], "graph": graph, "gates": receipts, "archify": archify, "changed_files": changed or [], "candidate_baseline_reset": bool(reset_candidate_baseline)}
 
 def snapshot(config_path: Path, explicit: str | None) -> dict[str, Any]:
     value = status(config_path, explicit); path = last_path(state(config_path, explicit))
     if not path.exists(): return value
     old = load(path)
-    return value | {"context": old["context"], "graph": persistent_graph(old.get("graph", {})) if isinstance(old.get("graph"), dict) else {}, "gates": persistent_gates(old.get("gates", [])) if isinstance(old.get("gates"), list) else []}
+    return value | {"context": old["context"], "graph": persistent_graph(old.get("graph", {})) if isinstance(old.get("graph"), dict) else {}, "gates": persistent_gates(old.get("gates", [])) if isinstance(old.get("gates"), list) else [], "archify": old.get("archify", {"configured": False})}
 def canonical(config_path: Path, explicit: str | None, ident: str) -> dict[str, Any]:
     value = snapshot(config_path, explicit)
     for x in value.get("context", {}).get("components", []):
@@ -337,7 +582,7 @@ def codex_block(relative_config: str) -> str:
 
 Use Archctx only when it shrinks the next broad source read (canonical/truth/evidence, cross-component path, freshness/delta, or legacy ambiguity); skip obvious local work.
 Run `archctx --config {relative_config} status`. Use its `FRESH`/`STALE` label, not unrelated Git dirtiness. If `FRESH`, use the smallest matching query: `search` to locate; `canonical`/`evidence` for a known component; `impact --files <paths>` before cross-component edits; `history` for prior context; `changed-since`/`drift` only with a supplied base revision.
-Source wins; stale, missing, or irrelevant context means normal targeted discovery. Let the watcher refresh; use `refresh` only without one. Orientation, never a gate.
+Read only returned evidence and the next directly needed source file. Source wins; stale, missing, or irrelevant context means normal targeted discovery. Default `watch` only observes; opt-in `watch --apply` may refresh already-declared evidence after validation, never candidates. Orientation, never a gate.
 {CODEX_END}
 '''
 
@@ -443,9 +688,10 @@ def paths_for(repo: Path, base: str | None, files: list[str] | None) -> list[str
 def owners(config: dict[str, Any], paths: list[str]) -> list[str]:
     changed = set(paths); return [x["id"] for x in components(config) if changed.intersection({e.get("path", "").replace("\\", "/") for e in x["evidence"] if isinstance(e, dict)})]
 def impact(config_path: Path, explicit: str | None, base: str | None, files: list[str] | None) -> dict[str, Any]:
-    config = load(config_path); changed = paths_for(repo_for(config_path, config), base, files); direct = owners(config, changed); ctx = snapshot(config_path, explicit).get("context", {})
+    config = load(config_path); changed = paths_for(repo_for(config_path, config), base, files); direct = owners(config, changed); retained = snapshot(config_path, explicit); ctx = retained.get("context", {})
     reach = sorted(set().union(*(set(authored(ctx, x, "downstream")) for x in direct))) if direct else []
-    return {"protocol_version": PROTOCOL_VERSION, "kind": "authored_architecture_impact", "provenance": "source_evidence_plus_authored_architecture", "base": base, "changed_files": changed, "direct_components": direct, "reachable_components": reach, "code_graph": {"available": isinstance(config.get("code_graph"), dict), "note": "Code edges remain separate provider facts; use trace --code."}, "next_action": "refresh" if direct else "no canonical evidence owner; no architecture refresh needed"}
+    next_action = "inspect affected evidence and test" if retained.get("status") == "FRESH" else "refresh" if direct else "no canonical evidence owner; no architecture refresh needed"
+    return {"protocol_version": PROTOCOL_VERSION, "kind": "authored_architecture_impact", "provenance": "source_evidence_plus_authored_architecture", "base": base, "changed_files": changed, "direct_components": direct, "reachable_components": reach, "code_graph": {"available": isinstance(config.get("code_graph"), dict), "note": "Code edges remain separate provider facts; use trace --code."}, "freshness": retained.get("freshness"), "next_action": next_action}
 
 def snapshot_files(directory: Path) -> list[Path]:
     root = directory / "snapshots"
@@ -491,7 +737,7 @@ def history(directory: Path, context_hash: str | None, limit: int) -> dict[str, 
     summaries = []
     for index, record in enumerate(records):
         previous = records[index - 1] if index else None; delta = record_diff(previous, record) if previous else None
-        summaries.append({"created_at": record.get("created_at"), "revision": record.get("revision"), "context_hash": record.get("context_hash"), "component_count": len(record.get("context", {}).get("components", [])), "relation_count": len(record.get("context", {}).get("relations", [])), "graph": persistent_graph(record.get("graph", {})) if isinstance(record.get("graph"), dict) else {}, "gates": persistent_gates(record.get("gates", [])) if isinstance(record.get("gates"), list) else [], "delta_from_previous": {"changed_components": delta["changed_components"], "evidence_changed_components": delta["evidence_changed_components"], "changed_relations": delta["changed_relations"], "evidence_changed_relations": delta["evidence_changed_relations"], "relation_change_count": len(delta["added_relations"]) + len(delta["removed_relations"]) + len(delta["changed_relations"])} if delta else None})
+        summaries.append({"created_at": record.get("created_at"), "revision": record.get("revision"), "context_hash": record.get("context_hash"), "component_count": len(record.get("context", {}).get("components", [])), "relation_count": len(record.get("context", {}).get("relations", [])), "graph": persistent_graph(record.get("graph", {})) if isinstance(record.get("graph"), dict) else {}, "gates": persistent_gates(record.get("gates", [])) if isinstance(record.get("gates"), list) else [], "candidate_baseline_reset": bool(record.get("candidate_baseline_reset")), "candidate_decisions": record.get("candidate_decisions", []) if isinstance(record.get("candidate_decisions"), list) else [], "delta_from_previous": {"changed_components": delta["changed_components"], "evidence_changed_components": delta["evidence_changed_components"], "changed_relations": delta["changed_relations"], "evidence_changed_relations": delta["evidence_changed_relations"], "relation_change_count": len(delta["added_relations"]) + len(delta["removed_relations"]) + len(delta["changed_relations"])} if delta else None})
     visible = list(reversed(summaries)) if limit == 0 else list(reversed(summaries[-limit:]))
     return {"protocol_version": PROTOCOL_VERSION, "status": "PASS", "kind": "architecture_history", "snapshots": visible, "snapshot_count": len(summaries), "omitted_snapshot_count": len(summaries) - len(visible), "retention": {"max_snapshots": SNAPSHOT_LIMIT, "content": "source-evidence snapshots; use context_hash to retrieve one"}}
 def changed_since(config_path: Path, explicit: str | None, rev: str) -> dict[str, Any]:
@@ -501,61 +747,252 @@ def changed_since(config_path: Path, explicit: str | None, rev: str) -> dict[str
     if old is None: return {"status": "ERROR", "error": f"no retained snapshot for revision {rev}"}
     new = load(last_path(directory)); return {"protocol_version": PROTOCOL_VERSION, "status": "PASS", "from_revision": rev, "to_revision": new["revision"]} | record_diff(old, new)
 def delta(config_path: Path, explicit: str | None, rev: str) -> dict[str, Any]: return changed_since(config_path, explicit, rev) | {"kind": "architecture_delta", "provenance": "retained_source_evidence_snapshots", "archify": "Use configured Archify gate receipts for typed IR/visual delta; no renderer is reimplemented here."}
+
+def candidates(config_path: Path, explicit: str | None, limit: int = CANDIDATE_OUTPUT_LIMIT) -> dict[str, Any]:
+    config, directory = load(config_path), state(config_path, explicit)
+    if not last_path(directory).exists(): return {"protocol_version": PROTOCOL_VERSION, "status": "MISSING", "freshness": "missing", "next_action": "run refresh to establish canonical and candidate baselines"}
+    old = load(last_path(directory))
+    try: observation = candidate_observation(config, repo_for(config_path, config), old)
+    except (OSError, ValueError) as error: return {"protocol_version": PROTOCOL_VERSION, "status": "CANDIDATE_CHECK_INCOMPLETE", "freshness": "stale", "last_good_preserved": True, "failures": [str(error)], "next_action": "repair drift rule observation"}
+    state_name, found = observation["state"], observation["candidates"]
+    status_name = "CANDIDATE_REVIEW_REQUIRED" if found else "CANDIDATE_CHECK_INCOMPLETE" if state_name in ("incomplete", "baseline_missing", "baseline_incomplete", "rules_changed") else "PASS"
+    next_action = "inspect candidates, then accept or reject" if found else "query normally" if status_name == "PASS" else "review current source, then run refresh with reset_candidate_baseline" if state_name in ("baseline_missing", "rules_changed") else "run refresh to establish or repair candidate baseline"
+    return {"protocol_version": PROTOCOL_VERSION, "status": status_name, "freshness": "stale" if status_name != "PASS" else "fresh", "base_context_hash": old.get("context_hash"), "last_good_preserved": True, "provenance": "deterministic_rule_derived_source_fact", "next_action": next_action} | candidate_fields(observation, limit)
+
+def binding_parts(value: str) -> tuple[str, str]:
+    if not isinstance(value, str) or ":" not in value: raise ValueError("bind must be component:<id> or relation:<id>")
+    kind, ident = value.split(":", 1)
+    if kind not in ("component", "relation") or not ident: raise ValueError("bind must be component:<id> or relation:<id>")
+    return kind, ident
+
+def binding_evidence(context_value: dict[str, Any], binding: tuple[str, str]) -> list[dict[str, Any]]:
+    kind, ident = binding
+    if kind == "component":
+        component = next((value for value in context_value.get("components", []) if value.get("id") == ident), None)
+        return component.get("evidence", []) if isinstance(component, dict) and isinstance(component.get("evidence"), list) else []
+    relation = next((value for value in context_value.get("relations", []) if isinstance(value, dict) and relation_id(value) == ident), None)
+    return relation.get("evidence", []) if isinstance(relation, dict) and isinstance(relation.get("evidence"), list) else []
+
+def candidate_pattern(config: dict[str, Any], candidate_value: dict[str, Any]) -> str:
+    for rule in normalized_drift_rules(config):
+        if rule["id"] != candidate_value.get("rule_id"): continue
+        for direction, patterns in (("added", rule["added_contains"]), ("removed", rule["removed_contains"])):
+            for pattern in patterns:
+                if signal_key(direction, pattern) == candidate_value.get("signal"): return pattern
+    raise ValueError("candidate signal no longer matches configured drift rule")
+
+def candidate_for_review(config_path: Path, explicit: str | None, ident: str) -> tuple[dict[str, Any], Path, dict[str, Any], dict[str, Any], dict[str, Any]]:
+    config, directory = load(config_path), state(config_path, explicit)
+    if not last_path(directory).exists(): raise ValueError("candidate review needs last-good context")
+    old, repo = load(last_path(directory)), repo_for(config_path, config)
+    observation = candidate_observation(config, repo, old)
+    if observation["state"] != "ready": raise ValueError("candidate observation is not complete")
+    candidate = next((value for value in observation["candidates"] if value["id"] == ident), None)
+    if candidate is None: raise ValueError("candidate is no longer pending; re-run candidates")
+    return config, directory, old, observation, candidate
+
+def changed_candidate_bindings(config: dict[str, Any], old: dict[str, Any], current: dict[str, Any], candidate_value: dict[str, Any]) -> set[tuple[str, str]]:
+    changes = record_diff(old, {"context": current})
+    changed_components = set(changes["changed_components"])
+    changed_relations = {relation_id(value) for value in changes["added_relations"] + changes["removed_relations"]} | set(changes["changed_relations"])
+    evidence_context = old["context"] if candidate_value.get("change") == "removed" else current
+    path = candidate_value.get("evidence", {}).get("path")
+    line = candidate_value.get("evidence", {}).get("line")
+    pattern = candidate_pattern(config, candidate_value)
+    changed = {("component", value) for value in changed_components} | {("relation", value) for value in changed_relations}
+    if not isinstance(path, str) or not isinstance(line, int) or not pattern: return set()
+    return {binding for binding in changed if any(path == evidence.get("path") and line == evidence.get("line") and pattern in str(evidence.get("contains", "")) for evidence in binding_evidence(evidence_context, binding) if isinstance(evidence, dict))}
+
+def validate_acceptance(config: dict[str, Any], old: dict[str, Any], current: dict[str, Any], candidate_value: dict[str, Any], bindings: list[str]) -> list[tuple[str, str]]:
+    parsed = [binding_parts(value) for value in bindings]
+    if not parsed or len(parsed) > 4 or len(parsed) != len(set(parsed)) or any(len(value) > 160 for value in bindings): raise ValueError("candidate bindings must be 1-4 unique short values")
+    changes = record_diff(old, {"context": current})
+    changed_components = set(changes["changed_components"])
+    changed_relations = {relation_id(value) for value in changes["added_relations"] + changes["removed_relations"]} | set(changes["changed_relations"])
+    for kind, value in parsed:
+        if kind == "component" and value not in changed_components: raise ValueError(f"candidate bind is not a semantic component change: {value}")
+        if kind == "relation" and value not in changed_relations: raise ValueError(f"candidate bind is not a semantic relation change: {value}")
+    if not set(parsed).intersection(changed_candidate_bindings(config, old, current, candidate_value)):
+        raise ValueError("at least one candidate bind needs source evidence at the exact candidate signal")
+    return parsed
+
+def current_context(config_path: Path, config: dict[str, Any]) -> dict[str, Any]:
+    repo = repo_for(config_path, config); facts, relation_facts, failures = validate(repo, config)
+    if failures: raise ValueError("cannot review candidate while config/evidence is invalid")
+    return context(config, revision(repo, {"components": facts, "relations": relation_facts}), facts, relation_facts)
+
+def pending_review_result(old: dict[str, Any], observation: dict[str, Any], summary: dict[str, Any], decisions: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    return {"protocol_version": PROTOCOL_VERSION, "status": "CANDIDATE_REVIEW_REQUIRED", "freshness": "stale", "last_good_preserved": True, "base_context_hash": old["context_hash"], "candidate": summary, "reviewed_candidate_count": len(decisions), "remaining_candidate_count": len(observation["candidates"]) - len(decisions), "next_action": "review every remaining candidate before promotion"} | candidate_fields(observation)
+
+def submit_candidate_decision(config_path: Path, explicit: str | None, ident: str, summary: dict[str, Any], details: dict[str, Any]) -> dict[str, Any]:
+    config, directory, old, observation, candidate_value = candidate_for_review(config_path, explicit, ident)
+    record = {"at": datetime.now(timezone.utc).isoformat(), "state": "pending", **summary, **details, "base_context_hash": old["context_hash"]}
+    record_decision(directory, record)
+    decisions = pending_decisions(directory, old["context_hash"], observation["candidates"])
+    if set(decisions) != {candidate["id"] for candidate in observation["candidates"]}:
+        return pending_review_result(old, observation, summary, decisions)
+    current = current_context(config_path, config)
+    by_id = {candidate["id"]: candidate for candidate in observation["candidates"]}
+    for decision_id, decision in decisions.items():
+        if decision.get("decision") == "accepted": validate_acceptance(config, old, current, by_id[decision_id], decision.get("bindings", []))
+    acknowledged = {decision_id: {key: decision[key] for key in ("id", "kind", "rule_id", "decision")} for decision_id, decision in decisions.items()}
+    result = refresh(config_path, explicit, acknowledged=acknowledged, expected_context_hash=old["context_hash"])
+    if result.get("status") == "PASS":
+        try: finalize_decisions(directory, old["context_hash"], decisions, result["context_hash"])
+        except (OSError, ValueError): result["decision_receipt_cleanup"] = "deferred"
+    return result | {"candidate": summary}
+
+def accept_candidate(config_path: Path, explicit: str | None, ident: str, bindings: list[str]) -> dict[str, Any]:
+    config, directory, old, observation, candidate_value = candidate_for_review(config_path, explicit, ident)
+    summary = {"id": ident, "kind": candidate_value["kind"], "rule_id": candidate_value["rule_id"], "decision": "accepted"}
+    validate_acceptance(config, old, current_context(config_path, config), candidate_value, bindings)
+    return submit_candidate_decision(config_path, explicit, ident, summary, {"bindings": bindings})
+
+def reject_candidate(config_path: Path, explicit: str | None, ident: str, reason: str) -> dict[str, Any]:
+    allowed = {"not_architecture", "existing_canonical", "test_fixture", "false_match"}
+    if reason not in allowed: raise ValueError("reject reason must be one of not_architecture, existing_canonical, test_fixture, false_match")
+    config, _, old, _, candidate_value = candidate_for_review(config_path, explicit, ident)
+    if changed_candidate_bindings(config, old, current_context(config_path, config), candidate_value): raise ValueError("candidate has changed canonical evidence; accept it instead of rejecting")
+    summary = {"id": ident, "kind": candidate_value["kind"], "rule_id": candidate_value["rule_id"], "decision": "rejected"}
+    return submit_candidate_decision(config_path, explicit, ident, summary, {"reason": reason})
+
 def drift(config_path: Path, base: str) -> dict[str, Any]:
     config = load(config_path); patch = git(repo_for(config_path, config), "diff", "--unified=0", f"{base}..HEAD")
     if patch is None: raise ValueError(f"cannot diff base {base}")
     found = []
-    for rule in config.get("drift_rules", []):
-        if not isinstance(rule, dict) or not isinstance(rule.get("pattern"), str) or not rule["pattern"]: continue
-        patterns = rule.get("paths", ["*"])
-        if not isinstance(patterns, list): raise ValueError("drift rule paths must be an array")
+    for rule in normalized_drift_rules(config):
         path = ""
         for line in patch.splitlines():
             if line.startswith("+++ b/"): path = line[6:]
-            elif line.startswith("+") and not line.startswith("+++") and rule["pattern"] in line[1:] and any(fnmatch.fnmatch(path, str(x)) for x in patterns):
-                candidate = {"kind": rule.get("kind", "unspecified"), "path": path, "pattern": rule["pattern"], "status": "CANDIDATE_REVIEW_REQUIRED"}
-                if candidate not in found: found.append(candidate)
-    return {"protocol_version": PROTOCOL_VERSION, "base": base, "candidates": found, "note": "Configured high-value additions only; candidates are not architecture facts.", "next_action": "review candidates, then update canonical config if appropriate" if found else "none"}
+            elif line.startswith(("+", "-")) and not line.startswith(("+++", "---")) and any(fnmatch.fnmatch(path, pattern) for pattern in rule["paths"]):
+                direction, patterns = ("added", rule["added_contains"]) if line.startswith("+") else ("removed", rule["removed_contains"])
+                for pattern in patterns:
+                    if pattern in line[1:]:
+                        candidate = {"kind": rule["kind"], "rule_id": rule["id"], "path": path, "signal": direction, "status": "CANDIDATE_REVIEW_REQUIRED", "provenance": "deterministic_git_diff_fact"}
+                        if candidate not in found: found.append(candidate)
+    return {"protocol_version": PROTOCOL_VERSION, "status": "PASS", "base": base, "candidates": found[:CANDIDATE_OUTPUT_LIMIT], "candidate_count": len(found), "omitted_candidate_count": max(0, len(found) - CANDIDATE_OUTPUT_LIMIT), "note": "Configured high-value additions/removals only; candidates are not architecture facts.", "next_action": "review candidates, then update canonical config if appropriate" if found else "none"}
 
 def ignored(path: str, patterns: list[Any]) -> bool: return any(fnmatch.fnmatch(path, str(x)) for x in patterns)
-def manifest(repo: Path, config: dict[str, Any]) -> dict[str, str | None]:
+def manifest(config_path: Path, repo: Path, config: dict[str, Any]) -> dict[str, str | None]:
     paths = {e["path"].replace("\\", "/") for x in components(config) for e in x["evidence"] if isinstance(e, dict) and isinstance(e.get("path"), str)}
+    mandatory: set[str] = set()
+    try:
+        config_relative = config_path.resolve().relative_to(repo.resolve()).as_posix()
+        paths.add(config_relative); mandatory.add(config_relative)
+    except ValueError: pass
+    if settings := archify_config(config, repo):
+        paths.add(settings["view_relative"]); mandatory.add(settings["view_relative"])
     watch = config.get("watch", {})
     if not isinstance(watch, dict): raise ValueError("watch must be an object")
+    ignore = watch.get("ignore", [])
+    if not isinstance(ignore, list) or not all(isinstance(pattern, str) for pattern in ignore): raise ValueError("watch.ignore must contain strings")
+    paths = {path for path in paths if path in mandatory or not ignored(path, ignore)}
+    def include(path: Path) -> None:
+        relative = path.resolve().relative_to(repo.resolve()).as_posix()
+        if not ignored(relative, ignore): paths.add(relative)
+        if len(paths) > WATCH_FILE_LIMIT: raise ValueError(f"watch scope exceeds {WATCH_FILE_LIMIT} files; narrow watch.paths")
+    if len(paths) > WATCH_FILE_LIMIT: raise ValueError(f"watch scope exceeds {WATCH_FILE_LIMIT} files; narrow watch.paths")
     for pattern in watch.get("paths", []):
         if not isinstance(pattern, str): raise ValueError("watch.paths must contain strings")
-        paths.update(x.relative_to(repo).as_posix() for x in repo.glob(pattern) if x.is_file())
-    return {p: sha((repo / p).read_bytes()) if (repo / p).is_file() else None for p in sorted(paths) if not ignored(p, watch.get("ignore", []))}
-def watch_once(config_path: Path, explicit: str | None) -> dict[str, Any]:
-    config = load(config_path); repo, directory = repo_for(config_path, config), state(config_path, explicit); live = directory / "live-state.json"; current = manifest(repo, config)
+        for path in repo.glob(relative_glob(pattern, "watch.paths")):
+            if path.is_file(): include(path)
+    candidate_paths, _ = candidate_files(repo, normalized_drift_rules(config), ignore)
+    for path in candidate_paths: include(path)
+    selected = [path for path in sorted(paths) if path in mandatory or not ignored(path, ignore)]
+    if len(selected) > WATCH_FILE_LIMIT: raise ValueError(f"watch scope exceeds {WATCH_FILE_LIMIT} files; narrow watch.paths")
+    total = 0; result: dict[str, str | None] = {}
+    for relative in selected:
+        path = repo / relative
+        if not path.is_file(): result[relative] = None; continue
+        total += path.stat().st_size
+        if total > WATCH_SOURCE_BYTES: raise ValueError(f"watch scope exceeds {WATCH_SOURCE_BYTES} source bytes; narrow watch.paths")
+        result[relative] = sha(path.read_bytes())
+    return result
+def watch_once(config_path: Path, explicit: str | None, apply: bool = False) -> dict[str, Any]:
+    try:
+        config = load(config_path); repo, directory = repo_for(config_path, config), state(config_path, explicit); live = directory / "live-state.json"; current = manifest(config_path, repo, config)
+    except (OSError, ValueError) as error:
+        directory = state(config_path, explicit)
+        return {"protocol_version": PROTOCOL_VERSION, "status": "INVALID", "freshness": "stale", "failures": [str(error)], "last_good_preserved": last_path(directory).exists(), "next_action": "repair watch/config scope before continuing"}
     previous = load(live).get("manifest", {}) if live.exists() else None
     if previous is None or previous != current: atomic(live, {"manifest": current, "observed_at": datetime.now(timezone.utc).isoformat()})
-    if previous is None: return {"protocol_version": PROTOCOL_VERSION, "status": "WATCH_READY", "watched_files": len(current), "next_action": "keep watching"}
+    if previous is None:
+        observed = candidates(config_path, explicit) if last_path(directory).exists() else {"status": "PASS"}
+        if observed.get("status") != "PASS": return observed | {"event": "ARCHITECTURE_CANDIDATE_OBSERVED", "changed_files": [], "direct_components": [], "watch_changed_files": []}
+        return {"protocol_version": PROTOCOL_VERSION, "status": "WATCH_READY", "watched_files": len(current), "next_action": "keep watching"}
     changed = sorted(p for p in set(previous) | set(current) if previous.get(p) != current.get(p)); direct = owners(config, changed)
-    if not direct: return {"protocol_version": PROTOCOL_VERSION, "status": "NO_RELEVANT_CHANGE", "changed_files": changed, "direct_components": [], "next_action": "no architecture refresh"}
-    return refresh(config_path, explicit, changed) | {"event": "CANONICAL_EVIDENCE_CHANGED", "direct_components": direct, "watch_changed_files": changed}
-def watch(config_path: Path, explicit: str | None, poll_ms: int, max_events: int | None) -> int:
+    controls = set()
+    try:
+        controls.add(config_path.resolve().relative_to(repo.resolve()).as_posix())
+    except ValueError: pass
+    if settings := archify_config(config, repo): controls.add(settings["view_relative"])
+    control_changed = sorted(set(changed) & controls); source_changed = [path for path in changed if path not in controls]
+    observed = candidates(config_path, explicit) if changed else {"status": "PASS"}
+    if observed.get("status") != "PASS": return observed | {"event": "ARCHITECTURE_CANDIDATE_OBSERVED", "changed_files": changed, "direct_components": direct, "watch_changed_files": changed}
+    if not direct and not control_changed: return {"protocol_version": PROTOCOL_VERSION, "status": "NO_RELEVANT_CHANGE", "changed_files": changed, "direct_components": [], "next_action": "no canonical evidence, architecture config/view, or high-value candidate changed"}
+    if apply:
+        refreshed = refresh(config_path, explicit, changed=source_changed)
+        event = "ARCHITECTURE_CONTEXT_REFRESHED" if refreshed.get("status") == "PASS" else "ARCHITECTURE_REFRESH_FAILED"
+        return refreshed | {"event": event, "direct_components": direct, "watch_changed_files": changed, "control_changed_files": control_changed, "auto_refresh": "existing_declared_context_only"}
+    event = "ARCHITECTURE_CONFIG_CHANGED" if control_changed and not direct else "CANONICAL_EVIDENCE_CHANGED"
+    return status(config_path, explicit) | {"event": event, "direct_components": direct, "watch_changed_files": changed, "control_changed_files": control_changed, "next_action": "inspect changed evidence/config, then run refresh explicitly when it remains canonical"}
+def watch(config_path: Path, explicit: str | None, poll_ms: int, max_events: int | None, apply: bool = False) -> int:
     count = 0
     while max_events is None or count < max_events:
-        started = time.monotonic(); value = watch_once(config_path, explicit)
+        started = time.monotonic(); value = watch_once(config_path, explicit, apply)
         if value["status"] != "NO_RELEVANT_CHANGE":
-            dump(value); record_usage(state(config_path, explicit), "watch", value, int((time.monotonic() - started) * 1000), "watch")
+            dump(value)
+            if value["status"] != "WATCH_READY": record_usage(state(config_path, explicit), "watch", value, int((time.monotonic() - started) * 1000), "watch")
         if value["status"] not in ("WATCH_READY", "NO_RELEVANT_CHANGE"): count += 1
         time.sleep(max(50, poll_ms) / 1000)
     return 0
 
 def mcp_tools() -> list[dict[str, Any]]:
-    empty = {"type": "object", "properties": {}}; ident = {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}
+    empty = {"type": "object", "properties": {}}
+    refresh_input = {"type": "object", "properties": {"reset_candidate_baseline": {"type": "boolean", "default": False}}}
+    candidates_input = {"type": "object", "properties": {"limit": {"type": "integer", "minimum": 0, "default": CANDIDATE_OUTPUT_LIMIT}}}
+    ident = {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}
     search_input = {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 0, "default": 3}}, "required": ["query"]}
     history_input = {"type": "object", "properties": {"context_hash": {"type": "string"}, "limit": {"type": "integer", "minimum": 0, "default": 10}}}
     usage_input = {"type": "object", "properties": {"operation": {"type": "string"}, "limit": {"type": "integer", "minimum": 0, "default": 10}}}
-    return [{"name": "architecture_status", "description": "Freshness and last-known-good metadata without context payload.", "inputSchema": empty}, {"name": "architecture_refresh", "description": "Validate and atomically promote context.", "inputSchema": empty}, {"name": "architecture_snapshot", "description": "Compact last-known-good context.", "inputSchema": empty}, {"name": "architecture_history", "description": "Bounded source-evidence snapshot history; pass context_hash only for one historical context.", "inputSchema": history_input}, {"name": "architecture_usage", "description": "Bounded local receipts of meaningful architecture operations, not session logs.", "inputSchema": usage_input}, {"name": "architecture_canonical", "description": "Canonical component and evidence.", "inputSchema": ident}, {"name": "architecture_search", "description": "Match the current task to compact canonical components; defaults to three results and reports omissions.", "inputSchema": search_input}, {"name": "architecture_evidence", "description": "Source evidence for one component.", "inputSchema": ident}, {"name": "architecture_trace", "description": "Authored relations; optional code graph stays separate.", "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}, "direction": {"enum": ["upstream", "downstream"]}, "include_code_edges": {"type": "boolean"}}, "required": ["id"]}}, {"name": "architecture_impact", "description": "Changed files to canonical ownership.", "inputSchema": {"type": "object", "properties": {"base": {"type": "string"}, "files": {"type": "array", "items": {"type": "string"}}}}}, {"name": "architecture_changed_since", "description": "Retained architecture delta by revision.", "inputSchema": {"type": "object", "properties": {"revision": {"type": "string"}}, "required": ["revision"]}}, {"name": "architecture_drift", "description": "Configured high-value drift candidates only.", "inputSchema": {"type": "object", "properties": {"base": {"type": "string"}}, "required": ["base"]}}, {"name": "architecture_stale", "description": "Alias for freshness status.", "inputSchema": empty}]
+    accept_input = {"type": "object", "properties": {"id": {"type": "string"}, "bindings": {"type": "array", "minItems": 1, "items": {"type": "string"}}}, "required": ["id", "bindings"]}
+    reject_input = {"type": "object", "properties": {"id": {"type": "string"}, "reason": {"enum": ["not_architecture", "existing_canonical", "test_fixture", "false_match"]}}, "required": ["id", "reason"]}
+    return [
+        {"name": "architecture_status", "description": "Freshness and last-known-good metadata without context payload.", "inputSchema": empty},
+        {"name": "architecture_refresh", "description": "Validate and atomically promote context only when no candidate is pending; reset_candidate_baseline is an explicit audited migration.", "inputSchema": refresh_input},
+        {"name": "architecture_snapshot", "description": "Compact last-known-good context.", "inputSchema": empty},
+        {"name": "architecture_history", "description": "Bounded source-evidence snapshot history; pass context_hash only for one historical context.", "inputSchema": history_input},
+        {"name": "architecture_usage", "description": "Bounded local receipts of meaningful architecture operations, not session logs.", "inputSchema": usage_input},
+        {"name": "architecture_candidates", "description": "Pending deterministic high-value source candidates; not canonical facts. Default is compact; limit 0 returns the bounded full set.", "inputSchema": candidates_input},
+        {"name": "architecture_accept_candidate", "description": "Promote a manually updated canonical config after one candidate is bound to changed source-evidence-backed architecture.", "inputSchema": accept_input},
+        {"name": "architecture_reject_candidate", "description": "Record one bounded fixed-code rejection and advance the verified candidate baseline.", "inputSchema": reject_input},
+        {"name": "architecture_canonical", "description": "Canonical component and evidence.", "inputSchema": ident},
+        {"name": "architecture_search", "description": "Match the current task to compact canonical components; defaults to three results and reports omissions.", "inputSchema": search_input},
+        {"name": "architecture_evidence", "description": "Source evidence for one component.", "inputSchema": ident},
+        {"name": "architecture_trace", "description": "Authored relations; optional code graph stays separate.", "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}, "direction": {"enum": ["upstream", "downstream"]}, "include_code_edges": {"type": "boolean"}}, "required": ["id"]}},
+        {"name": "architecture_impact", "description": "Changed files to canonical ownership.", "inputSchema": {"type": "object", "properties": {"base": {"type": "string"}, "files": {"type": "array", "items": {"type": "string"}}}}},
+        {"name": "architecture_changed_since", "description": "Retained architecture delta by revision.", "inputSchema": {"type": "object", "properties": {"revision": {"type": "string"}}, "required": ["revision"]}},
+        {"name": "architecture_drift", "description": "Configured high-value historical Git-diff candidates only.", "inputSchema": {"type": "object", "properties": {"base": {"type": "string"}}, "required": ["base"]}},
+        {"name": "architecture_stale", "description": "Alias for freshness status.", "inputSchema": empty},
+    ]
 def mcp_value(config_path: Path, explicit: str | None, name: str, args: dict[str, Any]) -> dict[str, Any]:
     if name in ("architecture_status", "architecture_stale"): return status(config_path, explicit)
-    if name == "architecture_refresh": return refresh(config_path, explicit)
+    if name == "architecture_refresh":
+        reset = args.get("reset_candidate_baseline", False)
+        if not isinstance(reset, bool): raise ValueError("reset_candidate_baseline must be boolean")
+        return refresh(config_path, explicit, reset_candidate_baseline=reset)
     if name == "architecture_snapshot": return snapshot(config_path, explicit)
     if name == "architecture_history": return history(state(config_path, explicit), args.get("context_hash"), int(args.get("limit", 10)))
     if name == "architecture_usage": return usage(state(config_path, explicit), args.get("operation"), int(args.get("limit", 10)))
+    if name == "architecture_candidates":
+        limit = args.get("limit", CANDIDATE_OUTPUT_LIMIT)
+        if not isinstance(limit, int) or isinstance(limit, bool): raise ValueError("candidate limit must be an integer")
+        return candidates(config_path, explicit, limit)
+    if name == "architecture_accept_candidate":
+        bindings = args.get("bindings", [])
+        if not isinstance(bindings, list) or not all(isinstance(value, str) for value in bindings): raise ValueError("bindings must be a string array")
+        return accept_candidate(config_path, explicit, str(args.get("id", "")), bindings)
+    if name == "architecture_reject_candidate": return reject_candidate(config_path, explicit, str(args.get("id", "")), str(args.get("reason", "")))
     if name == "architecture_canonical": return canonical(config_path, explicit, str(args.get("id", "")))
     if name == "architecture_search": return search(config_path, explicit, str(args.get("query", "")), int(args.get("limit", 3)))
     if name == "architecture_evidence":
@@ -574,6 +1011,7 @@ def serve_mcp(config_path: Path, explicit: str | None) -> int:
             elif method == "tools/list": result = {"tools": mcp_tools()}
             elif method == "tools/call":
                 name, arguments = str(params.get("name", "")), params.get("arguments", {})
+                if not isinstance(arguments, dict): raise ValueError("tool arguments must be an object")
                 started = time.monotonic(); value = mcp_value(config_path, explicit, name, arguments); elapsed = int((time.monotonic() - started) * 1000)
                 if name not in ("architecture_status", "architecture_stale", "architecture_history", "architecture_usage"): telemetry(state(config_path, explicit), f"mcp:{name}", value, elapsed)
                 record_usage(state(config_path, explicit), name, value, elapsed, "mcp", arguments.get("id") if isinstance(arguments, dict) else None)
@@ -587,14 +1025,18 @@ def serve_mcp(config_path: Path, explicit: str | None) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(); parser.add_argument("--config", help="defaults to .archctx/architecture.json in the current repository"); parser.add_argument("--state-dir"); sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("status", "refresh", "snapshot", "mcp", "telemetry"): sub.add_parser(name)
+    for name in ("status", "snapshot", "mcp", "telemetry"): sub.add_parser(name)
+    x = sub.add_parser("refresh"); x.add_argument("--reset-candidate-baseline", action="store_true")
+    x = sub.add_parser("candidates"); x.add_argument("--limit", type=int, default=CANDIDATE_OUTPUT_LIMIT)
     x = sub.add_parser("history"); x.add_argument("--context-hash"); x.add_argument("--limit", type=int, default=10)
     x = sub.add_parser("usage"); x.add_argument("--operation"); x.add_argument("--limit", type=int, default=10); x.add_argument("--import-legacy", action="store_true")
     x = sub.add_parser("canonical"); x.add_argument("id"); x = sub.add_parser("search"); x.add_argument("--query", required=True); x.add_argument("--limit", type=int, default=3); x = sub.add_parser("evidence"); x.add_argument("id")
     x = sub.add_parser("trace"); x.add_argument("id"); x.add_argument("--direction", choices=("upstream", "downstream"), default="downstream"); x.add_argument("--code", action="store_true")
     x = sub.add_parser("impact"); x.add_argument("--base"); x.add_argument("--files", nargs="*")
     x = sub.add_parser("changed-since"); x.add_argument("--revision", required=True); x = sub.add_parser("delta"); x.add_argument("--revision", required=True); x = sub.add_parser("drift"); x.add_argument("--base", required=True)
-    x = sub.add_parser("watch"); x.add_argument("--once", action="store_true"); x.add_argument("--poll-ms", type=int, default=500); x.add_argument("--max-events", type=int)
+    x = sub.add_parser("accept"); x.add_argument("id"); x.add_argument("--bind", action="append", required=True)
+    x = sub.add_parser("reject"); x.add_argument("id"); x.add_argument("--reason", required=True)
+    x = sub.add_parser("watch"); x.add_argument("--once", action="store_true"); x.add_argument("--apply", action="store_true", help="promote only already-declared context after source, graph, gate, and optional Archify validation pass"); x.add_argument("--poll-ms", type=int, default=500); x.add_argument("--max-events", type=int)
     x = sub.add_parser("install-codex"); x.add_argument("--target", default="AGENTS.md"); x.add_argument("--check", action="store_true")
     x = sub.add_parser("uninstall-codex"); x.add_argument("--target", default="AGENTS.md"); x.add_argument("--check", action="store_true")
     x = sub.add_parser("init"); x.add_argument("--repo", default="."); x.add_argument("--target", default="AGENTS.md"); x.add_argument("--component"); x.add_argument("--truth-source", action="append", default=[]); x.add_argument("--evidence", action="append", default=[]); x.add_argument("--check", action="store_true")
@@ -611,17 +1053,17 @@ def main() -> int:
         if args.command == "usage": dump(import_legacy_usage(state(config_path, args.state_dir)) if args.import_legacy else usage(state(config_path, args.state_dir), args.operation, args.limit)); return 0
         if args.command == "watch":
             if args.once:
-                started = time.monotonic(); value = watch_once(config_path, args.state_dir); elapsed = int((time.monotonic() - started) * 1000)
-                if value["status"] != "NO_RELEVANT_CHANGE": telemetry(state(config_path, args.state_dir), "watch", value, elapsed); record_usage(state(config_path, args.state_dir), "watch", value, elapsed, "watch")
+                started = time.monotonic(); value = watch_once(config_path, args.state_dir, args.apply); elapsed = int((time.monotonic() - started) * 1000)
+                if value["status"] not in ("NO_RELEVANT_CHANGE", "WATCH_READY"): telemetry(state(config_path, args.state_dir), "watch", value, elapsed); record_usage(state(config_path, args.state_dir), "watch", value, elapsed, "watch")
                 dump(value); return 0
-            return watch(config_path, args.state_dir, args.poll_ms, args.max_events)
+            return watch(config_path, args.state_dir, args.poll_ms, args.max_events, args.apply)
         target = Path(args.target) if args.command in ("install-codex", "uninstall-codex") else None
         install_target = target if target and target.is_absolute() else (repo_for(config_path, load(config_path)) / target) if target else None
-        actions = {"status": lambda: status(config_path, args.state_dir), "refresh": lambda: refresh(config_path, args.state_dir), "snapshot": lambda: snapshot(config_path, args.state_dir), "canonical": lambda: canonical(config_path, args.state_dir, args.id), "search": lambda: search(config_path, args.state_dir, args.query, args.limit), "evidence": lambda: mcp_value(config_path, args.state_dir, "architecture_evidence", {"id": args.id}), "trace": lambda: trace(config_path, args.state_dir, args.id, args.direction, args.code), "impact": lambda: impact(config_path, args.state_dir, args.base, args.files), "changed-since": lambda: changed_since(config_path, args.state_dir, args.revision), "delta": lambda: delta(config_path, args.state_dir, args.revision), "drift": lambda: drift(config_path, args.base), "install-codex": lambda: install_codex(config_path, install_target.resolve(), args.check), "uninstall-codex": lambda: uninstall_codex(install_target.resolve(), args.check)}
+        actions = {"status": lambda: status(config_path, args.state_dir), "refresh": lambda: refresh(config_path, args.state_dir, reset_candidate_baseline=args.reset_candidate_baseline), "snapshot": lambda: snapshot(config_path, args.state_dir), "candidates": lambda: candidates(config_path, args.state_dir, args.limit), "accept": lambda: accept_candidate(config_path, args.state_dir, args.id, args.bind), "reject": lambda: reject_candidate(config_path, args.state_dir, args.id, args.reason), "canonical": lambda: canonical(config_path, args.state_dir, args.id), "search": lambda: search(config_path, args.state_dir, args.query, args.limit), "evidence": lambda: mcp_value(config_path, args.state_dir, "architecture_evidence", {"id": args.id}), "trace": lambda: trace(config_path, args.state_dir, args.id, args.direction, args.code), "impact": lambda: impact(config_path, args.state_dir, args.base, args.files), "changed-since": lambda: changed_since(config_path, args.state_dir, args.revision), "delta": lambda: delta(config_path, args.state_dir, args.revision), "drift": lambda: drift(config_path, args.base), "install-codex": lambda: install_codex(config_path, install_target.resolve(), args.check), "uninstall-codex": lambda: uninstall_codex(install_target.resolve(), args.check)}
         started = time.monotonic(); value = actions[args.command]()
         elapsed = int((time.monotonic() - started) * 1000)
         if args.command not in ("status", "install-codex", "uninstall-codex"): telemetry(state(config_path, args.state_dir), args.command, value, elapsed)
-        record_usage(state(config_path, args.state_dir), args.command, value, elapsed, subject_id=args.id if args.command in ("canonical", "evidence", "trace") else None)
+        record_usage(state(config_path, args.state_dir), args.command, value, elapsed, subject_id=args.id if args.command in ("canonical", "evidence", "trace", "accept", "reject") else None)
         dump(value); return 0
     except (ValueError, OSError) as e: dump({"protocol_version": PROTOCOL_VERSION, "status": "ERROR", "error": str(e)}); return 2
 if __name__ == "__main__": raise SystemExit(main())

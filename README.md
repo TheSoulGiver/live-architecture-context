@@ -27,7 +27,7 @@ checked in: [benchmark data](benchmarks/observed-context-ab.json) ·
 ## Install in 30 seconds
 
 ```sh
-python -m pip install "git+https://github.com/TheSoulGiver/live-architecture-context.git@v0.1.6"
+python -m pip install "git+https://github.com/TheSoulGiver/live-architecture-context.git@v0.1.7"
 cd your-repository
 archctx init --component service --evidence 'src/service.py::def serve'
 ```
@@ -77,7 +77,7 @@ small, source-evidence-bound answer to all of these at once:
 - If validation fails, can the Agent retain last-good direction without silently
   treating it as current?
 
-![LAC sits between code facts and agents; Archify is a validation and visualization sidecar](assets/trust-stack.svg)
+![LAC connects code facts, Archify's authored architecture, and Agents](assets/trust-stack.svg)
 
 > **Source is truth. LAC remembers what is canonical, and knows when that memory is stale.**
 
@@ -90,7 +90,7 @@ small, source-evidence-bound answer to all of these at once:
 | `search` | At most three candidates by default, plus explicit omitted counts. |
 | `trace` / `impact` | Authored relations (with optional source evidence) stay separate from graph facts. |
 | `refresh` / `snapshot` | Validate before atomic promotion; preserve last-good on failure. |
-| `changed-since` / `drift` | Evidence-bound delta and configured high-value drift candidates. |
+| `changed-since` / `drift` / `candidates` | Evidence-bound delta, historical drift, and current high-value source candidates. |
 
 ## Different jobs, complementary tools
 
@@ -101,13 +101,18 @@ in [comparison sources](docs/public-face/comparison-sources.md).
 | Start with | Primary job | What it gives an Agent | What LAC adds instead of duplicating it |
 | --- | --- | --- | --- |
 | Direct repository search | Read current source | Exact files and strings | A compact, declared canonical starting point with freshness state. |
-| [CALM](https://github.com/Eilodon/CALM) / [CodeGraphContext](https://github.com/CodeGraphContext/CodeGraphContext) | Code facts and dependency graph | Callers, callees, imports, graph/index freshness | A truth-source and canonicality contract; configured graph facts remain separately labelled. |
-| [Archify](https://github.com/tt-a1i/archify) | Typed validation and human visualization | Validated diagrams, revision-pinned evidence when configured | Agent-facing current/stale/LKG context; Archify remains the visual sidecar. |
+| [CALM](https://github.com/Eilodon/CALM) | Optional code facts and dependency graph | Callers, callees, imports, graph/index freshness | A truth-source and canonicality contract; configured graph facts remain separately labelled. |
+| [CodeGraphContext](https://github.com/CodeGraphContext/CodeGraphContext) | Researched graph/index alternative | Its own code-fact model | No runtime dependency or copied implementation. |
+| [Archify](https://github.com/tt-a1i/archify) | Authored typed IR, validation, and human visualization | Validated diagrams, revision-pinned evidence when configured | Source-current/LKG context and a verified projection; Archify remains the visual and validation foundation. |
 | [ArchContext](https://github.com/Ancienttwo/arch-context) / [GyroCompass](https://github.com/gyrocompass-io/gyrocompass) | Architecture control loops, rules, and drift policy | Workflow lifecycle, practices, or architecture rules | A smaller rebuildable index that does not own an authored architecture baseline. |
-| **Live Architecture Context** | Canonical orientation | What implementation and truth source to trust now | Delegates parsing/graphing to CALM and visualization/validation to Archify. |
+| **Live Architecture Context** | Canonical orientation | What implementation and truth source to trust now | Composes CALM code facts with Archify's typed visual layer without copying either owner. |
 
 LAC does not relabel a graph edge as an authored relation, copy a parser or
 renderer, or claim that a passing snapshot is source authority.
+
+Lineage matters: an early prototype described CodeGraphContext in its concept
+chain; the current optional graph adapter is CALM. ArchContext and GyroCompass
+are comparison/research inputs, not embedded runtime dependencies.
 
 ## Real dogfood, anonymized
 
@@ -128,18 +133,25 @@ from this repository.
 
 ```sh
 archctx --config architecture.json refresh
-archctx --config architecture.json watch --poll-ms 500
+archctx --config architecture.json watch --apply --poll-ms 500
 ```
 
-The watcher hashes configured evidence plus optional `watch.paths`; `watch
---once` returns `NO_RELEVANT_CHANGE` for an unrelated watched file, while a
-continuous watcher is quiet and only updates its local manifest when it changes.
-A changed canonical source performs one validation/promotion cycle. Invalid
-evidence or a failed external gate leaves `last-good.json` untouched and every
-response is `STALE`/`INVALID`.
+The watcher hashes configured evidence, optional `watch.paths`, the architecture
+config, an optional Archify view, and configured high-value candidate paths.
+`watch --once` returns `NO_RELEVANT_CHANGE` for an unrelated watched file, while
+a continuous watcher is quiet and only updates its local manifest when it
+changes. Default `watch` observes and marks stale. Opt-in `watch --apply`
+promotes only an already-declared context after source validation, configured
+incremental graph refresh, gates, and optional Archify validation pass. It never
+writes components or relations: a high-value candidate remains
+`CANDIDATE_REVIEW_REQUIRED` until an Agent explicitly accepts or rejects it.
+Invalid evidence or a failed external validator leaves both `last-good.json` and
+the previous Archify output untouched.
 `code_graph.incremental` can receive `{changed_files}`; for a persistent CALM
 daemon without that command, the result explicitly says
 `external_daemon_unverified`, rather than claiming a graph refresh occurred.
+The watcher refuses scopes above 512 files or 8 MiB of configured source; narrow
+`watch.paths` instead of turning each polling tick into a repository scan.
 
 ## Agent protocol
 
@@ -158,6 +170,10 @@ archctx --config architecture.json trace service --code
 archctx --config architecture.json impact --files src/service.py
 archctx --config architecture.json changed-since --revision <git-sha>
 archctx --config architecture.json drift --base <git-sha>
+archctx --config architecture.json candidates
+archctx --config architecture.json candidates --limit 0
+archctx --config architecture.json accept <candidate-id> --bind component:provider
+archctx --config architecture.json reject <candidate-id> --reason false_match
 archctx --config architecture.json mcp
 ```
 
@@ -172,9 +188,10 @@ CLI accepts `archctx status` (and the other non-`init` commands) without
 `--config`; it never searches elsewhere for a config. Explicit `--config`
 remains the portable form for a nonstandard location.
 
-MCP tools: `status`, `refresh`, `snapshot`, `history`, `usage`, `canonical`,
-`evidence`, `trace`, `impact`, `changed-since`, `drift`, and `stale` (all prefixed
-`architecture_`). An MCP client configuration is simply:
+MCP tools: `status`, `refresh`, `snapshot`, `history`, `usage`, `candidates`,
+`accept_candidate`, `reject_candidate`, `canonical`, `evidence`, `trace`,
+`impact`, `changed-since`, `drift`, and `stale` (all prefixed `architecture_`).
+An MCP client configuration is simply:
 
 ```json
 {"command":"/absolute/path/to/python","args":["/absolute/path/archctx.py","--config","/absolute/path/architecture.json","mcp"]}
@@ -202,9 +219,9 @@ it remains explicitly `authored_architecture`, not a claimed code-graph fact.
 {"version":1,"repo":".","components":[{"id":"service","truth_sources":["src/service.py"],"evidence":[{"path":"src/service.py","contains":"def serve"}]}],"relations":[]}
 ```
 
-## Experimental Archify projection
+## Archify projection
 
-`prototype/archctx_to_archify.py` is a thin, standalone projection from a
+`archctx-to-archify` is a thin, installed projection from a
 declared Archctx config plus a human-authored view to Archify architecture IR.
 The CLI revalidates source evidence before it writes output. It never parses
 source, changes canonical state, or invents a relation: every visible node and
@@ -214,9 +231,22 @@ canonical ID. The prototype deliberately does not pass through arbitrary
 Archify cards, boundaries, or routing fields.
 
 ```sh
-python prototype/archctx_to_archify.py --config demo-repo/architecture.json --view demo-repo/architecture.view.json --output /tmp/architecture.json
+archctx-to-archify --config demo-repo/architecture.json --view demo-repo/architecture.view.json --output /tmp/architecture.json
 archify validate architecture /tmp/architecture.json --quality showcase --json
 ```
+
+To keep a human Archify blueprint alongside the opt-in live loop, declare the
+view, derived output, and a pinned Archify validation command in the same trusted
+config:
+
+```json
+{"archify":{"view":".archctx/architecture.view.json","output":".archctx/architecture.archify.json","validate":["archify","validate","architecture","{archify_output}","--quality","showcase","--json"]}}
+```
+
+`watch --apply` stages this derived JSON, validates the staged file, then
+atomically replaces the output before promoting the matching Archctx record.
+The view remains human-authored and may intentionally be focused; Archctx never
+fills in omitted nodes or invents a relation.
 
 Supported command substitutions are `{repo}`, `{state}`, `{changed_files}`;
 code-graph queries also receive `{symbol}` and `{direction}`. Treat project
@@ -238,6 +268,17 @@ always retained. Persisted snapshots retain validator receipts, not diagnostic
 command/output tails. Telemetry also reports bounded result categories and an
 `actionable_result_rate`; it is a result proxy, not evidence that an Agent used
 the result or that a task succeeded.
+
+Candidate baselines contain only repo-relative paths, counts, line numbers, and
+hashes; they never retain matched source text or a patch. Candidate decisions
+are capped at 64 local records / 64 KiB and retain fixed reason codes or
+component/relation bindings, not prompts or source content. A one-time
+candidate-baseline migration requires the explicit
+`refresh --reset-candidate-baseline` flag and is marked in snapshot history.
+Candidate rules are intentionally bounded to 256 files / 4 MiB of source per
+observation and respect `watch.ignore`; broad rules fail closed as stale rather
+than turning the watcher into a full-repository scanner. The independent watcher
+scope is likewise capped at 512 files / 8 MiB.
 
 ## Boundaries and release notes
 
