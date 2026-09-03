@@ -59,14 +59,18 @@ class ArchitectureContextTest(unittest.TestCase):
             self.assertEqual(failed["status"], "INVALID")
             self.assertTrue(failed["last_good_preserved"])
 
-    def test_search_accepts_a_positional_query_or_the_compatible_flag(self):
+    def test_agent_friendly_query_aliases_preserve_compact_results(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory); source = root / "store.py"; source.write_text("class Store: pass\n")
+            root = Path(directory); source = root / "store.py"; source.write_text("class Store: pass\n"); (root / "service.py").write_text("def serve(): pass\n")
             config, state = root / "context.json", root / "state"
-            config.write_text(json.dumps({"version": 1, "repo": ".", "components": [{"id": "store", "evidence": [{"path": "store.py", "contains": "class Store"}]}]}))
+            config.write_text(json.dumps({"version": 1, "repo": ".", "components": [{"id": "store", "evidence": [{"path": "store.py", "contains": "class Store"}]}, {"id": "service", "evidence": [{"path": "service.py", "contains": "def serve"}]}], "relations": [{"from": "service", "to": "store", "kind": "reads"}]}))
             self.assertEqual(run(config, state, "refresh")["status"], "PASS")
             self.assertEqual(run(config, state, "search", "store")["matches"][0]["id"], "store")
             self.assertEqual(run(config, state, "search", "--query", "store")["matches"][0]["id"], "store")
+            self.assertEqual(run(config, state, "canonical", "--component", "store")["canonical"]["id"], "store")
+            self.assertEqual(run(config, state, "evidence", "--component", "store")["evidence"][0]["path"], "store.py")
+            traced = run(config, state, "trace", "--from", "service", "--to", "store")
+            self.assertEqual((traced["target_reachable"], traced["target_direct"]), (True, True))
 
     def test_watcher_never_labels_a_full_graph_refresh_incremental(self):
         with tempfile.TemporaryDirectory() as directory:

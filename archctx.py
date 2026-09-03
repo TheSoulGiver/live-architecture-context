@@ -724,9 +724,13 @@ def code_query(config: dict[str, Any], repo: Path, directory: Path, symbol: str,
     try: result: Any = json.loads(r.stdout)
     except json.JSONDecodeError: result = {"stdout_tail": r.stdout.strip()[-1000:]}
     return {"available": True, "kind": "code_graph_query", "provider": graph.get("provider", "external"), "confidence": "provider_reported", "result": result}
-def trace(config_path: Path, explicit: str | None, ident: str, direction: str, include_code: bool = False) -> dict[str, Any]:
+def trace(config_path: Path, explicit: str | None, ident: str, direction: str, include_code: bool = False, target: str | None = None) -> dict[str, Any]:
     value = snapshot(config_path, explicit); ctx = value.get("context", {})
     answer = {k: value[k] for k in ("protocol_version", "status", "revision", "freshness", "next_action") if k in value} | {"kind": "authored_architecture_trace", "provenance": "authored_architecture", "origin": ident, "direction": direction, "components": authored(ctx, ident, direction), "relations": direct_relations(ctx, ident, direction), "warning": value.get("reason")}
+    if target:
+        answer["target"] = target
+        answer["target_reachable"] = target in answer["components"]
+        answer["target_direct"] = any(relation.get("to") == target if direction == "downstream" else relation.get("from") == target for relation in answer["relations"])
     if include_code and ident in {x["id"] for x in ctx.get("components", [])}:
         config = load(config_path); component = next(x for x in ctx["components"] if x["id"] == ident); answer["code_graph"] = code_query(config, repo_for(config_path, config), state(config_path, explicit), component.get("code_symbol", ident), direction)
     return answer
@@ -1082,8 +1086,8 @@ def main() -> int:
     x = sub.add_parser("candidates"); x.add_argument("--limit", type=int, default=CANDIDATE_OUTPUT_LIMIT)
     x = sub.add_parser("history"); x.add_argument("--context-hash"); x.add_argument("--limit", type=int, default=10)
     x = sub.add_parser("usage"); x.add_argument("--operation"); x.add_argument("--limit", type=int, default=10); x.add_argument("--import-legacy", action="store_true")
-    x = sub.add_parser("canonical"); x.add_argument("id"); x = sub.add_parser("search"); x.add_argument("query", nargs="?"); x.add_argument("--query", dest="query_flag"); x.add_argument("--limit", type=int, default=3); x = sub.add_parser("evidence"); x.add_argument("id")
-    x = sub.add_parser("trace"); x.add_argument("id"); x.add_argument("--direction", choices=("upstream", "downstream"), default="downstream"); x.add_argument("--code", action="store_true")
+    x = sub.add_parser("canonical"); x.add_argument("id", nargs="?"); x.add_argument("--component"); x = sub.add_parser("search"); x.add_argument("query", nargs="?"); x.add_argument("--query", dest="query_flag"); x.add_argument("--limit", type=int, default=3); x = sub.add_parser("evidence"); x.add_argument("id", nargs="?"); x.add_argument("--component")
+    x = sub.add_parser("trace"); x.add_argument("id", nargs="?"); x.add_argument("--from", dest="source"); x.add_argument("--to", dest="target"); x.add_argument("--direction", choices=("upstream", "downstream"), default="downstream"); x.add_argument("--code", action="store_true")
     x = sub.add_parser("impact"); x.add_argument("--base"); x.add_argument("--files", nargs="*")
     x = sub.add_parser("changed-since"); x.add_argument("--revision", required=True); x = sub.add_parser("delta"); x.add_argument("--revision", required=True); x = sub.add_parser("drift"); x.add_argument("--base", required=True)
     x = sub.add_parser("accept"); x.add_argument("id"); x.add_argument("--bind", action="append", required=True)
@@ -1095,6 +1099,10 @@ def main() -> int:
     args = parser.parse_args()
     if args.command == "search" and bool(args.query) == bool(args.query_flag):
         parser.error("search requires exactly one query (positional or --query)")
+    if args.command in ("canonical", "evidence") and bool(args.id) == bool(args.component):
+        parser.error(f"{args.command} requires exactly one component (positional or --component)")
+    if args.command == "trace" and bool(args.id) == bool(args.source):
+        parser.error("trace requires exactly one origin (positional or --from)")
     try:
         if args.command == "init":
             repo = Path(args.repo).resolve(); target = Path(args.target); target = target if target.is_absolute() else repo / target
@@ -1113,7 +1121,7 @@ def main() -> int:
             return watch(config_path, args.state_dir, args.poll_ms, args.max_events, args.apply)
         target = Path(args.target) if args.command in ("install-codex", "uninstall-codex") else None
         install_target = target if target and target.is_absolute() else (repo_for(config_path, load(config_path)) / target) if target else None
-        actions = {"status": lambda: status(config_path, args.state_dir), "refresh": lambda: refresh(config_path, args.state_dir, reset_candidate_baseline=args.reset_candidate_baseline), "snapshot": lambda: snapshot(config_path, args.state_dir), "candidates": lambda: candidates(config_path, args.state_dir, args.limit), "accept": lambda: accept_candidate(config_path, args.state_dir, args.id, args.bind), "reject": lambda: reject_candidate(config_path, args.state_dir, args.id, args.reason), "canonical": lambda: canonical(config_path, args.state_dir, args.id), "search": lambda: search(config_path, args.state_dir, args.query_flag or args.query, args.limit), "evidence": lambda: mcp_value(config_path, args.state_dir, "architecture_evidence", {"id": args.id}), "trace": lambda: trace(config_path, args.state_dir, args.id, args.direction, args.code), "impact": lambda: impact(config_path, args.state_dir, args.base, args.files), "changed-since": lambda: changed_since(config_path, args.state_dir, args.revision), "delta": lambda: delta(config_path, args.state_dir, args.revision), "drift": lambda: drift(config_path, args.base), "install-codex": lambda: install_codex(config_path, install_target.resolve(), args.check), "uninstall-codex": lambda: uninstall_codex(install_target.resolve(), args.check)}
+        actions = {"status": lambda: status(config_path, args.state_dir), "refresh": lambda: refresh(config_path, args.state_dir, reset_candidate_baseline=args.reset_candidate_baseline), "snapshot": lambda: snapshot(config_path, args.state_dir), "candidates": lambda: candidates(config_path, args.state_dir, args.limit), "accept": lambda: accept_candidate(config_path, args.state_dir, args.id, args.bind), "reject": lambda: reject_candidate(config_path, args.state_dir, args.id, args.reason), "canonical": lambda: canonical(config_path, args.state_dir, args.component or args.id), "search": lambda: search(config_path, args.state_dir, args.query_flag or args.query, args.limit), "evidence": lambda: mcp_value(config_path, args.state_dir, "architecture_evidence", {"id": args.component or args.id}), "trace": lambda: trace(config_path, args.state_dir, args.source or args.id, args.direction, args.code, args.target), "impact": lambda: impact(config_path, args.state_dir, args.base, args.files), "changed-since": lambda: changed_since(config_path, args.state_dir, args.revision), "delta": lambda: delta(config_path, args.state_dir, args.revision), "drift": lambda: drift(config_path, args.base), "install-codex": lambda: install_codex(config_path, install_target.resolve(), args.check), "uninstall-codex": lambda: uninstall_codex(install_target.resolve(), args.check)}
         started = time.monotonic(); value = actions[args.command]()
         elapsed = int((time.monotonic() - started) * 1000)
         if args.command not in ("status", "install-codex", "uninstall-codex"): telemetry(state(config_path, args.state_dir), args.command, value, elapsed)

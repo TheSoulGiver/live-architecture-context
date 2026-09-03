@@ -192,6 +192,8 @@ context is needed. `search` returns at most three matches by default and always
 reports `match_count` and `omitted_match_count`; `search --query "…"` remains
 compatible, but the positional form is shorter for Agents. Pass `--limit 0` only when an
 unbounded result is genuinely needed.
+`canonical` and `evidence` also accept `--component`; `trace --from <id> --to <id>` reports
+authored reachability and whether that relation is direct.
 
 In a repository initialized with the standard `.archctx/architecture.json`, the
 CLI accepts `archctx status` (and the other non-`init` commands) without
