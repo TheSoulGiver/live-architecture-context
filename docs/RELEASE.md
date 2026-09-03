@@ -5,7 +5,7 @@
 3. Confirm README examples work from a clean clone on Windows and Linux CI.
 4. Pin CALM/Archify commands in consumer configs; do not claim their outputs
    are authored facts.
-5. Confirm package metadata, both installed CLI names, `archctx.py` MCP
+5. Confirm package metadata, all installed CLI names, `archctx.py` MCP
    `serverInfo.version`, plugin manifest, CHANGELOG, README, NOTICE, and
    LICENSE agree on the version and boundaries.
 6. Create an annotated `v<version>` tag, push `main` and the tag, then publish a

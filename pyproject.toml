@@ -12,6 +12,7 @@ license = {text = "MIT"}
 [project.scripts]
 archctx = "archctx:main"
 archctx-to-archify = "archctx_to_archify:main"
+archctx-calm-query = "calm_query:main"
 
 [tool.setuptools]
-py-modules = ["archctx", "archctx_to_archify"]
+py-modules = ["archctx", "archctx_to_archify", "calm_query"]

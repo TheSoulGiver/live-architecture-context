@@ -27,7 +27,11 @@ checked in: [benchmark data](benchmarks/observed-context-ab.json) ·
 ## Install in 30 seconds
 
 ```sh
-python -m pip install "git+https://github.com/TheSoulGiver/live-architecture-context.git@v0.1.7"
+# Released package
+python -m pip install "git+https://github.com/TheSoulGiver/live-architecture-context.git@v0.1.6"
+
+# Or, from the current checkout (including unreleased changes)
+python -m pip install .
 cd your-repository
 archctx init --component service --evidence 'src/service.py::def serve'
 ```
@@ -206,10 +210,21 @@ An MCP client configuration is simply:
 results. With a configured `code_graph.query`, code edges appear in a separate
 `code_graph` field with `confidence: provider_reported`.
 
-`calm_query.py` is the supplied thin adapter for CALM's read-only MCP
-`callers`/`callees` tools. It returns a capped, confidence-labelled edge list;
-CALM remains the parser/index owner and a full CALM index is never labelled
-incremental.
+`archctx-calm-query` is the supplied thin adapter for CALM's read-only
+`callers`/`callees` tools. It attaches to an explicitly managed loopback
+Streamable HTTP endpoint; it starts no daemon, uses no `npx`, and stores no
+CALM response. Each query orients with `repo_overview`, rejects a non-ready or
+non-fresh CALM watcher, then returns a capped, confidence-labelled edge list.
+
+```json
+{"code_graph":{"provider":"CALM","query":["archctx-calm-query","--repo","{repo}","--symbol","{symbol}","--direction","{direction}","--endpoint","http://127.0.0.1:<port>/mcp"]}}
+```
+
+CALM remains the parser/index owner. Its current status protocol does not
+publish the exact processed-path digest for one watcher transaction, so this
+adapter deliberately cannot emit a verified incremental refresh receipt. Its
+edges remain separately labelled `provider_reported`; source evidence and
+last-known-good promotion remain Archctx's own fail-closed contract.
 
 ## Config contract (v1)
 

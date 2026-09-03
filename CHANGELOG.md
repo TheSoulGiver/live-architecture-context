@@ -24,6 +24,9 @@
   failed validation.
 - Package the Archify projector as `archctx-to-archify` in the same wheel as
   `archctx`; it remains a source-validated projection, not a renderer fork.
+- Package `archctx-calm-query`, a loopback-only, read-only CALM HTTP adapter.
+  It attaches to an explicitly managed fresh CALM watcher and returns capped
+  code facts; it neither starts CALM nor claims an incremental receipt.
 
 ## v0.1.6
 
