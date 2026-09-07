@@ -21,11 +21,17 @@ facts stay in their owning environment: user data, databases, secrets,
 credentials, session or process state, attestations, generated artifacts, and
 raw local evidence. A code commit never proves a deployment is running.
 
-Keep a shared, reviewed architecture config/view in a tracked repo-relative
-path (for example `architecture.json` and `architecture.view.json`). Keep
-rebuildable `.archctx/` state—last-good, snapshots, watcher state, usage, and
-candidate decisions—local and ignored. Review a shared architecture config as
+Keep a shared, reviewed architecture config/view in a dedicated tracked
+directory (for example `architecture/architecture.json` and
+`architecture/architecture.view.json`). Its adjacent `.archctx/` directory
+holds rebuildable last-good, snapshots, watcher state, usage, and candidate
+decisions locally and stays ignored. Review a shared architecture config as
 code: its evidence and configured commands may be sensitive or executable.
+
+For a cross-module architecture question in this repository, use
+`archctx --config architecture/architecture.json` only when it will eliminate
+the next broad source read. Check `status` first and treat `STALE` as a reason
+for targeted source verification, never as permission to guess or a Gate.
 
 ## Completed-work sync
 

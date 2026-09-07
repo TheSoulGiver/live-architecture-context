@@ -1,0 +1,92 @@
+{
+  "version": 1,
+  "repo": "..",
+  "components": [
+    {
+      "id": "archctx-cli",
+      "name": "Archctx CLI and MCP server",
+      "purpose": "Validates source evidence, retains last-good context, and serves compact agent queries.",
+      "truth_sources": ["archctx.py"],
+      "tags": ["canonical", "agent-protocol"],
+      "evidence": [
+        {"path": "archctx.py", "contains": "Source-grounded live architecture context; CALM/Archify remain external owners."}
+      ]
+    },
+    {
+      "id": "last-known-good-state",
+      "name": "Last-known-good context state",
+      "purpose": "Preserves a validated source-evidence context when a later refresh is stale or invalid.",
+      "truth_sources": ["archctx.py"],
+      "tags": ["state", "trust"],
+      "evidence": [
+        {"path": "archctx.py", "contains": "atomic(last_path(directory), record)"}
+      ]
+    },
+    {
+      "id": "archify-projection",
+      "name": "Archify projection",
+      "purpose": "Projects a declared Archctx view into Archify's typed architecture IR.",
+      "truth_sources": ["archctx_to_archify.py"],
+      "tags": ["visualization", "optional"],
+      "evidence": [
+        {"path": "archctx_to_archify.py", "contains": "Project a declared Archctx view into Archify's typed architecture IR."}
+      ]
+    },
+    {
+      "id": "calm-query-adapter",
+      "name": "CALM query adapter",
+      "purpose": "Reads bounded caller and callee facts from an already-managed local CALM endpoint.",
+      "truth_sources": ["calm_query.py"],
+      "tags": ["code-graph", "optional", "local"],
+      "evidence": [
+        {"path": "calm_query.py", "contains": "Compact, read-only CALM callers/callees adapter for Archctx."}
+      ]
+    },
+    {
+      "id": "codex-skills",
+      "name": "On-demand Codex skills",
+      "purpose": "Guide Agents to use compact architecture context only when it avoids a broad source read.",
+      "truth_sources": ["plugins/live-architecture-context/.codex-plugin/plugin.json", "plugins/live-architecture-context/skills/architecture-context/SKILL.md"],
+      "tags": ["agent-entry", "optional"],
+      "evidence": [
+        {"path": "plugins/live-architecture-context/.codex-plugin/plugin.json", "contains": "\"skills\": \"./skills/\""}
+      ]
+    }
+  ],
+  "relations": [
+    {
+      "from": "archctx-cli",
+      "to": "last-known-good-state",
+      "kind": "promotes-last-good",
+      "evidence": [
+        {"path": "archctx.py", "contains": "atomic(last_path(directory), record)"}
+      ]
+    },
+    {
+      "from": "archify-projection",
+      "to": "archctx-cli",
+      "kind": "reuses-validation",
+      "evidence": [
+        {"path": "archctx_to_archify.py", "contains": "from archctx import components as validated_components"}
+      ]
+    },
+    {
+      "from": "codex-skills",
+      "to": "archctx-cli",
+      "kind": "guides-to",
+      "evidence": [
+        {"path": "plugins/live-architecture-context/skills/architecture-context/SKILL.md", "contains": "Use architecture context only when it will eliminate the next broad source read."}
+      ]
+    }
+  ],
+  "watch": {
+    "paths": [
+      "archctx.py",
+      "archctx_to_archify.py",
+      "calm_query.py",
+      "plugins/live-architecture-context/.codex-plugin/plugin.json",
+      "plugins/live-architecture-context/skills/*/SKILL.md"
+    ],
+    "ignore": [".archctx/*", ".calm/*", "__pycache__/*"]
+  }
+}

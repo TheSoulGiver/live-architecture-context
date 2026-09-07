@@ -48,11 +48,13 @@ GitHub is the default channel for reproducible code facts: reviewed source,
 small completed commits, durable design docs, and a project-safe architecture
 config/view. `init` intentionally keeps its default `.archctx/` configuration
 private. When a team needs shared architecture context, keep the reviewed
-config and optional Archify view in a tracked repo-relative path (for example
-`architecture.json` and `architecture.view.json`) and use
-`archctx --config architecture.json ...`. The rebuildable state remains in
-the adjacent `.archctx/` directory and stays local: last-good, snapshots,
-watcher state, usage, and candidate decisions are not GitHub facts.
+config and optional Archify view in a dedicated tracked directory (for example
+`architecture/architecture.json` and `architecture/architecture.view.json`)
+and use `archctx --config architecture/architecture.json ...`. The
+rebuildable state remains in that directory's adjacent `.archctx/` directory
+and stays local: last-good, snapshots, watcher state, usage, and candidate
+decisions are not GitHub facts. This repository follows that pattern in its
+tracked [shared architecture config](architecture/architecture.json).
 
 Before a normal sync, fetch and compare the intended remote branch, inspect the
 staged content for secrets and runtime data, then make a clear commit and only
