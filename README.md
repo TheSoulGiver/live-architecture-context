@@ -66,6 +66,11 @@ deployed revision is running.
 
 ## On-demand Codex skills
 
+For this repository's working map, follow [Open the Living Blueprint](docs/LIVING_BLUEPRINT.md).
+The tracked config/view reproduce a local, source-linked Archify diagram and
+Before / Delta / After. The viewer follows the same accepted version as Agent
+queries and displays stale results with their retained evidence.
+
 The bundled `plugins/live-architecture-context/.codex-plugin/plugin.json`
 points only at three small skills. It has no lifecycle hook and registers no
 always-on MCP tool set:
@@ -288,8 +293,12 @@ config:
 {"archify":{"view":".archctx/architecture.view.json","output":".archctx/architecture.archify.json","validate":["archify","validate","architecture","{archify_output}","--quality","showcase","--json"]}}
 ```
 
-`watch --apply` stages this derived JSON, validates the staged file, then
-atomically replaces the output before promoting the matching Archctx record.
+`watch --apply` stages derived output in an immutable local generation, validates
+it, and atomically promotes the matching Archctx record only after rechecking
+source/config/view inputs. A process-scoped writer lock serializes promotion.
+The configured loose output remains a compatibility copy; accepted context
+references the complete generation. Optional `render` and `compare` argv reuse
+Archify's real delivery/comparison receipts to bind the HTML to the same IR.
 The view remains human-authored and may intentionally be focused; Archctx never
 fills in omitted nodes or invents a relation.
 
