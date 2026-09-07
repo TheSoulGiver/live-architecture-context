@@ -1117,7 +1117,14 @@ def paths_for(repo: Path, base: str | None, files: list[str] | None) -> list[str
     if result is None: raise ValueError(f"cannot diff base {base}")
     return [x.replace("\\", "/") for x in result.splitlines() if x]
 def owners(config: dict[str, Any], paths: list[str]) -> list[str]:
-    changed = set(paths); return [x["id"] for x in components(config) if changed.intersection({e.get("path", "").replace("\\", "/") for e in x["evidence"] if isinstance(e, dict)})]
+    """Affected components, including both endpoints of changed relation evidence."""
+    changed, declared = set(paths), components(config)
+    def matches(value: dict[str, Any]) -> bool:
+        return any(e["path"].replace("\\", "/") in changed for e in value.get("evidence", []) if isinstance(e, dict) and isinstance(e.get("path"), str))
+    affected = {x["id"] for x in declared if matches(x)}
+    for relation in config.get("relations", []):
+        if matches(relation): affected.update((relation["from"], relation["to"]))
+    return [x["id"] for x in declared if x["id"] in affected]
 def impact(config_path: Path, explicit: str | None, base: str | None, files: list[str] | None) -> dict[str, Any]:
     config = load(config_path); changed = paths_for(repo_for(config_path, config), base, files); direct = owners(config, changed); retained = snapshot(config_path, explicit); ctx = retained.get("context", {})
     reach = sorted(set().union(*(set(authored(ctx, x, "downstream")) for x in direct))) if direct else []
