@@ -1,3 +1,4 @@
+import hashlib
 import json
 import subprocess
 import sys
@@ -357,6 +358,81 @@ class ArchitectureContextTest(unittest.TestCase):
             mcp_value = json.loads(json.loads(process.stdout)["result"]["content"][0]["text"])
             self.assertEqual((len(mcp_value["matches"]), mcp_value["omitted_match_count"]), (3, 1))
             self.assertEqual(run(config, state, "telemetry")["outcomes"]["matched"], 3)
+
+    def test_status_diagnostics_are_opt_in_and_read_only(self):
+        with tempfile.TemporaryDirectory(dir=ROOT.parent) as directory:
+            root = Path(directory); (root / "source.py").write_text("OWNER\n")
+            config = root / ".archctx" / "architecture.json"
+            state = config.parent / ".archctx"; state.mkdir(parents=True)
+            config_text = json.dumps({"version": 1, "repo": "..", "components": [{"id": "owner", "evidence": [{"path": "source.py", "contains": "OWNER"}]}], "drift_rules": [{"id": "owner-rule", "kind": "new-owner", "paths": ["source.py"], "added_contains": ["OWNER"]}]})
+            config.write_text(config_text)
+            self.assertEqual(archctx.refresh(config, str(state))["status"], "PASS")
+            last_good = state / "last-good.json"
+            legacy = json.loads(last_good.read_text()); legacy.pop("candidate_baseline")
+            legacy_text = json.dumps(legacy); last_good.write_text(legacy_text)
+
+            def contents():
+                return {str(path.relative_to(root)): (path.stat().st_mtime_ns, path.read_bytes() if path.is_file() else None) for path in (root, *root.rglob("*"))}
+
+            before = contents()
+            result = archctx.diagnose_status(config, None)
+            diagnostics = result["diagnostics"]
+            self.assertEqual((result["status"], result["candidate_state"]), ("STALE", "baseline_missing"))
+            self.assertTrue(result["last_good_available"])
+            self.assertIn("candidate baseline missing", " ".join(result["reason"]))
+            self.assertEqual(diagnostics["config"], {"path": str(config.resolve()), "exists": True})
+            self.assertEqual(diagnostics["state"], {"path": str(state.resolve()), "selection": "legacy_nested"})
+            self.assertEqual(diagnostics["last_good"], {"path": str(last_good.resolve()), "exists": True})
+            self.assertEqual(diagnostics["tool"]["version"], archctx.SERVER_VERSION)
+            self.assertEqual(Path(diagnostics["tool"]["module"]), TOOL.resolve())
+            self.assertEqual(Path(diagnostics["tool"]["python"]).resolve(), Path(PYTHON).resolve())
+            self.assertEqual(diagnostics["tool"]["core_source_sha256"], hashlib.sha256(TOOL.read_bytes()).hexdigest())
+            self.assertEqual({key: value for key, value in result.items() if key != "diagnostics"}, archctx.status(config, None))
+            self.assertEqual(run_raw("--config", str(config), "status", "--diagnose"), result)
+            self.assertNotIn("diagnostics", run_raw("--config", str(config), "status"))
+            for name in ("architecture_status", "architecture_stale"):
+                with self.subTest(mcp=name):
+                    self.assertEqual(archctx.mcp_value(config, None, name, {"diagnose": True}), result)
+                    self.assertNotIn("diagnostics", archctx.mcp_value(config, None, name, {}))
+                    self.assertNotIn("diagnostics", archctx.mcp_value(config, None, name, {"diagnose": False}))
+                    for invalid in ("true", 1):
+                        with self.assertRaises(ValueError):
+                            archctx.mcp_value(config, None, name, {"diagnose": invalid})
+            self.assertEqual(contents(), before)
+
+            explicit = root / "explicit-state"
+            missing = root / "absent" / "architecture.json"
+            for label, path, override, expected_state, selection in (
+                ("explicit wins over legacy", config, str(explicit), explicit, "explicit"),
+                ("missing config", missing, None, missing.parent / ".archctx", "config_adjacent"),
+            ):
+                with self.subTest(case=label):
+                    before = contents()
+                    value = archctx.diagnose_status(path, override)
+                    self.assertEqual(value["diagnostics"]["config"], {"path": str(path.resolve()), "exists": path.exists()})
+                    self.assertEqual(value["diagnostics"]["state"], {"path": str(expected_state.resolve()), "selection": selection})
+                    self.assertEqual(value["diagnostics"]["last_good"], {"path": str((expected_state / "last-good.json").resolve()), "exists": False})
+                    arguments = ["--config", str(path)] + (["--state-dir", override] if override else [])
+                    self.assertEqual(run_raw(*arguments, "status", "--diagnose"), value)
+                    self.assertFalse(expected_state.exists())
+                    self.assertEqual(contents(), before)
+
+            for label, config_data, last_good_data in (
+                ("bad last-good JSON", config_text, "not json"),
+                ("bad last-good shape", config_text, "{}"),
+                ("null last-good context", config_text, '{"context":null}'),
+                ("malformed config", "not json", legacy_text),
+            ):
+                with self.subTest(case=label):
+                    config.write_text(config_data); last_good.write_text(last_good_data)
+                    before = contents()
+                    value = archctx.diagnose_status(config, None)
+                    self.assertIn(value["status"], ("INVALID", "STALE"))
+                    self.assertEqual(value["diagnostics"], diagnostics)
+                    self.assertEqual(run_raw("--config", str(config), "status", "--diagnose"), value)
+                    for name in ("architecture_status", "architecture_stale"):
+                        self.assertEqual(archctx.mcp_value(config, None, name, {"diagnose": True}), value)
+                    self.assertEqual(contents(), before)
 
     def test_init_is_one_time_evidence_bound_and_uninstall_only_removes_managed_block(self):
         with tempfile.TemporaryDirectory() as directory:

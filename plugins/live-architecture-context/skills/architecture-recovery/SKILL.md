@@ -13,6 +13,9 @@ Start with `archctx status` when `.archctx/architecture.json` exists (or the exa
 not a prompt to guess architecture.
 
 - Verify the cited canonical source directly before relying on retained context.
+- If the selected install, config, or state directory is ambiguous, use `status --diagnose`
+  once with the same config/state arguments. Keep its local paths private; it performs no
+  refresh or writes. Older CLIs may not support it; use targeted local inspection then.
 - Use `history`, `changed-since`, or `drift` when the installed version exposes them and the question is
   about a prior architecture state.
 - Run `refresh` only when local index mutation is authorized and its validations can run. A failed refresh
