@@ -2,13 +2,14 @@
 """Source-grounded live architecture context; CALM/Archify remain external owners."""
 from __future__ import annotations
 
-import argparse, fnmatch, hashlib, json, os, subprocess, sys, time
+import argparse, fnmatch, hashlib, json, os, shutil, subprocess, sys, time, uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 CONFIG_VERSION, PROTOCOL_VERSION, SERVER_VERSION = 1, "1.0", "0.1.7"
-SNAPSHOT_LIMIT, USAGE_LIMIT, USAGE_BYTES = 32, 128, 64 * 1024
+SNAPSHOT_LIMIT, GENERATION_LIMIT, USAGE_LIMIT, USAGE_BYTES = 32, 4, 128, 64 * 1024
 CANDIDATE_ENTRY_LIMIT, CANDIDATE_BYTES, CANDIDATE_OUTPUT_LIMIT = 64, 32 * 1024, 8
 CANDIDATE_FILE_LIMIT, CANDIDATE_SOURCE_BYTES = 256, 4 * 1024 * 1024
 WATCH_FILE_LIMIT, WATCH_SOURCE_BYTES = 512, 8 * 1024 * 1024
@@ -28,6 +29,15 @@ def load(path: Path) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError) as e: raise ValueError(f"invalid JSON: {path}: {e}") from e
     if not isinstance(value, dict): raise ValueError(f"JSON object required: {path}")
     return value
+def load_bytes(path: Path) -> tuple[dict[str, Any], bytes]:
+    try:
+        raw = path.read_bytes()
+        value = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"invalid JSON: {path}: {error}") from error
+    if not isinstance(value, dict):
+        raise ValueError(f"JSON object required: {path}")
+    return value, raw
 def git(repo: Path, *args: str) -> str | None:
     r = subprocess.run(["git", "-C", str(repo), *args], text=True, encoding="utf-8", errors="replace", capture_output=True)
     return r.stdout.strip() if r.returncode == 0 else None
@@ -40,9 +50,80 @@ def state(config_path: Path, explicit: str | None) -> Path:
     legacy = config_path.parent / ".archctx"
     return legacy if legacy.exists() else config_path.parent
 def last_path(directory: Path) -> Path: return directory / "last-good.json"
+
+
+class RefreshBusyError(RuntimeError):
+    """Another cooperative Archctx writer owns this state directory."""
+
+
+def atomic_bytes(path: Path, value: bytes) -> None:
+    """Replace one file without a shared temporary-name race."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_bytes(value)
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+
+
 def atomic(path: Path, value: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True); temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"); os.replace(temporary, path)
+    atomic_bytes(path, (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
+
+
+@contextmanager
+def refresh_lock(directory: Path):
+    """A non-waiting, process-safe writer lock; the OS releases it on exit."""
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / "refresh.lock"
+    handle = path.open("a+b")
+    acquired = False
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+            handle.seek(0)
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError as error:
+                raise RefreshBusyError("another refresh is already validating this architecture context") from error
+            unlock = lambda: msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as error:
+                raise RefreshBusyError("another refresh is already validating this architecture context") from error
+            unlock = lambda: fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        acquired = True
+        yield
+    finally:
+        if acquired:
+            try:
+                unlock()
+            except OSError:
+                pass
+        handle.close()
+
+
+def refresh_retry(directory: Path, old: dict[str, Any] | None, reason: str, changed_inputs: list[str] | None = None) -> dict[str, Any]:
+    return {
+        "protocol_version": PROTOCOL_VERSION,
+        "status": "RETRY",
+        "freshness": "stale",
+        "failures": [reason],
+        "changed_inputs": changed_inputs or [],
+        "last_good_preserved": bool(old) or last_path(directory).exists(),
+        "next_action": "retry refresh after source, config, and view inputs are stable",
+    }
 def telemetry_event(event: str) -> str:
     """Keep aggregate telemetry keys bounded even for malformed MCP calls."""
     allowed = USAGE_OPERATIONS | OBSERVATIONAL_OPERATIONS | {"install-codex", "uninstall-codex"}
@@ -187,6 +268,7 @@ def repo_for(config_path: Path, config: dict[str, Any]) -> Path:
 
 def components(config: dict[str, Any]) -> list[dict[str, Any]]:
     if config.get("version") != CONFIG_VERSION: raise ValueError(f"unsupported config version {config.get('version')!r}; expected {CONFIG_VERSION}")
+    coverage(config)
     xs = config.get("components")
     if not isinstance(xs, list) or not xs: raise ValueError("components must be a non-empty array")
     ids = []
@@ -205,6 +287,22 @@ def components(config: dict[str, Any]) -> list[dict[str, Any]]:
         if ident in relation_ids: raise ValueError(f"relation ids must be unique: {ident}")
         relation_ids.add(ident)
     return xs
+
+
+def coverage(config: dict[str, Any]) -> dict[str, Any] | None:
+    """Keep declared blueprint coverage compact and distinct from source facts."""
+    value = config.get("coverage")
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) - {"scope", "limitations"}:
+        raise ValueError("coverage supports only scope and limitations")
+    scope = value.get("scope")
+    limitations = value.get("limitations", [])
+    if not isinstance(scope, str) or not scope.strip() or len(scope) > 1000:
+        raise ValueError("coverage.scope must be a non-empty string up to 1000 characters")
+    if not isinstance(limitations, list) or len(limitations) > 16 or any(not isinstance(item, str) or not item.strip() or len(item) > 240 for item in limitations):
+        raise ValueError("coverage.limitations must contain at most 16 non-empty strings up to 240 characters")
+    return {"scope": scope, "limitations": limitations}
 
 def relation_id(relation: dict[str, Any]) -> str:
     value = relation.get("id")
@@ -248,12 +346,14 @@ def context(config: dict[str, Any], rev: str, facts: dict[str, list[dict[str, An
     result: dict[str, Any] = {"schema_version": CONFIG_VERSION, "revision": rev, "components": [], "relations": relations}
     for x in components(config):
         result["components"].append({k: x[k] for k in ("id", "name", "purpose", "truth_sources", "tags", "code_symbol") if k in x} | {"evidence": facts[x["id"]], "confidence": "source_evidence"})
+    if value := coverage(config):
+        result["coverage"] = value
     return result
 def semantic(value: dict[str, Any]) -> str: return sha(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode())
 def architecture_semantic(value: dict[str, Any]) -> str: return semantic({key: item for key, item in value.items() if key != "revision"})
 def substitution(command: list[Any], values: dict[str, str]) -> list[str]: return [values.get(str(x), str(x)) for x in command]
 def run(command: list[Any], repo: Path, timeout: int, values: dict[str, str], extra_env: dict[str, Any] | None = None) -> tuple[list[str], subprocess.CompletedProcess[str]]:
-    argv = substitution(command, values); env = os.environ.copy()
+    argv = substitution(command, {"{python}": sys.executable, **values}); env = os.environ.copy()
     if extra_env:
         if not all(isinstance(k, str) and isinstance(v, str) for k, v in extra_env.items()): raise ValueError("command env must be a string map")
         env.update(extra_env)
@@ -357,7 +457,7 @@ def archify_config(config: dict[str, Any], repo: Path) -> dict[str, Any] | None:
     value = config.get("archify")
     if value is None: return None
     if not isinstance(value, dict): raise ValueError("archify must be an object")
-    extra = sorted(set(value) - {"view", "output", "validate", "timeout_seconds"})
+    extra = sorted(set(value) - {"view", "output", "validate", "render", "compare", "timeout_seconds"})
     if extra: raise ValueError(f"archify has unsupported fields: {', '.join(extra)}")
     view, view_relative = repo_file(repo, value.get("view"), "archify.view")
     output, output_relative = repo_file(repo, value.get("output"), "archify.output")
@@ -365,26 +465,169 @@ def archify_config(config: dict[str, Any], repo: Path) -> dict[str, Any] | None:
     command = value.get("validate")
     if not isinstance(command, list) or not command or not all(isinstance(item, str) and item for item in command):
         raise ValueError("archify.validate must be a non-empty command argv")
+    optional = {}
+    for name in ("render", "compare"):
+        command = value.get(name)
+        if command is not None and (not isinstance(command, list) or not command or not all(isinstance(item, str) and item for item in command)):
+            raise ValueError(f"archify.{name} must be a non-empty command argv when configured")
+        optional[name] = command
+    if (optional["render"] is None) != (optional["compare"] is None):
+        raise ValueError("archify.render and archify.compare must be configured together")
     timeout = value.get("timeout_seconds", 180)
     if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
         raise ValueError("archify.timeout_seconds must be a positive integer")
-    return {"view": view, "view_relative": view_relative, "output": output, "output_relative": output_relative, "validate": command, "timeout_seconds": timeout}
+    return {"view": view, "view_relative": view_relative, "output": output, "output_relative": output_relative, "validate": value["validate"], "timeout_seconds": timeout, **optional}
 
-def archify_projection(config: dict[str, Any], repo: Path, directory: Path) -> dict[str, Any]:
+
+def generation_base(directory: Path) -> Path:
+    return (directory / "generations").resolve()
+
+
+def controlled_generation(directory: Path, value: Any) -> Path | None:
+    if not isinstance(value, str) or not value:
+        return None
+    raw = Path(value)
+    path = raw.resolve() if raw.is_absolute() else (directory / raw).resolve()
+    try:
+        relative = path.relative_to(generation_base(directory))
+    except ValueError:
+        return None
+    stem, separator, nonce = path.name.partition("-")
+    if len(relative.parts) != 1 or not separator or len(stem) != 16 or len(nonce) != 32 or any(char not in "0123456789abcdef" for char in stem + nonce):
+        return None
+    return path
+
+
+def cleanup_generation(directory: Path, value: Any) -> None:
+    path = controlled_generation(directory, value)
+    if path is None or not path.exists():
+        return
+    try:
+        if path.is_symlink():
+            path.unlink()
+        elif path.is_dir():
+            shutil.rmtree(path)
+    except OSError:
+        pass
+
+
+def prune_generations(directory: Path) -> None:
+    """Keep the current visual bundle plus a small local before/delta history."""
+    base = generation_base(directory)
+    if not base.is_dir():
+        return
+    retained: set[Path] = set()
+    records = [last_path(directory), *snapshot_files(directory)]
+    for path in records:
+        try:
+            receipt = load(path).get("archify", {})
+            generation = controlled_generation(directory, receipt.get("generation") if isinstance(receipt, dict) else None)
+            if generation is not None and len(retained) < GENERATION_LIMIT:
+                retained.add(generation)
+        except (OSError, ValueError):
+            continue
+    for path in base.iterdir():
+        try:
+            resolved = path.resolve()
+            if controlled_generation(directory, str(resolved)) != resolved:
+                continue
+        except (OSError, ValueError):
+            continue
+        if resolved not in retained and path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path, ignore_errors=True)
+
+
+def archify_artifact_reason(directory: Path, receipt: dict[str, Any]) -> str | None:
+    generation = controlled_generation(directory, receipt.get("generation"))
+    if generation is None or not generation.is_dir():
+        return "Archify generation is missing or outside local state; run refresh"
+    ir_value = receipt.get("ir")
+    ir = Path(ir_value).resolve() if isinstance(ir_value, str) and Path(ir_value).is_absolute() else (generation / str(ir_value or "")).resolve()
+    try:
+        ir.relative_to(generation)
+    except ValueError:
+        return "Archify IR is outside its generation; run refresh"
+    if not ir.is_file() or sha(ir.read_bytes()) != receipt.get("ir_sha256"):
+        return "Archify immutable IR is missing or changed; run refresh"
+    artifacts = receipt.get("artifacts", {})
+    if not isinstance(artifacts, dict) or any(not isinstance(name, str) or not isinstance(digest, str) for name, digest in artifacts.items()):
+        return "Archify render receipt is invalid; run refresh"
+    for name, digest in artifacts.items():
+        artifact = (generation / name).resolve()
+        try:
+            artifact.relative_to(generation)
+        except ValueError:
+            return "Archify render receipt escapes its generation; run refresh"
+        if not artifact.is_file() or sha(artifact.read_bytes()) != digest:
+            return "Archify rendered artifact is missing or changed; run refresh"
+    # The digest proves bytes were not changed after publication.  The binding
+    # also proves those intact bytes belong to *this* accepted context rather
+    # than to another otherwise-valid generation.
+    if receipt.get("render") == "PASS":
+        binding_path = generation / "binding.json"
+        if "binding.json" not in artifacts or not binding_path.is_file():
+            return "Archify render binding is missing; run refresh"
+        try:
+            binding = load(binding_path)
+        except ValueError:
+            return "Archify render binding is invalid; run refresh"
+        fields = ("context_hash", "revision", "ir_sha256", "view_hash", "delta_kind")
+        if any(field not in binding or field not in receipt or binding[field] != receipt[field] for field in fields):
+            return "Archify render binding does not match its receipt; run refresh"
+        bound_artifacts = binding.get("artifacts")
+        expected_artifacts = {name: digest for name, digest in artifacts.items() if name != "binding.json"}
+        if not isinstance(bound_artifacts, dict) or bound_artifacts != expected_artifacts:
+            return "Archify render binding artifacts do not match its receipt; run refresh"
+    return None
+
+
+def archify_projection(config: dict[str, Any], repo: Path, directory: Path, candidate: dict[str, Any], previous: dict[str, Any] | None) -> dict[str, Any]:
     settings = archify_config(config, repo)
     if settings is None: return {"configured": False}
-    from archctx_to_archify import project
-    view = load(settings["view"])
-    projected = project(config, view)
-    staged = settings["output"].with_suffix(settings["output"].suffix + ".next")
-    atomic(staged, projected)
-    argv, result = run(settings["validate"], repo, settings["timeout_seconds"], {"{repo}": str(repo), "{state}": str(directory), "{archify_output}": str(staged)})
-    if result.returncode:
-        raise RuntimeError(f"Archify validation failed ({result.returncode}): {result.stderr.strip()[-1000:]}")
-    os.replace(staged, settings["output"])
-    return {"configured": True, "view": settings["view_relative"], "view_sha256": sha(settings["view"].read_bytes()), "output": settings["output_relative"], "output_sha256": sha(settings["output"].read_bytes()), "validation": "PASS"}
+    from archctx_to_archify import project, repository_evidence
 
-def archify_stale_reason(config: dict[str, Any], repo: Path, record: dict[str, Any]) -> str | None:
+    generation = generation_base(directory) / f"{semantic(candidate)[:16]}-{uuid.uuid4().hex}"
+    generation.mkdir(parents=True, exist_ok=False)
+    ir = generation / "architecture.archify.json"
+    try:
+        view_bytes = settings["view"].read_bytes()
+        repository = repository_evidence(repo, candidate)
+        projected = project(config, json.loads(view_bytes.decode("utf-8")), context_value=candidate, repository=repository)
+        atomic(ir, projected)
+        _, result = run(settings["validate"], repo, settings["timeout_seconds"], {"{repo}": str(repo), "{state}": str(directory), "{archify_output}": str(ir)})
+        if result.returncode:
+            diagnostic = result.stderr.strip() or result.stdout.strip()
+            raise RuntimeError(f"Archify validation failed ({result.returncode}): {diagnostic[-1000:]}")
+        receipt: dict[str, Any] = {"configured": True, "view": settings["view_relative"], "view_sha256": sha(view_bytes), "output": settings["output_relative"], "generation": str(generation.resolve()), "ir": str(ir.resolve()), "ir_sha256": sha(ir.read_bytes()), "validation": "PASS", "repository_evidence": repository or {"status": "not_available_for_current_evidence"}}
+        if settings["render"] is not None:
+            from archctx_blueprint import render_bundle
+
+            rendered = render_bundle(config, repo, directory, generation, ir, candidate, previous)
+            if not isinstance(rendered, dict):
+                raise ValueError("Archify render bundle must return one object receipt")
+            if any(receipt[key] != value for key, value in rendered.items() if key in receipt):
+                raise ValueError("Archify render receipt must not replace projection bindings")
+            receipt |= rendered
+        return receipt
+    except BaseException:
+        cleanup_generation(directory, str(generation))
+        raise
+
+
+def compatibility_output(settings: dict[str, Any] | None, receipt: dict[str, Any]) -> dict[str, Any]:
+    if settings is None or not receipt.get("configured") or not receipt.get("generation"):
+        return {"state": "not_configured"}
+    ir = Path(str(receipt.get("ir", "")))
+    try:
+        if not ir.is_file():
+            raise OSError("immutable Archify IR is unavailable")
+        atomic_bytes(settings["output"], ir.read_bytes())
+        return {"state": "synced", "output": settings["output_relative"], "sha256": sha(settings["output"].read_bytes())}
+    except OSError as error:
+        return {"state": "deferred", "output": settings["output_relative"], "reason": str(error)[:240]}
+
+
+def archify_stale_reason(config: dict[str, Any], repo: Path, directory: Path, record: dict[str, Any]) -> str | None:
     settings = archify_config(config, repo)
     if settings is None: return None
     receipt = record.get("archify")
@@ -392,14 +635,66 @@ def archify_stale_reason(config: dict[str, Any], repo: Path, record: dict[str, A
         return "Archify projection is missing; run refresh"
     if receipt.get("view") != settings["view_relative"] or receipt.get("output") != settings["output_relative"]:
         return "Archify projection configuration changed; run refresh"
+    # Legacy projections did not bind a visual bundle to the accepted context.
+    # New render configurations must: an intact generation from another
+    # accepted refresh is still stale if its receipt names a different state.
+    if settings["render"] is not None and (receipt.get("context_hash") != record.get("context_hash") or receipt.get("revision") != record.get("revision")):
+        return "Archify render receipt does not bind this accepted context; run refresh"
     try:
         if sha(settings["view"].read_bytes()) != receipt.get("view_sha256"):
             return "Archify view changed; run refresh"
-        if sha(settings["output"].read_bytes()) != receipt.get("output_sha256"):
-            return "Archify projection output is missing or changed; run refresh"
     except OSError:
-        return "Archify projection output is missing or unreadable; run refresh"
+        return "Archify view is missing or unreadable; run refresh"
+    if receipt.get("generation"):
+        return archify_artifact_reason(directory, receipt)
+    try:
+        if sha(settings["output"].read_bytes()) != receipt.get("output_sha256"):
+            return "Archify legacy projection output is missing or changed; run refresh"
+    except OSError:
+        return "Archify legacy projection output is missing or unreadable; run refresh"
     return None
+
+
+def refresh_input_fingerprint(config_path: Path, config: dict[str, Any], config_bytes: bytes, repo: Path, candidate: dict[str, Any]) -> dict[str, str | None]:
+    settings = archify_config(config, repo)
+    return {
+        "config_sha256": sha(config_bytes),
+        "config_semantic_hash": semantic(config),
+        "context_hash": semantic(candidate),
+        "revision": str(candidate["revision"]),
+        "view_sha256": sha(settings["view"].read_bytes()) if settings is not None else None,
+        "watch_manifest_hash": semantic(manifest(config_path, repo, config)),
+    }
+
+
+def refresh_inputs(config_path: Path) -> tuple[dict[str, Any], Path, dict[str, list[dict[str, Any]]], list[list[dict[str, Any]]], dict[str, Any], dict[str, str | None]]:
+    config, config_bytes = load_bytes(config_path)
+    repo = repo_for(config_path, config)
+    facts, relation_facts, failures = validate(repo, config)
+    if failures:
+        raise ValueError("; ".join(failures))
+    candidate = context(config, revision(repo, {"components": facts, "relations": relation_facts}), facts, relation_facts)
+    return config, repo, facts, relation_facts, candidate, refresh_input_fingerprint(config_path, config, config_bytes, repo, candidate)
+
+
+def final_refresh_check(config_path: Path, expected: dict[str, str | None]) -> tuple[list[str], str | None]:
+    """Re-read the declared inputs after external validation, before publication."""
+    try:
+        _, _, _, _, _, current = refresh_inputs(config_path)
+    except (OSError, ValueError) as error:
+        return ["config_or_source"], str(error)
+    changed = []
+    if current["config_sha256"] != expected["config_sha256"] or current["config_semantic_hash"] != expected["config_semantic_hash"]:
+        changed.append("config")
+    if current["context_hash"] != expected["context_hash"]:
+        changed.append("source_evidence")
+    if current["revision"] != expected["revision"]:
+        changed.append("revision")
+    if current["view_sha256"] != expected["view_sha256"]:
+        changed.append("view")
+    if current["watch_manifest_hash"] != expected["watch_manifest_hash"]:
+        changed.append("source_or_watch_scope")
+    return changed, None
 
 def normalized_drift_rules(config: dict[str, Any]) -> list[dict[str, Any]]:
     raw = config.get("drift_rules", [])
@@ -481,8 +776,14 @@ def candidate_changes(previous: dict[str, Any], current: dict[str, Any], rules: 
         left, right = before.get((rule_id, path), {}), after.get((rule_id, path), {})
         for signal in sorted(set(left.get("signals", {})) | set(right.get("signals", {}))):
             old, new = left.get("signals", {}).get(signal), right.get("signals", {}).get(signal)
-            if old == new: continue
-            evidence = new or old or {}; payload = {"base_context_hash": base_context_hash, "rule_id": rule_id, "path": path, "signal": signal, "before": old, "after": new}
+            # Line numbers locate a finding for review, but a surrounding
+            # comment or import must not turn an unchanged signal into a new
+            # architecture candidate.  Keep the location as current evidence
+            # while binding the candidate identity to the signal itself.
+            old_signal = {key: value for key, value in old.items() if key != "first_line"} if isinstance(old, dict) else old
+            new_signal = {key: value for key, value in new.items() if key != "first_line"} if isinstance(new, dict) else new
+            if old_signal == new_signal: continue
+            evidence = new or old or {}; payload = {"base_context_hash": base_context_hash, "rule_id": rule_id, "path": path, "signal": signal, "before": old_signal, "after": new_signal}
             found.append({"id": sha(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()), "kind": kinds.get(rule_id, "unspecified"), "rule_id": rule_id, "signal": signal, "status": "CANDIDATE_REVIEW_REQUIRED", "provenance": "deterministic_rule_derived_source_fact", "change": "introduced" if new else "removed", "evidence": {"path": path, "line": evidence.get("first_line"), "sha256": evidence.get("sha256")}})
     return found
 
@@ -542,14 +843,47 @@ def finalize_decisions(directory: Path, base_context_hash: str, decisions: dict[
 def freshness(record: dict[str, Any], status: str, reason: Any = None) -> dict[str, Any]:
     return {"protocol_version": PROTOCOL_VERSION, "status": status, "revision": record.get("revision"), "freshness": "fresh" if status in ("FRESH", "PASS") else "stale", "last_good_at": record.get("created_at"), "confidence": "source_evidence", "reason": reason, "next_action": "query normally" if status in ("FRESH", "PASS") else "run refresh after fixing the reported change"}
 
-def status(config_path: Path, explicit: str | None) -> dict[str, Any]:
-    config = load(config_path); directory = state(config_path, explicit); old_path = last_path(directory)
+
+def unavailable_status(directory: Path, record: dict[str, Any] | None, error: Exception) -> dict[str, Any]:
+    if record is not None:
+        return freshness(record, "STALE", [f"architecture config is unavailable: {error}"]) | {
+            "last_good_available": True,
+            "last_good_context_hash": record.get("context_hash"),
+            "graph": persistent_graph(record.get("graph", {})),
+            "candidate_state": "not_checked",
+            "candidate_count": 0,
+            "candidates": [],
+            "omitted_candidate_count": 0,
+            "next_action": "restore a valid architecture config, then refresh",
+        }
+    status_name = "MISSING" if not directory.exists() else "INVALID"
+    return {
+        "protocol_version": PROTOCOL_VERSION,
+        "status": status_name,
+        "freshness": "missing" if status_name == "MISSING" else "stale",
+        "failures": [f"architecture config is unavailable: {error}"],
+        "last_good_available": False,
+        "next_action": "restore a valid architecture config, then refresh",
+    }
+
+
+def status(config_path: Path, explicit: str | None, record: dict[str, Any] | None = None) -> dict[str, Any]:
+    directory = state(config_path, explicit); old_path = last_path(directory)
+    try:
+        config = load(config_path)
+    except (OSError, ValueError) as error:
+        if record is None and old_path.exists():
+            try:
+                record = load(old_path)
+            except ValueError:
+                record = None
+        return unavailable_status(directory, record, error)
     try:
         repo = repo_for(config_path, config); facts, relation_facts, failures = validate(repo, config)
     except ValueError as e: repo, facts, relation_facts, failures = None, {}, [], [str(e)]
     if not old_path.exists(): return {"protocol_version": PROTOCOL_VERSION, "status": "MISSING", "freshness": "missing", "repo": str(repo) if repo else None, "next_action": "run refresh"}
-    old = load(old_path); current = context(config, revision(repo, {"components": facts, "relations": relation_facts}), facts, relation_facts) if repo and not failures else None
-    try: visual_failure = archify_stale_reason(config, repo, old) if repo and not failures else None
+    old = record if record is not None else load(old_path); current = context(config, revision(repo, {"components": facts, "relations": relation_facts}), facts, relation_facts) if repo and not failures else None
+    try: visual_failure = archify_stale_reason(config, repo, directory, old) if repo and not failures else None
     except (OSError, ValueError) as error: visual_failure = f"Archify projection check failed: {error}"
     try: observation = candidate_observation(config, repo, old) if repo and not failures else {"state": "not_checked", "candidates": []}
     except (OSError, ValueError) as error: observation = {"state": "incomplete", "candidates": [], "error": str(error)}
@@ -567,44 +901,85 @@ def status(config_path: Path, explicit: str | None) -> dict[str, Any]:
     elif candidate_state in ("baseline_missing", "rules_changed"): result["next_action"] = "review current source, then run refresh with reset_candidate_baseline"
     return result
 
-def refresh(config_path: Path, explicit: str | None, changed: list[str] | None = None, acknowledged: dict[str, dict[str, Any]] | None = None, expected_context_hash: str | None = None, reset_candidate_baseline: bool = False) -> dict[str, Any]:
-    config, directory = load(config_path), state(config_path, explicit)
+def _refresh_locked(config_path: Path, explicit: str | None, directory: Path, changed: list[str] | None = None, acknowledged: dict[str, dict[str, Any]] | None = None, expected_context_hash: str | None = None, reset_candidate_baseline: bool = False) -> dict[str, Any]:
     try:
-        repo = repo_for(config_path, config); facts, relation_facts, failures = validate(repo, config)
-    except ValueError as e: repo, facts, relation_facts, failures = None, {}, [], [str(e)]
-    if failures: return {"protocol_version": PROTOCOL_VERSION, "status": "INVALID", "freshness": "stale", "failures": failures, "last_good_preserved": last_path(directory).exists(), "next_action": "repair evidence/config, then refresh"}
+        config, repo, facts, relation_facts, candidate, inputs = refresh_inputs(config_path)
+    except (OSError, ValueError) as error:
+        return {"protocol_version": PROTOCOL_VERSION, "status": "INVALID", "freshness": "stale", "failures": [str(error)], "last_good_preserved": last_path(directory).exists(), "next_action": "repair evidence/config, then refresh"}
     old = load(last_path(directory)) if last_path(directory).exists() else None
-    if expected_context_hash is not None and (not isinstance(old, dict) or old.get("context_hash") != expected_context_hash): return {"protocol_version": PROTOCOL_VERSION, "status": "INVALID", "freshness": "stale", "failures": ["last-good changed while candidate was being reviewed"], "last_good_preserved": bool(old), "next_action": "re-run candidate review"}
-    try: observation = candidate_observation(config, repo, old)
-    except (OSError, ValueError) as error: return {"protocol_version": PROTOCOL_VERSION, "status": "INVALID", "freshness": "stale", "failures": [f"candidate observation failed: {error}"], "last_good_preserved": bool(old), "next_action": "repair configured drift rules, then refresh"}
+    if expected_context_hash is not None and (not isinstance(old, dict) or old.get("context_hash") != expected_context_hash):
+        return {"protocol_version": PROTOCOL_VERSION, "status": "INVALID", "freshness": "stale", "failures": ["last-good changed while candidate was being reviewed"], "last_good_preserved": bool(old), "next_action": "re-run candidate review"}
+    try:
+        observation = candidate_observation(config, repo, old)
+    except (OSError, ValueError) as error:
+        return {"protocol_version": PROTOCOL_VERSION, "status": "INVALID", "freshness": "stale", "failures": [f"candidate observation failed: {error}"], "last_good_preserved": bool(old), "next_action": "repair configured drift rules, then refresh"}
     if observation.get("state") in ("incomplete", "baseline_incomplete"):
         return {"protocol_version": PROTOCOL_VERSION, "status": "CANDIDATE_CHECK_INCOMPLETE", "freshness": "stale", "last_good_preserved": bool(old), "next_action": "tighten configured drift rules before refresh"} | candidate_fields(observation)
     if old is not None and observation.get("state") in ("baseline_missing", "rules_changed") and not reset_candidate_baseline:
         return {"protocol_version": PROTOCOL_VERSION, "status": "CANDIDATE_CHECK_INCOMPLETE", "freshness": "stale", "last_good_preserved": True, "next_action": "review current source, then refresh with reset_candidate_baseline"} | candidate_fields(observation)
     pending = observation.get("candidates", []) if isinstance(observation.get("candidates"), list) else []
     acknowledged = acknowledged or {}
-    if pending and set(candidate["id"] for candidate in pending) != set(acknowledged):
+    if pending and set(value["id"] for value in pending) != set(acknowledged):
         return {"protocol_version": PROTOCOL_VERSION, "status": "CANDIDATE_REVIEW_REQUIRED", "freshness": "stale", "last_good_preserved": bool(old), "next_action": "inspect every candidate, then accept or reject it before refresh"} | candidate_fields(observation)
-    candidate = context(config, revision(repo, {"components": facts, "relations": relation_facts}), facts, relation_facts)
-    try: graph, receipts, archify = graph_refresh(config, repo, directory, changed, candidate, old), gates(config, repo, directory), archify_projection(config, repo, directory)
-    except (OSError, RuntimeError, subprocess.TimeoutExpired, ValueError) as e: return {"protocol_version": PROTOCOL_VERSION, "status": "INVALID", "freshness": "stale", "failures": [str(e)], "last_good_preserved": last_path(directory).exists(), "next_action": "repair external validator, then refresh"}
+    try:
+        graph = graph_refresh(config, repo, directory, changed, candidate, old)
+        receipts = gates(config, repo, directory)
+        archify = archify_projection(config, repo, directory, candidate, old)
+    except (OSError, RuntimeError, subprocess.TimeoutExpired, ValueError) as error:
+        return {"protocol_version": PROTOCOL_VERSION, "status": "INVALID", "freshness": "stale", "failures": [str(error)], "last_good_preserved": last_path(directory).exists(), "next_action": "repair external validator, then refresh"}
+    changed_inputs, input_error = final_refresh_check(config_path, inputs)
+    if changed_inputs:
+        cleanup_generation(directory, archify.get("generation"))
+        detail = input_error or "source, config, or view changed while refresh validation was running"
+        return refresh_retry(directory, old, detail, changed_inputs)
     decisions = [{key: value[key] for key in ("id", "kind", "rule_id", "decision") if key in value} for value in acknowledged.values()]
-    record = {"record_version": CONFIG_VERSION, "created_at": datetime.now(timezone.utc).isoformat(), "repo": str(repo), "revision": revision(repo, {"components": facts, "relations": relation_facts}), "config_hash": semantic(config), "context_hash": semantic(candidate), "context": candidate, "graph": persistent_graph(graph), "gates": persistent_gates(receipts), "archify": archify, "candidate_baseline": observation["current"]}
+    record = {"record_version": CONFIG_VERSION, "created_at": datetime.now(timezone.utc).isoformat(), "repo": str(repo), "revision": candidate["revision"], "config_hash": semantic(config), "context_hash": semantic(candidate), "context": candidate, "graph": persistent_graph(graph), "gates": persistent_gates(receipts), "archify": archify, "candidate_baseline": observation["current"], "transaction": {"input_hash": semantic(inputs), "generation_limit": GENERATION_LIMIT}}
     previous_snapshot = snapshot_record(directory, record["context_hash"])
     previous_decisions = previous_snapshot.get("candidate_decisions", []) if isinstance(previous_snapshot, dict) and isinstance(previous_snapshot.get("candidate_decisions"), list) else []
     merged_decisions = []
     for decision in previous_decisions + decisions:
-        if isinstance(decision, dict) and decision not in merged_decisions: merged_decisions.append(decision)
-    if merged_decisions: record["candidate_decisions"] = merged_decisions[-DECISION_LIMIT:]
-    if reset_candidate_baseline: record["candidate_baseline_reset"] = True
-    elif isinstance(previous_snapshot, dict) and previous_snapshot.get("candidate_baseline_reset"): record["candidate_baseline_reset"] = True
-    atomic(last_path(directory), record); atomic(directory / "snapshots" / f"{record['context_hash']}.json", record); prune_snapshots(directory)
-    return freshness(record, "PASS") | {"context_hash": record["context_hash"], "graph": graph, "gates": receipts, "archify": archify, "changed_files": changed or [], "candidate_baseline_reset": bool(reset_candidate_baseline)}
+        if isinstance(decision, dict) and decision not in merged_decisions:
+            merged_decisions.append(decision)
+    if merged_decisions:
+        record["candidate_decisions"] = merged_decisions[-DECISION_LIMIT:]
+    if reset_candidate_baseline:
+        record["candidate_baseline_reset"] = True
+    elif isinstance(previous_snapshot, dict) and previous_snapshot.get("candidate_baseline_reset"):
+        record["candidate_baseline_reset"] = True
+    try:
+        # This replacement is the one current-authority commit. Generated output is only mirrored afterwards.
+        atomic(last_path(directory), record)
+    except OSError as error:
+        cleanup_generation(directory, archify.get("generation"))
+        return {"protocol_version": PROTOCOL_VERSION, "status": "INVALID", "freshness": "stale", "failures": [str(error)], "last_good_preserved": bool(old), "next_action": "repair local state storage, then refresh"}
+    history_state = "synced"
+    try:
+        atomic(directory / "snapshots" / f"{record['context_hash']}.json", record)
+        prune_snapshots(directory)
+        prune_generations(directory)
+    except OSError:
+        history_state = "deferred"
+    output_state = compatibility_output(archify_config(config, repo), archify)
+    return freshness(record, "PASS") | {"context_hash": record["context_hash"], "graph": graph, "gates": receipts, "archify": archify, "changed_files": changed or [], "candidate_baseline_reset": bool(reset_candidate_baseline), "history": history_state, "compatibility_output": output_state}
+
+
+def refresh(config_path: Path, explicit: str | None, changed: list[str] | None = None, acknowledged: dict[str, dict[str, Any]] | None = None, expected_context_hash: str | None = None, reset_candidate_baseline: bool = False) -> dict[str, Any]:
+    directory = state(config_path, explicit)
+    try:
+        with refresh_lock(directory):
+            return _refresh_locked(config_path, explicit, directory, changed, acknowledged, expected_context_hash, reset_candidate_baseline)
+    except RefreshBusyError as error:
+        try:
+            old = load(last_path(directory)) if last_path(directory).exists() else None
+        except ValueError:
+            old = None
+        return refresh_retry(directory, old, str(error), ["writer_lock"])
 
 def snapshot(config_path: Path, explicit: str | None) -> dict[str, Any]:
-    value = status(config_path, explicit); path = last_path(state(config_path, explicit))
-    if not path.exists(): return value
+    directory = state(config_path, explicit); path = last_path(directory)
+    if not path.exists(): return status(config_path, explicit)
     old = load(path)
+    value = status(config_path, explicit, old)
     return value | {"context": old["context"], "graph": persistent_graph(old.get("graph", {})) if isinstance(old.get("graph"), dict) else {}, "gates": persistent_gates(old.get("gates", [])) if isinstance(old.get("gates"), list) else [], "archify": old.get("archify", {"configured": False})}
 def canonical(config_path: Path, explicit: str | None, ident: str) -> dict[str, Any]:
     value = snapshot(config_path, explicit)
@@ -880,7 +1255,7 @@ def current_context(config_path: Path, config: dict[str, Any]) -> dict[str, Any]
 def pending_review_result(old: dict[str, Any], observation: dict[str, Any], summary: dict[str, Any], decisions: dict[str, dict[str, Any]]) -> dict[str, Any]:
     return {"protocol_version": PROTOCOL_VERSION, "status": "CANDIDATE_REVIEW_REQUIRED", "freshness": "stale", "last_good_preserved": True, "base_context_hash": old["context_hash"], "candidate": summary, "reviewed_candidate_count": len(decisions), "remaining_candidate_count": len(observation["candidates"]) - len(decisions), "next_action": "review every remaining candidate before promotion"} | candidate_fields(observation)
 
-def submit_candidate_decision(config_path: Path, explicit: str | None, ident: str, summary: dict[str, Any], details: dict[str, Any]) -> dict[str, Any]:
+def _submit_candidate_decision_locked(config_path: Path, explicit: str | None, directory: Path, ident: str, summary: dict[str, Any], details: dict[str, Any]) -> dict[str, Any]:
     config, directory, old, observation, candidate_value = candidate_for_review(config_path, explicit, ident)
     record = {"at": datetime.now(timezone.utc).isoformat(), "state": "pending", **summary, **details, "base_context_hash": old["context_hash"]}
     record_decision(directory, record)
@@ -892,25 +1267,44 @@ def submit_candidate_decision(config_path: Path, explicit: str | None, ident: st
     for decision_id, decision in decisions.items():
         if decision.get("decision") == "accepted": validate_acceptance(config, old, current, by_id[decision_id], decision.get("bindings", []))
     acknowledged = {decision_id: {key: decision[key] for key in ("id", "kind", "rule_id", "decision")} for decision_id, decision in decisions.items()}
-    result = refresh(config_path, explicit, acknowledged=acknowledged, expected_context_hash=old["context_hash"])
+    result = _refresh_locked(config_path, explicit, directory, acknowledged=acknowledged, expected_context_hash=old["context_hash"])
     if result.get("status") == "PASS":
         try: finalize_decisions(directory, old["context_hash"], decisions, result["context_hash"])
         except (OSError, ValueError): result["decision_receipt_cleanup"] = "deferred"
     return result | {"candidate": summary}
 
+
+def submit_candidate_decision(config_path: Path, explicit: str | None, ident: str, summary: dict[str, Any], details: dict[str, Any]) -> dict[str, Any]:
+    directory = state(config_path, explicit)
+    try:
+        with refresh_lock(directory):
+            return _submit_candidate_decision_locked(config_path, explicit, directory, ident, summary, details)
+    except RefreshBusyError as error:
+        return refresh_retry(directory, None, str(error), ["writer_lock"])
+
 def accept_candidate(config_path: Path, explicit: str | None, ident: str, bindings: list[str]) -> dict[str, Any]:
-    config, directory, old, observation, candidate_value = candidate_for_review(config_path, explicit, ident)
-    summary = {"id": ident, "kind": candidate_value["kind"], "rule_id": candidate_value["rule_id"], "decision": "accepted"}
-    validate_acceptance(config, old, current_context(config_path, config), candidate_value, bindings)
-    return submit_candidate_decision(config_path, explicit, ident, summary, {"bindings": bindings})
+    directory = state(config_path, explicit)
+    try:
+        with refresh_lock(directory):
+            config, _, old, _, candidate_value = candidate_for_review(config_path, explicit, ident)
+            summary = {"id": ident, "kind": candidate_value["kind"], "rule_id": candidate_value["rule_id"], "decision": "accepted"}
+            validate_acceptance(config, old, current_context(config_path, config), candidate_value, bindings)
+            return _submit_candidate_decision_locked(config_path, explicit, directory, ident, summary, {"bindings": bindings})
+    except RefreshBusyError as error:
+        return refresh_retry(directory, None, str(error), ["writer_lock"])
 
 def reject_candidate(config_path: Path, explicit: str | None, ident: str, reason: str) -> dict[str, Any]:
     allowed = {"not_architecture", "existing_canonical", "test_fixture", "false_match"}
     if reason not in allowed: raise ValueError("reject reason must be one of not_architecture, existing_canonical, test_fixture, false_match")
-    config, _, old, _, candidate_value = candidate_for_review(config_path, explicit, ident)
-    if changed_candidate_bindings(config, old, current_context(config_path, config), candidate_value): raise ValueError("candidate has changed canonical evidence; accept it instead of rejecting")
-    summary = {"id": ident, "kind": candidate_value["kind"], "rule_id": candidate_value["rule_id"], "decision": "rejected"}
-    return submit_candidate_decision(config_path, explicit, ident, summary, {"reason": reason})
+    directory = state(config_path, explicit)
+    try:
+        with refresh_lock(directory):
+            config, _, old, _, candidate_value = candidate_for_review(config_path, explicit, ident)
+            if changed_candidate_bindings(config, old, current_context(config_path, config), candidate_value): raise ValueError("candidate has changed canonical evidence; accept it instead of rejecting")
+            summary = {"id": ident, "kind": candidate_value["kind"], "rule_id": candidate_value["rule_id"], "decision": "rejected"}
+            return _submit_candidate_decision_locked(config_path, explicit, directory, ident, summary, {"reason": reason})
+    except RefreshBusyError as error:
+        return refresh_retry(directory, None, str(error), ["writer_lock"])
 
 def drift(config_path: Path, base: str) -> dict[str, Any]:
     config = load(config_path); patch = git(repo_for(config_path, config), "diff", "--unified=0", f"{base}..HEAD")
@@ -931,6 +1325,7 @@ def drift(config_path: Path, base: str) -> dict[str, Any]:
 def ignored(path: str, patterns: list[Any]) -> bool: return any(fnmatch.fnmatch(path, str(x)) for x in patterns)
 def manifest(config_path: Path, repo: Path, config: dict[str, Any]) -> dict[str, str | None]:
     paths = {e["path"].replace("\\", "/") for x in components(config) for e in x["evidence"] if isinstance(e, dict) and isinstance(e.get("path"), str)}
+    paths |= {e["path"].replace("\\", "/") for relation in config.get("relations", []) if isinstance(relation, dict) for e in relation.get("evidence", []) if isinstance(e, dict) and isinstance(e.get("path"), str)}
     mandatory: set[str] = set()
     try:
         config_relative = config_path.resolve().relative_to(repo.resolve()).as_posix()
@@ -971,8 +1366,10 @@ def watch_once(config_path: Path, explicit: str | None, apply: bool = False) -> 
         directory = state(config_path, explicit)
         return {"protocol_version": PROTOCOL_VERSION, "status": "INVALID", "freshness": "stale", "failures": [str(error)], "last_good_preserved": last_path(directory).exists(), "next_action": "repair watch/config scope before continuing"}
     previous = load(live).get("manifest", {}) if live.exists() else None
-    if previous is None or previous != current: atomic(live, {"manifest": current, "observed_at": datetime.now(timezone.utc).isoformat()})
+    def persist() -> None:
+        atomic(live, {"manifest": current, "observed_at": datetime.now(timezone.utc).isoformat()})
     if previous is None:
+        persist()
         observed = candidates(config_path, explicit) if last_path(directory).exists() else {"status": "PASS"}
         if observed.get("status") != "PASS": return observed | {"event": "ARCHITECTURE_CANDIDATE_OBSERVED", "changed_files": [], "direct_components": [], "watch_changed_files": []}
         return {"protocol_version": PROTOCOL_VERSION, "status": "WATCH_READY", "watched_files": len(current), "next_action": "keep watching"}
@@ -984,22 +1381,32 @@ def watch_once(config_path: Path, explicit: str | None, apply: bool = False) -> 
     if settings := archify_config(config, repo): controls.add(settings["view_relative"])
     control_changed = sorted(set(changed) & controls); source_changed = [path for path in changed if path not in controls]
     observed = candidates(config_path, explicit) if changed else {"status": "PASS"}
-    if observed.get("status") != "PASS": return observed | {"event": "ARCHITECTURE_CANDIDATE_OBSERVED", "changed_files": changed, "direct_components": direct, "watch_changed_files": changed}
-    if not direct and not control_changed: return {"protocol_version": PROTOCOL_VERSION, "status": "NO_RELEVANT_CHANGE", "changed_files": changed, "direct_components": [], "next_action": "no canonical evidence, architecture config/view, or high-value candidate changed"}
+    if observed.get("status") != "PASS":
+        persist()
+        return observed | {"event": "ARCHITECTURE_CANDIDATE_OBSERVED", "changed_files": changed, "direct_components": direct, "watch_changed_files": changed}
+    if not direct and not control_changed:
+        if changed:
+            persist()
+        return {"protocol_version": PROTOCOL_VERSION, "status": "NO_RELEVANT_CHANGE", "changed_files": changed, "direct_components": [], "next_action": "no canonical evidence, architecture config/view, or high-value candidate changed"}
     if apply:
         refreshed = refresh(config_path, explicit, changed=source_changed)
-        event = "ARCHITECTURE_CONTEXT_REFRESHED" if refreshed.get("status") == "PASS" else "ARCHITECTURE_REFRESH_FAILED"
+        if refreshed.get("status") != "RETRY":
+            persist()
+        event = "ARCHITECTURE_CONTEXT_REFRESHED" if refreshed.get("status") == "PASS" else "ARCHITECTURE_REFRESH_RETRY" if refreshed.get("status") == "RETRY" else "ARCHITECTURE_REFRESH_FAILED"
         return refreshed | {"event": event, "direct_components": direct, "watch_changed_files": changed, "control_changed_files": control_changed, "auto_refresh": "existing_declared_context_only"}
+    persist()
     event = "ARCHITECTURE_CONFIG_CHANGED" if control_changed and not direct else "CANONICAL_EVIDENCE_CHANGED"
     return status(config_path, explicit) | {"event": event, "direct_components": direct, "watch_changed_files": changed, "control_changed_files": control_changed, "next_action": "inspect changed evidence/config, then run refresh explicitly when it remains canonical"}
 def watch(config_path: Path, explicit: str | None, poll_ms: int, max_events: int | None, apply: bool = False) -> int:
-    count = 0
+    count = 0; previous_retry = None
     while max_events is None or count < max_events:
         started = time.monotonic(); value = watch_once(config_path, explicit, apply)
-        if value["status"] != "NO_RELEVANT_CHANGE":
+        retry = semantic({key: value.get(key) for key in ("status", "failures", "changed_inputs", "watch_changed_files")}) if value["status"] == "RETRY" else None
+        if value["status"] != "NO_RELEVANT_CHANGE" and (retry is None or retry != previous_retry):
             dump(value)
-            if value["status"] != "WATCH_READY": record_usage(state(config_path, explicit), "watch", value, int((time.monotonic() - started) * 1000), "watch")
-        if value["status"] not in ("WATCH_READY", "NO_RELEVANT_CHANGE"): count += 1
+            if value["status"] not in ("WATCH_READY", "RETRY"): record_usage(state(config_path, explicit), "watch", value, int((time.monotonic() - started) * 1000), "watch")
+        previous_retry = retry
+        if value["status"] not in ("WATCH_READY", "NO_RELEVANT_CHANGE", "RETRY"): count += 1
         time.sleep(max(50, poll_ms) / 1000)
     return 0
 
