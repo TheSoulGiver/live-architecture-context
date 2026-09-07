@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
+import subprocess
 from typing import Any
 
 from archctx import components as validated_components
@@ -14,6 +16,111 @@ from archctx import relation_id, repo_for, validate
 
 COMPONENT_TYPES = {"frontend", "backend", "database", "cloud", "security", "messagebus", "external"}
 VARIANTS = {"default", "emphasis", "security", "dashed"}
+FULL_SHA = 40
+
+
+def github_repository_url(remote: str) -> str | None:
+    """Normalize one supported GitHub origin into Archify's public HTTPS form."""
+    raw = remote.strip()
+    prefixes = ("https://github.com/", "git@github.com:", "ssh://git@github.com/")
+    tail = next((raw[len(prefix):] for prefix in prefixes if raw.lower().startswith(prefix)), None)
+    if tail is None:
+        return None
+    tail = tail.rstrip("/")
+    if tail.lower().endswith(".git"):
+        tail = tail[:-4]
+    pieces = tail.split("/")
+    if len(pieces) != 2 or any(not piece or any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-" for char in piece) for piece in pieces):
+        return None
+    return f"https://github.com/{pieces[0]}/{pieces[1]}"
+
+
+def repo_relative_path(value: Any) -> str | None:
+    """Return an Archify-safe repo-relative POSIX path, or no path."""
+    if not isinstance(value, str) or not value or value.startswith("/") or "\\" in value or any(ord(char) < 32 or ord(char) == 127 for char in value):
+        return None
+    pieces = value.split("/")
+    if any(not piece or piece in (".", "..") for piece in pieces) or pieces[0] == ".git":
+        return None
+    return "/".join(pieces)
+
+
+def candidate_evidence(context_value: dict[str, Any]) -> list[dict[str, Any]] | None:
+    """Collect only the already validated evidence facts carried by a context."""
+    components = context_value.get("components")
+    if not isinstance(components, list) or not components:
+        return None
+    result: list[dict[str, Any]] = []
+    for item in components:
+        evidence = item.get("evidence") if isinstance(item, dict) else None
+        if not isinstance(evidence, list) or not evidence:
+            return None
+        if not all(isinstance(fact, dict) for fact in evidence):
+            return None
+        result.extend(evidence)
+    relations = context_value.get("relations", [])
+    if not isinstance(relations, list):
+        return None
+    for item in relations:
+        if not isinstance(item, dict) or "evidence" not in item:
+            continue
+        evidence = item["evidence"]
+        if not isinstance(evidence, list) or not all(isinstance(fact, dict) for fact in evidence):
+            return None
+        result.extend(evidence)
+    return result
+
+
+def repository_evidence(repo: Path, context_value: dict[str, Any]) -> dict[str, Any] | None:
+    """Return public commit evidence only when every candidate fact matches that commit.
+
+    This uses local Git objects only. A dirty worktree is allowed when its
+    validated evidence facts still hash to the pinned commit; otherwise no
+    repository metadata is returned and callers must render without source
+    links rather than claiming the dirty content is committed.
+    """
+    revision = context_value.get("revision") if isinstance(context_value, dict) else None
+    facts = candidate_evidence(context_value) if isinstance(context_value, dict) else None
+    if not isinstance(revision, str) or len(revision) != FULL_SHA or any(char not in "0123456789abcdefABCDEF" for char in revision) or not facts:
+        return None
+    root = Path(repo).resolve()
+    if not root.is_dir():
+        return None
+
+    def git(*args: str) -> str | None:
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(root), *args],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return result.stdout if result.returncode == 0 else None
+
+    top_level = git("rev-parse", "--show-toplevel")
+    remote = git("remote", "get-url", "origin")
+    url = github_repository_url(remote or "")
+    if top_level is None or Path(top_level.strip()).resolve() != root or url is None:
+        return None
+    revision = revision.lower()
+    if git("cat-file", "-e", f"{revision}^{{commit}}") is None:
+        return None
+    for fact in facts:
+        path = repo_relative_path(fact.get("path"))
+        expected = fact.get("sha256")
+        if path is None or not isinstance(expected, str) or len(expected) != 64 or any(char not in "0123456789abcdefABCDEF" for char in expected):
+            return None
+        content = git("show", f"{revision}:{path}")
+        if content is None:
+            return None
+        actual = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        if actual != expected.lower():
+            return None
+    return {"url": url, "revision": revision, "evidence_revision_verified": True}
 
 
 def load(path: Path) -> dict[str, Any]:
@@ -60,9 +167,71 @@ def source_label(component: dict[str, Any], ident: str) -> str:
     return value if isinstance(value, str) and value.strip() else ident
 
 
-def project(config: dict[str, Any], view: dict[str, Any]) -> dict[str, Any]:
+def verified_repository(context_value: dict[str, Any] | None, repository: dict[str, Any] | None) -> dict[str, str] | None:
+    """Accept only metadata returned by :func:`repository_evidence`."""
+    if repository is None:
+        return None
+    if not isinstance(context_value, dict):
+        raise ValueError("repository evidence needs a validated context")
+    if not isinstance(repository, dict) or set(repository) != {"url", "revision", "evidence_revision_verified"}:
+        raise ValueError("repository evidence must be the verified repository_evidence result")
+    url, revision = repository.get("url"), repository.get("revision")
+    context_revision = context_value.get("revision")
+    if repository.get("evidence_revision_verified") is not True or not isinstance(url, str) or github_repository_url(url) != url:
+        raise ValueError("repository evidence must use a verified public GitHub HTTPS URL")
+    if not isinstance(revision, str) or len(revision) != FULL_SHA or any(char not in "0123456789abcdefABCDEF" for char in revision):
+        raise ValueError("repository evidence must pin a full commit SHA")
+    if not isinstance(context_revision, str) or context_revision.lower() != revision.lower():
+        raise ValueError("repository evidence revision must match the validated context")
+    return {"url": url, "revision": revision.lower()}
+
+
+def context_component_map(context_value: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    if not isinstance(context_value, dict) or not isinstance(context_value.get("components"), list):
+        raise ValueError("repository evidence needs validated component facts")
+    values: dict[str, dict[str, Any]] = {}
+    for component in context_value["components"]:
+        ident = component.get("id") if isinstance(component, dict) else None
+        evidence = component.get("evidence") if isinstance(component, dict) else None
+        if not isinstance(ident, str) or not ident or ident in values or not isinstance(evidence, list) or not evidence:
+            raise ValueError("repository evidence needs one validated evidence list per component")
+        values[ident] = component
+    return values
+
+
+def archify_sources(component: dict[str, Any], ident: str) -> list[dict[str, Any]]:
+    """Keep at most Archify's three verified, line-addressable source refs."""
+    result: list[dict[str, Any]] = []
+    seen: set[tuple[str, int]] = set()
+    for fact in component["evidence"]:
+        path = repo_relative_path(fact.get("path")) if isinstance(fact, dict) else None
+        line = fact.get("line") if isinstance(fact, dict) else None
+        digest = fact.get("sha256") if isinstance(fact, dict) else None
+        if path is None or not isinstance(line, int) or isinstance(line, bool) or line < 1 or not isinstance(digest, str) or len(digest) != 64 or any(char not in "0123456789abcdefABCDEF" for char in digest):
+            raise ValueError(f"repository evidence for {ident} is not a validated source fact")
+        key = (path, line)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append({"path": path, "line": line})
+        if len(result) == 3:
+            break
+    if not result:
+        raise ValueError(f"repository evidence for {ident} has no Archify source references")
+    return result
+
+
+def project(
+    config: dict[str, Any],
+    view: dict[str, Any],
+    *,
+    context_value: dict[str, Any] | None = None,
+    repository: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     canonical_components = validated_components(config)
     source = {item["id"]: item for item in canonical_components}
+    repository_metadata = verified_repository(context_value, repository)
+    candidate_components = context_component_map(context_value) if repository_metadata else {}
     only(view, {"title", "subtitle", "nodes", "relations", "relation_variants"}, "view")
     nodes = view.get("nodes")
     if not isinstance(nodes, list) or not nodes:
@@ -99,6 +268,11 @@ def project(config: dict[str, Any], view: dict[str, Any]) -> dict[str, Any]:
         component = {"id": archify_ident, "type": component_type, "label": label, "sublabel": sublabel, "pos": point(node.get("pos"), f"view node {ident} pos"), "size": point(node.get("size", [168, 64]), f"view node {ident} size", positive=True)}
         if tag is not None:
             component["tag"] = tag
+        if repository_metadata:
+            candidate = candidate_components.get(ident)
+            if candidate is None:
+                raise ValueError(f"repository evidence is missing validated component facts for {ident}")
+            component["sources"] = archify_sources(candidate, ident)
         components.append(component)
 
     visible = set(selected)
@@ -141,7 +315,10 @@ def project(config: dict[str, Any], view: dict[str, Any]) -> dict[str, Any]:
 
     title = view.get("title", "Canonical architecture")
     subtitle = view.get("subtitle", "Declared canonical architecture projection; source remains authoritative")
-    return {"schema_version": 1, "diagram_type": "architecture", "meta": {"title": text(title, "view title"), "subtitle": text(subtitle, "view subtitle")}, "components": components, "connections": connections}
+    meta = {"title": text(title, "view title"), "subtitle": text(subtitle, "view subtitle")}
+    if repository_metadata:
+        meta["repository"] = repository_metadata
+    return {"schema_version": 1, "diagram_type": "architecture", "meta": meta, "components": components, "connections": connections}
 
 
 def validate_source(config_path: Path, config: dict[str, Any]) -> None:

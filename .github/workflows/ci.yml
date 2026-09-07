@@ -10,10 +10,23 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: {python-version: '3.11'}
+      - uses: actions/setup-node@v4
+        with: {node-version: '20'}
       - run: python tools/verify_public_face.py
       - run: python -m unittest -v
       - run: python -m pip install .
+      - name: Set up pinned Archify
+        run: python tools/archify.py setup
+        env:
+          ARCHIFY_HOME: ${{ runner.temp }}/archify
       - run: archctx --config demo-repo/architecture.json refresh
       - run: archctx --config demo-repo/architecture.json canonical service
       - run: archctx-to-archify --config demo-repo/architecture.json --view demo-repo/architecture.view.json --output "${{ runner.temp }}/architecture.json"
+      - name: Refresh this repository's Living Blueprint
+        run: archctx --config architecture/architecture.json refresh
+        env:
+          ARCHIFY_HOME: ${{ runner.temp }}/archify
+      - name: Verify accepted blueprint receipt
+        run: >-
+          python -c "import json; from pathlib import Path; record=json.loads(Path('architecture/.archctx/last-good.json').read_text(encoding='utf-8')); receipt=record['archify']; assert receipt['validation'] == receipt['render'] == receipt['compare'] == 'PASS'; assert {'current.html', 'comparison.html', 'compare.json', 'binding.json'} <= set(receipt['artifacts']); assert all((Path(receipt['generation']) / name).is_file() for name in receipt['artifacts']); assert receipt['comparison']['validation']['checksPassed'] == receipt['comparison']['validation']['checkCount']; assert receipt['repository_evidence']['evidence_revision_verified'] is True; print('accepted blueprint receipt: PASS')"
       - run: git diff --check

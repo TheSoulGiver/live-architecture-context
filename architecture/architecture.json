@@ -1,61 +1,145 @@
 {
   "version": 1,
   "repo": "..",
+  "coverage": {
+    "scope": "This Living Blueprint covers the public Live Architecture Context product loop: accepted source evidence, bounded candidate review, refresh and local last-good state, the optional Archify projection, and the local agent/viewer surfaces.",
+    "limitations": [
+      "Relations are authored, source-evidence-backed architecture claims; this view is not a complete call graph.",
+      "CALM is packaged as an optional loopback adapter but is not configured for this repository, so no CALM code facts are shown.",
+      "The diagram is a focused human view. Source, accepted context, and retained local receipts remain the authority for details and history.",
+      "Rendered IR, HTML, comparisons, snapshots, watcher state, and pinned renderer checkout stay in local .archctx state and are not GitHub facts."
+    ]
+  },
   "components": [
     {
       "id": "archctx-cli",
-      "name": "Archctx CLI and MCP server",
-      "purpose": "Validates source evidence, retains last-good context, and serves compact agent queries.",
-      "truth_sources": ["archctx.py"],
-      "tags": ["canonical", "agent-protocol"],
+      "name": "Archctx CLI and MCP",
+      "purpose": "Canonical source-evidence validation and compact CLI/MCP architecture queries.",
+      "truth_sources": ["archctx.py", "pyproject.toml"],
+      "code_symbol": "main",
+      "tags": ["canonical", "agent-protocol", "source-evidence"],
       "evidence": [
-        {"path": "archctx.py", "contains": "Source-grounded live architecture context; CALM/Archify remain external owners."}
+        {"path": "archctx.py", "contains": "def mcp_tools() -> list[dict[str, Any]]:"},
+        {"path": "pyproject.toml", "contains": "archctx = \"archctx:main\""}
       ]
     },
     {
       "id": "last-known-good-state",
-      "name": "Last-known-good context state",
-      "purpose": "Preserves a validated source-evidence context when a later refresh is stale or invalid.",
+      "name": "Last-good context state",
+      "purpose": "Locally retains the accepted context, snapshots, and verified blueprint generation; failures leave the previous accepted record available and stale-labelled.",
       "truth_sources": ["archctx.py"],
-      "tags": ["state", "trust"],
+      "code_symbol": "refresh_lock",
+      "tags": ["state", "trust", "local-only"],
       "evidence": [
+        {"path": "archctx.py", "contains": "def refresh_lock(directory: Path):"},
         {"path": "archctx.py", "contains": "atomic(last_path(directory), record)"}
+      ]
+    },
+    {
+      "id": "refresh-transaction",
+      "name": "Refresh transaction",
+      "purpose": "Coordinates source validation, candidate checks, optional graph/gates, and Archify projection before publishing one accepted architecture version.",
+      "truth_sources": ["archctx.py"],
+      "code_symbol": "refresh",
+      "tags": ["canonical", "incremental", "fail-closed"],
+      "evidence": [
+        {"path": "archctx.py", "contains": "def refresh(config_path: Path"},
+        {"path": "archctx.py", "contains": "def refresh_input_fingerprint("}
+      ]
+    },
+    {
+      "id": "candidate-review",
+      "name": "Candidate review",
+      "purpose": "Finds bounded high-value source signals and requires an Agent to accept or reject them before a changed architecture is promoted.",
+      "truth_sources": ["archctx.py"],
+      "code_symbol": "candidate_observation",
+      "tags": ["drift", "manual-semantic-review", "bounded"],
+      "evidence": [
+        {"path": "archctx.py", "contains": "def candidate_observation(config: dict[str, Any], repo: Path, record: dict[str, Any] | None) -> dict[str, Any]:"},
+        {"path": "archctx.py", "contains": "def accept_candidate(config_path: Path"}
       ]
     },
     {
       "id": "archify-projection",
       "name": "Archify projection",
-      "purpose": "Projects a declared Archctx view into Archify's typed architecture IR.",
-      "truth_sources": ["archctx_to_archify.py"],
-      "tags": ["visualization", "optional"],
+      "purpose": "Projects the declared canonical view into typed Archify IR, validates it through the pinned external renderer, and keeps generated artifacts local.",
+      "truth_sources": ["archctx.py", "archctx_to_archify.py", "tools/archify.py"],
+      "code_symbol": "archify_projection",
+      "tags": ["visualization", "typed-ir", "external-renderer"],
       "evidence": [
-        {"path": "archctx_to_archify.py", "contains": "Project a declared Archctx view into Archify's typed architecture IR."}
+        {"path": "archctx.py", "contains": "def archify_projection("},
+        {"path": "archctx_to_archify.py", "contains": "Project a declared Archctx view into Archify's typed architecture IR."},
+        {"path": "tools/archify.py", "contains": "REVISION = \"5de7275fe87a66a19d52a4d9b0b3a4f2a5a90115\""}
+      ]
+    },
+    {
+      "id": "blueprint-viewer",
+      "name": "Local Living Blueprint viewer",
+      "purpose": "Serves only receipt-bound accepted Archify artifacts and hash-verified source evidence on a loopback, read-only local UI.",
+      "truth_sources": ["archctx_blueprint.py"],
+      "code_symbol": "render_bundle",
+      "tags": ["human-view", "local-only", "source-evidence"],
+      "evidence": [
+        {"path": "archctx_blueprint.py", "contains": "def render_bundle("},
+        {"path": "archctx_blueprint.py", "contains": "if url.path == \"/source\":"},
+        {"path": "archctx_blueprint.py", "contains": "ThreadingHTTPServer((\"127.0.0.1\", args.port)"}
       ]
     },
     {
       "id": "calm-query-adapter",
-      "name": "CALM query adapter",
-      "purpose": "Reads bounded caller and callee facts from an already-managed local CALM endpoint.",
+      "name": "CALM query adapter (optional)",
+      "purpose": "When explicitly configured, returns bounded loopback CALM caller/callee facts with provider freshness; it does not own canonical relations or start CALM.",
       "truth_sources": ["calm_query.py"],
-      "tags": ["code-graph", "optional", "local"],
+      "code_symbol": "query_http",
+      "tags": ["code-graph", "optional", "not-configured", "provider-reported"],
       "evidence": [
-        {"path": "calm_query.py", "contains": "Compact, read-only CALM callers/callees adapter for Archctx."}
+        {"path": "calm_query.py", "contains": "Compact, read-only CALM callers/callees adapter for Archctx."},
+        {"path": "calm_query.py", "contains": "def graph_ready(response: dict[str, Any]) -> None:"}
       ]
     },
     {
       "id": "codex-skills",
-      "name": "On-demand Codex skills",
-      "purpose": "Guide Agents to use compact architecture context only when it avoids a broad source read.",
+      "name": "Codex architecture skills",
+      "purpose": "Directs an Agent to use compact architecture context only when it avoids the next broad source read.",
       "truth_sources": ["plugins/live-architecture-context/.codex-plugin/plugin.json", "plugins/live-architecture-context/skills/architecture-context/SKILL.md"],
-      "tags": ["agent-entry", "optional"],
+      "tags": ["agent-entry", "optional", "on-demand"],
       "evidence": [
-        {"path": "plugins/live-architecture-context/.codex-plugin/plugin.json", "contains": "\"skills\": \"./skills/\""}
+        {"path": "plugins/live-architecture-context/.codex-plugin/plugin.json", "contains": "\"skills\": \"./skills/\""},
+        {"path": "plugins/live-architecture-context/skills/architecture-context/SKILL.md", "contains": "Use architecture context only when it will eliminate the next broad source read."}
       ]
     }
   ],
   "relations": [
     {
+      "id": "skills-guide-cli",
+      "from": "codex-skills",
+      "to": "archctx-cli",
+      "kind": "guides-to",
+      "evidence": [
+        {"path": "plugins/live-architecture-context/skills/architecture-context/SKILL.md", "contains": "run `archctx status`"}
+      ]
+    },
+    {
+      "id": "cli-requests-refresh",
       "from": "archctx-cli",
+      "to": "refresh-transaction",
+      "kind": "requests-refresh",
+      "evidence": [
+        {"path": "archctx.py", "contains": "if name == \"architecture_refresh\":"}
+      ]
+    },
+    {
+      "id": "candidate-blocks-refresh",
+      "from": "candidate-review",
+      "to": "refresh-transaction",
+      "kind": "blocks-promotion-until-reviewed",
+      "evidence": [
+        {"path": "archctx.py", "contains": "CANDIDATE_REVIEW_REQUIRED"}
+      ]
+    },
+    {
+      "id": "refresh-promotes-last-good",
+      "from": "refresh-transaction",
       "to": "last-known-good-state",
       "kind": "promotes-last-good",
       "evidence": [
@@ -63,20 +147,59 @@
       ]
     },
     {
-      "from": "archify-projection",
-      "to": "archctx-cli",
-      "kind": "reuses-validation",
+      "id": "refresh-validates-projection",
+      "from": "refresh-transaction",
+      "to": "archify-projection",
+      "kind": "validates-before-promotion",
       "evidence": [
-        {"path": "archctx_to_archify.py", "contains": "from archctx import components as validated_components"}
+        {"path": "archctx.py", "contains": "archify_projection(config, repo, directory"}
       ]
     },
     {
-      "from": "codex-skills",
-      "to": "archctx-cli",
-      "kind": "guides-to",
+      "id": "projection-delivers-blueprint",
+      "from": "archify-projection",
+      "to": "blueprint-viewer",
+      "kind": "delivers-accepted-blueprint",
       "evidence": [
-        {"path": "plugins/live-architecture-context/skills/architecture-context/SKILL.md", "contains": "Use architecture context only when it will eliminate the next broad source read."}
+        {"path": "archctx.py", "contains": "from archctx_blueprint import render_bundle"}
       ]
+    },
+    {
+      "id": "last-good-serves-cli",
+      "from": "last-known-good-state",
+      "to": "archctx-cli",
+      "kind": "serves-accepted-context",
+      "evidence": [
+        {"path": "archctx.py", "contains": "return value | {\"context\": old[\"context\"]"}
+      ]
+    }
+  ],
+  "archify": {
+    "view": "architecture/architecture.view.json",
+    "output": "architecture/.archctx/architecture.archify.json",
+    "validate": ["{python}", "tools/archify.py", "validate", "architecture", "{archify_output}", "--quality", "standard", "--repo-root", "{repo}", "--json"],
+    "render": ["{python}", "tools/archify.py", "deliver", "architecture", "{archify_output}", "{archify_html}", "--quality", "standard", "--repo-root", "{repo}", "--json"],
+    "compare": ["{python}", "tools/archify.py", "compare", "architecture", "{archify_before}", "{archify_output}", "{archify_compare}", "--receipt", "{archify_receipt}", "--quality", "standard", "--repo-root", "{repo}", "--json"],
+    "timeout_seconds": 180
+  },
+  "drift_rules": [
+    {
+      "id": "blueprint-loopback-http-boundary",
+      "kind": "new-local-http-boundary",
+      "paths": ["archctx_blueprint.py"],
+      "added_contains": ["ThreadingHTTPServer("]
+    },
+    {
+      "id": "blueprint-source-evidence-boundary",
+      "kind": "new-local-source-boundary",
+      "paths": ["archctx_blueprint.py"],
+      "added_contains": ["url.path == \"/source\""]
+    },
+    {
+      "id": "archify-renderer-revision",
+      "kind": "renderer-boundary-change",
+      "paths": ["tools/archify.py"],
+      "added_contains": ["REVISION ="]
     }
   ],
   "watch": {
@@ -84,9 +207,12 @@
       "archctx.py",
       "archctx_to_archify.py",
       "calm_query.py",
+      "archctx_blueprint.py",
+      "tools/archify.py",
+      "pyproject.toml",
       "plugins/live-architecture-context/.codex-plugin/plugin.json",
       "plugins/live-architecture-context/skills/*/SKILL.md"
     ],
-    "ignore": [".archctx/*", ".calm/*", "__pycache__/*"]
+    "ignore": [".archctx/*", "architecture/.archctx/*", ".calm/*", "__pycache__/*"]
   }
 }

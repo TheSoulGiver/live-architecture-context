@@ -497,6 +497,78 @@ class ArchitectureContextTest(unittest.TestCase):
             self.assertEqual(run(config, state, "trace", "a")["kind"], "authored_architecture_trace")
             self.assertEqual(run(config, state, "impact", "--base", base)["kind"], "authored_architecture_impact")
 
+    def test_relation_only_evidence_drives_impact_and_watch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "a.py").write_text("def a(): pass\n", encoding="utf-8")
+            (root / "b.py").write_text("def b(): pass\n", encoding="utf-8")
+            wiring, unrelated = root / "wiring.py", root / "other.py"
+            anchor = "ROUTE = (a, b)\n"
+            wiring.write_text(anchor, encoding="utf-8")
+            unrelated.write_text("# unrelated\n", encoding="utf-8")
+            config, state = root / "architecture.json", root / "state"
+            value = {"version": 1, "repo": ".", "components": [
+                {"id": "b", "evidence": [{"path": "b.py", "contains": "def b"}]},
+                {"id": "a", "evidence": [{"path": "a.py", "contains": "def a"}]}],
+                "relations": [{"id": "a-to-b", "from": "a", "to": "b", "kind": "calls",
+                               "evidence": [{"path": "wiring.py", "contains": anchor.strip()}]}],
+                "watch": {"paths": ["other.py"]}}
+            config.write_text(json.dumps(value), encoding="utf-8")
+            self.assertEqual(archctx.refresh(config, str(state))["status"], "PASS")
+            before = archctx.load(archctx.last_path(state))
+            self.assertEqual(archctx.watch_once(config, str(state))["status"], "WATCH_READY")
+            self.assertIn("wiring.py", archctx.load(state / "live-state.json")["manifest"])
+
+            impact = archctx.impact(config, str(state), None, ["wiring.py"])
+            self.assertEqual(impact["direct_components"], ["b", "a"])
+            self.assertEqual(impact["reachable_components"], ["a", "b"])
+            self.assertEqual(impact["kind"], "authored_architecture_impact")
+            with patch.object(archctx, "refresh", wraps=archctx.refresh) as refresh:
+                unrelated.write_text("# changed unrelated implementation\n", encoding="utf-8")
+                self.assertEqual(archctx.impact(config, str(state), None, ["other.py"])["direct_components"], [])
+                self.assertEqual(archctx.watch_once(config, str(state), apply=True)["status"], "NO_RELEVANT_CHANGE")
+                refresh.assert_not_called()
+
+                wiring.write_text("# moved evidence\n" + anchor, encoding="utf-8")
+                observed = archctx.watch_once(config, str(state))
+                self.assertEqual((observed["status"], observed["event"]), ("STALE", "CANONICAL_EVIDENCE_CHANGED"))
+                self.assertEqual(observed["direct_components"], ["b", "a"])
+                refresh.assert_not_called()
+
+                # Observation consumes its manifest; the next edit exercises --apply.
+                updated_source = "# moved evidence\n# ordinary implementation edit\n" + anchor
+                wiring.write_text(updated_source, encoding="utf-8")
+                refreshed = archctx.watch_once(config, str(state), apply=True)
+                self.assertEqual((refreshed["status"], refreshed["event"]), ("PASS", "ARCHITECTURE_CONTEXT_REFRESHED"))
+                self.assertEqual(refreshed["direct_components"], ["b", "a"])
+                self.assertEqual(refreshed["changed_files"], ["wiring.py"])
+                accepted = archctx.load(archctx.last_path(state))
+                evidence = accepted["context"]["relations"][0]["evidence"][0]
+                self.assertEqual((evidence["sha256"], evidence["line"]), (archctx.sha(updated_source.encode()), 3))
+                delta = archctx.record_diff(before, accepted)
+                self.assertEqual(delta["evidence_changed_relations"], ["a-to-b"])
+                self.assertEqual(delta["changed_components"], [])
+                self.assertEqual(delta["changed_relations"], [])
+                self.assertEqual(archctx.candidates(config, str(state))["candidate_count"], 0)
+                self.assertEqual(archctx.status(config, str(state))["status"], "FRESH")
+
+                last_good = archctx.last_path(state).read_bytes()
+                wiring.write_text("# relation anchor removed\n", encoding="utf-8")
+                failed = archctx.watch_once(config, str(state), apply=True)
+                self.assertEqual((failed["status"], failed["event"]), ("INVALID", "ARCHITECTURE_REFRESH_FAILED"))
+                self.assertTrue(failed["last_good_preserved"])
+                self.assertIn("wiring.py", " ".join(failed["failures"]))
+                self.assertEqual(archctx.last_path(state).read_bytes(), last_good)
+                self.assertEqual(archctx.status(config, str(state))["status"], "STALE")
+                self.assertEqual(archctx.watch_once(config, str(state), apply=True)["status"], "NO_RELEVANT_CHANGE")
+                self.assertEqual(refresh.call_count, 2)
+
+            # Malformed relation paths remain validation failures, not relevance crashes.
+            value["relations"][0]["evidence"][0]["path"] = None
+            config.write_text(json.dumps(value), encoding="utf-8")
+            self.assertEqual(archctx.watch_once(config, str(state), apply=True)["status"], "INVALID")
+            self.assertEqual(archctx.last_path(state).read_bytes(), last_good)
+
     def test_relation_evidence_is_validated_and_traceable(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

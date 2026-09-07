@@ -28,10 +28,21 @@ holds rebuildable last-good, snapshots, watcher state, usage, and candidate
 decisions locally and stays ignored. Review a shared architecture config as
 code: its evidence and configured commands may be sensitive or executable.
 
-For a cross-module architecture question in this repository, use
-`archctx --config architecture/architecture.json` only when it will eliminate
-the next broad source read. Check `status` first and treat `STALE` as a reason
-for targeted source verification, never as permission to guess or a Gate.
+For architecture orientation, after establishing the remote revision, run
+`python archctx.py --config architecture/architecture.json status` before
+reading raw architecture JSON or whole implementation files. If local context
+is missing and the task requests restoration, use the setup/refresh commands
+below, then start with `search <task terms>`, `canonical <returned-id>`,
+`impact --files <paths>`, or `history --limit 3` on that same CLI prefix.
+Read the returned source anchors and only the next necessary wiring. Raw
+config/view are editing inputs, not the default query response. If context is
+stale or irrelevant, do targeted source discovery; never guess or block work.
+
+The working human map and reproduction commands are in `docs/LIVING_BLUEPRINT.md`.
+For a new checkout, rebuild local context with `refresh` when the task includes
+context restoration. Review candidates against source, maintain the shared
+config/view yourself, and use `accept` / `reject` for the observed semantic
+change. Keep the existing component IDs unless ownership actually changes.
 
 ## Completed-work sync
 

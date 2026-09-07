@@ -1,3 +1,4 @@
+import hashlib
 import json
 import subprocess
 import sys
@@ -5,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from archctx_to_archify import archify_id, project, validate_source
+from archctx_to_archify import archify_id, project, repository_evidence, validate_source
 
 
 def component(ident, **extra):
@@ -60,6 +61,57 @@ class ArchifyProjectionTest(unittest.TestCase):
     def test_rejects_invalid_archify_view_fields(self):
         with self.assertRaisesRegex(ValueError, "supported Archify type"):
             project({"version": 1, "components": [component("a")]}, {"nodes": [{"id": "a", "type": "avatar", "pos": [0, 0]}]})
+
+    def test_projects_verified_candidate_facts_as_archify_source_links(self):
+        revision = "b" * 40
+        candidate = {
+            "revision": revision,
+            "components": [{"id": "service", "evidence": [{"path": "src/example.py", "line": 3, "sha256": "a" * 64}]}],
+            "relations": [],
+        }
+        result = project(
+            {"version": 1, "components": [component("service", name="Service")]},
+            {"nodes": [{"id": "service", "pos": [0, 0]}]},
+            context_value=candidate,
+            repository={"url": "https://github.com/example/evidence-repo", "revision": revision, "evidence_revision_verified": True},
+        )
+        self.assertEqual(result["meta"]["repository"], {"url": "https://github.com/example/evidence-repo", "revision": revision})
+        self.assertEqual(result["components"][0]["sources"], [{"path": "src/example.py", "line": 3}])
+
+    def test_rejects_unverified_repository_metadata(self):
+        candidate = {"revision": "b" * 40, "components": [{"id": "service", "evidence": [{"path": "src/example.py", "line": 1, "sha256": "a" * 64}]}], "relations": []}
+        with self.assertRaisesRegex(ValueError, "verified repository_evidence result"):
+            project(
+                {"version": 1, "components": [component("service")]},
+                {"nodes": [{"id": "service", "pos": [0, 0]}]},
+                context_value=candidate,
+                repository={"url": "https://github.com/example/evidence-repo", "revision": candidate["revision"]},
+            )
+
+    def test_repository_evidence_requires_candidate_fact_to_match_pinned_commit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "src" / "example.py"
+            source.parent.mkdir()
+            source.write_bytes(b"def example(): pass\r\n")
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(["git", "-C", str(root), "config", "user.name", "Archctx Tests"], check=True)
+            subprocess.run(["git", "-C", str(root), "config", "user.email", "archctx@example.test"], check=True)
+            subprocess.run(["git", "-C", str(root), "remote", "add", "origin", "git@github.com:example/evidence-repo.git"], check=True)
+            subprocess.run(["git", "-C", str(root), "add", "src/example.py"], check=True)
+            subprocess.run(["git", "-C", str(root), "commit", "-qm", "fixture"], check=True)
+            revision = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], check=True, text=True, capture_output=True).stdout.strip()
+
+            def candidate() -> dict:
+                text = source.read_text(encoding="utf-8", errors="replace")
+                return {"revision": revision, "components": [{"id": "service", "evidence": [{"path": "src/example.py", "line": 1, "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()}]}], "relations": []}
+
+            metadata = repository_evidence(root, candidate())
+            self.assertEqual(metadata, {"url": "https://github.com/example/evidence-repo", "revision": revision, "evidence_revision_verified": True})
+            (root / "unrelated.py").write_text("dirty = True\n", encoding="utf-8")
+            self.assertEqual(repository_evidence(root, candidate()), metadata)
+            source.write_text("def changed(): pass\n", encoding="utf-8")
+            self.assertIsNone(repository_evidence(root, candidate()))
 
     def test_rejects_config_without_required_archctx_evidence(self):
         with self.assertRaisesRegex(ValueError, "evidence is required"):

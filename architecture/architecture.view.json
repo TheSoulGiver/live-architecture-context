@@ -1,0 +1,86 @@
+{
+  "title": "Live Architecture Context",
+  "subtitle": "Accepted source-backed blueprint · focused product view, not a full call graph",
+  "nodes": [
+    {
+      "id": "codex-skills",
+      "type": "frontend",
+      "label": "Codex skills",
+      "sublabel": "On-demand architecture orientation",
+      "tag": "agent entry",
+      "pos": [40, 70],
+      "size": [210, 76]
+    },
+    {
+      "id": "archctx-cli",
+      "type": "backend",
+      "label": "Archctx CLI / MCP",
+      "sublabel": "Canonical evidence and compact queries",
+      "tag": "canonical",
+      "pos": [330, 70],
+      "size": [220, 76]
+    },
+    {
+      "id": "archify-projection",
+      "type": "external",
+      "label": "Archify projection",
+      "sublabel": "Validated typed IR via pinned renderer",
+      "tag": "visualization",
+      "pos": [650, 300],
+      "size": [220, 76]
+    },
+    {
+      "id": "blueprint-viewer",
+      "type": "frontend",
+      "label": "Living Blueprint",
+      "sublabel": "Loopback-only accepted view and evidence",
+      "tag": "human view",
+      "pos": [950, 300],
+      "size": [220, 76]
+    },
+    {
+      "id": "candidate-review",
+      "type": "security",
+      "label": "Candidate review",
+      "sublabel": "Bounded drift signals; Agent decides",
+      "tag": "semantic review",
+      "pos": [40, 300],
+      "size": [210, 76]
+    },
+    {
+      "id": "refresh-transaction",
+      "type": "backend",
+      "label": "Refresh transaction",
+      "sublabel": "Validate, render, then publish one version",
+      "tag": "fail closed",
+      "pos": [330, 300],
+      "size": [220, 76]
+    },
+    {
+      "id": "last-known-good-state",
+      "type": "database",
+      "label": "Last-good state",
+      "sublabel": "Accepted context and artifacts",
+      "tag": "local only",
+      "pos": [330, 530],
+      "size": [220, 76]
+    },
+    {
+      "id": "calm-query-adapter",
+      "type": "external",
+      "label": "CALM adapter",
+      "sublabel": "Optional code facts; not connected",
+      "tag": "optional",
+      "pos": [40, 530],
+      "size": [210, 76]
+    }
+  ],
+  "relations": [
+    {"id": "skills-guide-cli", "label": "guides", "variant": "default"},
+    {"id": "cli-requests-refresh", "label": "", "variant": "emphasis"},
+    {"id": "candidate-blocks-refresh", "label": "review", "variant": "security"},
+    {"id": "refresh-promotes-last-good", "label": "", "variant": "emphasis"},
+    {"id": "refresh-validates-projection", "label": "render", "variant": "emphasis"},
+    {"id": "projection-delivers-blueprint", "label": "delivers", "variant": "default"}
+  ]
+}
