@@ -42,6 +42,26 @@ existing `AGENTS.md`. A fresh Codex session learns Archctx exists, but calls it
 only when a system-level question can shrink the next source read. It never
 invents a canonical system from filenames.
 
+## Shared GitHub mode
+
+GitHub is the default channel for reproducible code facts: reviewed source,
+small completed commits, durable design docs, and a project-safe architecture
+config/view. `init` intentionally keeps its default `.archctx/` configuration
+private. When a team needs shared architecture context, keep the reviewed
+config and optional Archify view in a tracked repo-relative path (for example
+`architecture.json` and `architecture.view.json`) and use
+`archctx --config architecture.json ...`. The rebuildable state remains in
+the adjacent `.archctx/` directory and stays local: last-good, snapshots,
+watcher state, usage, and candidate decisions are not GitHub facts.
+
+Before a normal sync, fetch and compare the intended remote branch, inspect the
+staged content for secrets and runtime data, then make a clear commit and only
+fast-forward push. This is a convergence rhythm, not a development Gate:
+dirty or unpushed work can continue. Runtime databases, credentials, user and
+session data, live process state, generated artifacts, and raw local evidence
+remain in their owning environment. A committed revision does not imply a
+deployed revision is running.
+
 ## On-demand Codex skills
 
 The bundled `plugins/live-architecture-context/.codex-plugin/plugin.json`
