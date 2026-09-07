@@ -221,7 +221,7 @@ class RefreshTransactionTest(unittest.TestCase):
                 original_atomic = archctx.atomic
 
                 def fail_only_lkg(path, value):
-                    if path == archctx.last_path(state):
+                    if path.resolve() == archctx.last_path(state).resolve():
                         raise OSError("simulated local state failure")
                     return original_atomic(path, value)
 
