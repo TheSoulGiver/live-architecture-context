@@ -99,6 +99,27 @@ Each skill reuses the existing CLI/MCP and starts with one test: will this
 remove the next broad source read? If not, it stays out of the way. The managed
 `AGENTS.md` block is the same compact fallback for hosts without plugin skills.
 
+### Optional reuse decision with Ponytail
+
+At [Ponytail's existing-implementation step](https://github.com/DietrichGebert/ponytail/blob/356918eba965ee1eac64bd3a7f0dd02108350de5/skills/ponytail/SKILL.md),
+the existing `architecture-context` skill can supply a small owner/reuse/impact
+lookup when that answer is uncertain. Reuse valid context already in the task,
+verify the relevant source and wiring, then choose the smallest correct change.
+Known local work adds no query. Correctness, readability and required invariants
+outrank shortest diff, fewest files or fixed test counts; understanding a path
+doesn't mean reading every file in full.
+
+This is optional guidance, not a dependency, fork, hook, or reciprocal skill
+invocation. Both tools work independently. The referenced upstream manifest
+declares lifecycle hooks; that does not prove any consumer has loaded or run
+them. Check the actual local source rather than identifying a same-named plugin
+from a remote version alone. LAC adds no hook or repeated instruction injection.
+
+One-time readiness and per-task usage are different decisions. Restore a chosen
+project-local tool/config at an authorized normal boundary using the existing
+[onboarding path](docs/WORKTREE_ONBOARDING.md); a known-path task can still skip
+LAC. Don't turn that skip into a forced trial or automatically defer readiness.
+
 For a local checkout, Codex can install the repo-local marketplace once, then
 load the skills in a new session:
 
@@ -254,7 +275,13 @@ link the task/change, `used`/`skipped`/`unavailable` decision, core identity and
 context hash, and an existing usage receipt (time + operation). Separate the
 Agent's claimed decision effect from a checkable result and measured overhead;
 missing time/token observations are unknown, not zero. Ordinary skips need no
-report. Exchange new findings at task boundaries using the host's existing
+report. For a relevant completed task, an optional single line is enough:
+`LAC: used/skipped/unavailable; decision effect; evidence reference; overhead measured/unknown`.
+Only name Ponytail when it was involved. Reference the existing task change and
+bounded receipt; don't generate another query merely to fill this line.
+Distinguish Agent-reported influence from a checked change and net benefit;
+an installed skill, running watcher or maintainer probe proves none of those.
+Exchange new findings at task boundaries using the host's existing
 delivery mechanism, when available. A saved message is not proof it was read;
 a published fix is not proof the consumer adopted it. Do not poll by repeatedly
 starting models, or copy private diagnostics/evidence into a public issue.
