@@ -1,5 +1,6 @@
 import hashlib
 import json
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -317,7 +318,7 @@ class ArchitectureContextTest(unittest.TestCase):
 
     def test_search_and_codex_install_are_compact_and_idempotent(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory); (root / "source.py").write_text("OWNER\n")
+            root = Path(directory) / "repo"; root.mkdir(); (root / "source.py").write_text("OWNER\n")
             config, state = root / "context.json", root / "state"
             config.write_text(json.dumps({"version": 1, "repo": ".", "components": [{"id": "owner", "name": "Owner service", "tags": ["identity"], "evidence": [{"path": "source.py", "contains": "OWNER"}]}]}))
             run(config, state, "refresh")
@@ -461,6 +462,100 @@ class ArchitectureContextTest(unittest.TestCase):
             self.assertEqual(json.loads(process.stdout)["status"], "PASS")
             missing = subprocess.run([PYTHON, str(TOOL), "status"], cwd=root.parent, text=True, capture_output=True)
             self.assertEqual(missing.returncode, 2); self.assertIn(".archctx/architecture.json", missing.stdout)
+
+    def test_shared_init_preserves_reviewed_config_and_isolates_selected_state(self):
+        with tempfile.TemporaryDirectory(dir=ROOT.parent) as directory:
+            root = Path(directory); source = root / "source.py"; source.write_text("def serve(): return 'first'\n")
+            config = root / "architecture" / "shared context.json"; config.parent.mkdir()
+            config.write_text(json.dumps({"version": 1, "repo": "..", "components": [{"id": "service", "evidence": [{"path": source.name, "contains": "def serve"}]}], "gates": [{"name": "validator", "command": [PYTHON, "-c", "from pathlib import Path; Path('validator-ran').write_text('ran')"]}]}, indent=3) + "\n")
+            reviewed = config.read_bytes(); agents = root / "AGENTS.md"; agents.write_text("# local rules\n")
+            (root / ".gitignore").write_text(".venv/\n")
+            command = ".venv/Scripts/python.exe -m archctx"
+            arguments = ["--config", str(config), "init", "--repo", str(root), "--command", command]
+
+            before = {str(path.relative_to(root)): (path.stat().st_mtime_ns, path.read_bytes() if path.is_file() else None) for path in (root, *root.rglob("*"))}
+            self.assertEqual(run_raw(*arguments, "--check")["status"], "CHECK")
+            self.assertEqual({str(path.relative_to(root)): (path.stat().st_mtime_ns, path.read_bytes() if path.is_file() else None) for path in (root, *root.rglob("*"))}, before)
+            self.assertFalse((root / "validator-ran").exists())
+
+            first = run_raw(*arguments)
+            self.assertEqual((first["status"], first["action"]), ("PASS", "updated"))
+            self.assertEqual(config.read_bytes(), reviewed)
+            self.assertFalse((root / ".archctx" / "architecture.json").exists())
+            self.assertTrue((root / "validator-ran").exists())
+            self.assertFalse((root / ".venv").exists())  # The instruction prefix is never executed.
+            self.assertEqual((root / ".gitignore").read_text().count(".archctx/"), 1)
+            self.assertIn(f"{command} --config 'architecture/shared context.json' status", agents.read_text())
+            self.assertIn("# local rules\n", agents.read_text())
+            default_last = config.parent / ".archctx" / "last-good.json"; first_good = default_last.read_bytes()
+            self.assertEqual(run_raw("--config", str(config), "install-codex", "--command", command)["action"], "unchanged")
+
+            selected = root / "local state" / "run one's"
+            command = "& " + " ".join("'" + value.replace("'", "''") + "'" for value in (PYTHON, str(TOOL))) if sys.platform == "win32" else shlex.join((PYTHON, str(TOOL)))
+            source.write_text("def serve(): return 'second'\n")
+            selected_arguments = ["--config", str(config), "--state-dir", str(selected), "init", "--repo", str(root), "--command", command]
+            self.assertEqual(run_raw(*selected_arguments)["status"], "PASS")
+            ignored = "/local\\ state/run\\ one's/"
+            self.assertEqual((root / ".gitignore").read_text().splitlines().count(ignored), 1)
+            repeated = run_raw(*selected_arguments)
+            self.assertFalse(repeated["gitignore_updated"]); self.assertEqual(repeated["codex"]["action"], "unchanged")
+            self.assertEqual((root / ".gitignore").read_text().splitlines().count(ignored), 1)
+            selected_last = selected / "last-good.json"; second_good = selected_last.read_bytes()
+            self.assertNotEqual(json.loads(first_good)["context_hash"], json.loads(second_good)["context_hash"])
+            self.assertEqual(default_last.read_bytes(), first_good)
+            self.assertFalse((root / ".archctx" / "architecture.json").exists())
+            self.assertEqual(run_raw("--config", str(config), "--state-dir", str(selected), "install-codex", "--command", command)["action"], "unchanged")
+            managed = agents.read_text().split("From the repository root, run `", 1)[1].split("`", 1)[0]
+            shell = ["powershell", "-NoProfile", "-NonInteractive", "-Command"] if sys.platform == "win32" else ["/bin/sh", "-c"]
+            actual = subprocess.run([*shell, managed + " --diagnose"], cwd=root, text=True, capture_output=True, check=True)
+            self.assertEqual(json.loads(actual.stdout)["status"], "FRESH")
+            diagnostics = json.loads(actual.stdout)["diagnostics"]
+            self.assertEqual(diagnostics["config"], {"path": str(config.resolve()), "exists": True})
+            self.assertEqual(diagnostics["state"], {"path": str(selected.resolve()), "selection": "explicit"})
+            self.assertEqual(Path(diagnostics["tool"]["python"]).resolve(), Path(PYTHON).resolve())
+            self.assertEqual(Path(diagnostics["tool"]["module"]), TOOL.resolve())
+            self.assertEqual(diagnostics["tool"]["core_source_sha256"], hashlib.sha256(TOOL.read_bytes()).hexdigest())
+
+            source.write_text("def renamed(): pass\n")
+            invalid = run_raw(*selected_arguments)
+            self.assertEqual(invalid["status"], "INVALID")
+            self.assertTrue(invalid["refresh"]["last_good_preserved"])
+            self.assertEqual(selected_last.read_bytes(), second_good)
+            self.assertEqual(default_last.read_bytes(), first_good)
+            self.assertEqual(config.read_bytes(), reviewed)
+
+            private = root / ".archctx" / "architecture.json"; private.parent.mkdir(); private.write_bytes(reviewed)
+            (config.parent / "architecture.json").write_bytes(reviewed)
+            before = {str(path.relative_to(root)): (path.stat().st_mtime_ns, path.read_bytes() if path.is_file() else None) for path in (root, *root.rglob("*"))}
+            for invocation in (("status",), ("init", "--repo", str(root), "--check")):
+                result = subprocess.run([PYTHON, str(TOOL), *invocation], cwd=root, text=True, capture_output=True)
+                self.assertEqual(result.returncode, 2); self.assertIn("--config", result.stdout)
+            self.assertEqual(run_raw(*selected_arguments, "--check")["status"], "CHECK")
+            self.assertEqual({str(path.relative_to(root)): (path.stat().st_mtime_ns, path.read_bytes() if path.is_file() else None) for path in (root, *root.rglob("*"))}, before)
+
+            source.write_text("def serve(): pass\n")
+            nested_agents = root / "instructions" / "AGENTS.md"; nested_agents.parent.mkdir(); nested_agents.write_text("# retained rules\n")
+            tracked_state = root / "tracked state"; tracked_state.mkdir(); (tracked_state / "retained.txt").write_text("tracked content\n")
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(["git", "-C", str(root), "add", "--", "tracked state/retained.txt"], check=True)
+            ignored_paths = subprocess.run(["git", "-C", str(root), "check-ignore", "--stdin", "-z"], input="local state/run one's/last-good.json\0local state/run two/last-good.json\0", text=True, capture_output=True, check=True)
+            self.assertEqual(ignored_paths.stdout, "local state/run one's/last-good.json\0")
+            before = {str(path.relative_to(root)): (path.stat().st_mtime_ns, path.read_bytes() if path.is_file() else None) for path in (root, *root.rglob("*"))}
+            for unsafe_state, target in ((config.parent, agents), (nested_agents.parent, nested_agents), (tracked_state, agents)):
+                for operation in ("init", "install-codex"):
+                    with self.subTest(state=unsafe_state.name, operation=operation):
+                        invocation = [PYTHON, str(TOOL), "--config", str(config), "--state-dir", str(unsafe_state), operation, "--target", str(target)]
+                        if operation == "init": invocation.extend(("--repo", str(root)))
+                        rejected = subprocess.run(invocation, cwd=root, text=True, capture_output=True)
+                        self.assertEqual(rejected.returncode, 2); self.assertIn("state", json.loads(rejected.stdout)["error"])
+                        self.assertEqual({str(path.relative_to(root)): (path.stat().st_mtime_ns, path.read_bytes() if path.is_file() else None) for path in (root, *root.rglob("*"))}, before)
+
+            new_config = root / "reviewed" / "nested" / "architecture.json"
+            created = run_raw("--config", str(new_config), "init", "--repo", str(root), "--component", "service", "--evidence", "source.py::def serve", "--command", command)
+            self.assertEqual((created["status"], created["action"]), ("PASS", "created"))
+            self.assertEqual(json.loads(new_config.read_text())["repo"], "../..")
+            self.assertTrue((new_config.parent / ".archctx" / "last-good.json").exists())
+            self.assertEqual(config.read_bytes(), reviewed); self.assertEqual(private.read_bytes(), reviewed)
 
     def test_telemetry_is_local_compact_and_never_keeps_raw_task_text(self):
         with tempfile.TemporaryDirectory() as directory:

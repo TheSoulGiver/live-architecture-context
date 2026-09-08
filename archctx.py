@@ -2,7 +2,7 @@
 """Source-grounded live architecture context; CALM/Archify remain external owners."""
 from __future__ import annotations
 
-import argparse, fnmatch, hashlib, json, os, shutil, subprocess, sys, time, uuid
+import argparse, fnmatch, hashlib, json, os, shlex, shutil, subprocess, sys, time, uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1025,22 +1025,46 @@ def search(config_path: Path, explicit: str | None, query: str, limit: int = 3) 
 
 CODEX_BEGIN, CODEX_END = "<!-- archctx:begin -->", "<!-- archctx:end -->"
 
-def codex_block(relative_config: str) -> str:
+def instruction_path(value: str) -> str:
+    if any(x in value for x in ("\n", "\r", "`")):
+        raise ValueError("managed paths cannot contain newlines or Markdown backticks")
+    if value and all(x.isalnum() or x in "/._-" for x in value): return value
+    return "'" + value.replace("'", "''") + "'" if os.name == "nt" else shlex.quote(value)
+
+def codex_state(config_path: Path, repo: Path, target: Path, explicit: str | None) -> str | None:
+    if not explicit: return None
+    directory = state(config_path, explicit)
+    try: relative = directory.relative_to(repo).as_posix()
+    except ValueError as error: raise ValueError("managed Codex state must live inside its repository") from error
+    private_config = config_path.parent == directory and directory.name == ".archctx"
+    if relative == "." or directory == target or directory in target.parents or (not private_config and (directory == config_path or directory in config_path.parents)):
+        raise ValueError("managed state must be a dedicated directory, not the repo root or a parent of config/AGENTS")
+    if ".archctx" not in Path(relative).parts and git(repo, "ls-files", "--", ":(literal)" + relative):
+        raise ValueError("managed state must not contain tracked source files")
+    instruction_path(relative)
+    return relative
+
+def codex_block(relative_config: str, command: str = "archctx", relative_state: str | None = None) -> str:
+    if not command.strip() or any(x in command for x in ("\n", "\r", "`")):
+        raise ValueError("--command must be a non-empty, single-line CLI prefix without Markdown backticks")
+    prefix = f"{command} --config {instruction_path(relative_config)}"
+    if relative_state: prefix += f" --state-dir {instruction_path(relative_state)}"
     return f'''{CODEX_BEGIN}
 ## Architecture context
 
 Use Archctx only when it shrinks the next broad source read (canonical/truth/evidence, cross-component path, freshness/delta, or legacy ambiguity); skip obvious local work.
-Run `archctx --config {relative_config} status`. Use its `FRESH`/`STALE` label, not unrelated Git dirtiness. If `FRESH`, use the smallest matching query: `search` to locate; `canonical`/`evidence` for a known component; `impact --files <paths>` before cross-component edits; `history` for prior context; `changed-since`/`drift` only with a supplied base revision.
+From the repository root, run `{prefix} status`. Keep this exact CLI prefix for queries; do not substitute a global installation. Use `status --diagnose` if tool/config identity is unclear. Use its `FRESH`/`STALE` label, not unrelated Git dirtiness. If `FRESH`, use the smallest matching query: `search` to locate; `canonical`/`evidence` for a known component; `impact --files <paths>` before cross-component edits; `history` for prior context; `changed-since`/`drift` only with a supplied base revision.
 Read only returned evidence and the next directly needed source file. Source wins; stale, missing, or irrelevant context means normal targeted discovery. Default `watch` only observes; opt-in `watch --apply` may refresh already-declared evidence after validation, never candidates. Orientation, never a gate.
 {CODEX_END}
 '''
 
-def install_codex(config_path: Path, target: Path, check: bool) -> dict[str, Any]:
+def install_codex(config_path: Path, target: Path, check: bool, command: str = "archctx", explicit: str | None = None) -> dict[str, Any]:
     config, repo = load(config_path), repo_for(config_path, load(config_path))
     components(config)
     try: relative = config_path.relative_to(repo).as_posix()
     except ValueError as error: raise ValueError("Codex config must live inside its repository (normally .archctx/architecture.json)") from error
-    block = codex_block(relative)
+    relative_state = codex_state(config_path, repo, target, explicit)
+    block = codex_block(relative, command, relative_state)
     before = target.read_text(encoding="utf-8") if target.exists() else ""
     start, end = before.find(CODEX_BEGIN), before.find(CODEX_END)
     if (start < 0) != (end < 0): raise ValueError(f"unbalanced archctx markers in {target}")
@@ -1068,11 +1092,12 @@ def uninstall_codex(target: Path, check: bool) -> dict[str, Any]:
     if not check: target.write_text(after, encoding="utf-8")
     return {"protocol_version": PROTOCOL_VERSION, "status": "PASS", "action": "removed", "target": str(target), "config_preserved": True, "check": check}
 
-def ensure_ignored(repo: Path, check: bool) -> bool:
+def ensure_ignored(repo: Path, check: bool, extra: str | None = None) -> bool:
     path = repo / ".gitignore"; before = path.read_text(encoding="utf-8") if path.exists() else ""
-    entries = {line.strip().replace("\\", "/") for line in before.splitlines() if line.strip() and not line.lstrip().startswith("#")}
-    if ".archctx/" in entries: return False
-    if not check: path.write_text(before + ("" if not before or before.endswith("\n") else "\n") + ".archctx/\n", encoding="utf-8")
+    entries = {line.strip() for line in before.splitlines() if line.strip() and not line.lstrip().startswith("#")}
+    missing = [item for item in (".archctx/", *([extra] if extra else [])) if item not in entries]
+    if not missing: return False
+    if not check: path.write_text(before + ("" if not before or before.endswith("\n") else "\n") + "\n".join(missing) + "\n", encoding="utf-8")
     return True
 
 def parsed_evidence(values: list[str]) -> list[dict[str, str]]:
@@ -1084,22 +1109,36 @@ def parsed_evidence(values: list[str]) -> list[dict[str, str]]:
     if not result: raise ValueError("new onboarding needs --evidence PATH::EXACT_SOURCE_TEXT; source evidence is required")
     return result
 
-def init(repo: Path, target: Path, component: str | None, truth_sources: list[str], evidence_values: list[str], check: bool) -> dict[str, Any]:
+def selected_config(repo: Path, explicit: str | None) -> Path:
+    if explicit: return Path(explicit).resolve()
+    # No scanning or fallback: a shared definition must be selected explicitly.
+    if (repo / "architecture" / "architecture.json").exists():
+        raise ValueError("shared architecture/architecture.json exists; choose --config explicitly (including when a private .archctx/architecture.json also exists)")
+    return repo / ".archctx" / "architecture.json"
+
+def init(repo: Path, target: Path, component: str | None, truth_sources: list[str], evidence_values: list[str], check: bool, config_path: Path | None = None, explicit: str | None = None, command: str = "archctx") -> dict[str, Any]:
     if not repo.is_dir(): raise ValueError(f"repo does not exist: {repo}")
-    config_path = repo / ".archctx" / "architecture.json"; created = False
+    config_path = config_path or selected_config(repo, None); created = False
+    try: config_path.relative_to(repo)
+    except ValueError as error: raise ValueError("onboarding config must live inside --repo") from error
+    extra_ignore = None
+    relative_state = codex_state(config_path, repo, target, explicit)
+    if relative_state and ".archctx" not in Path(relative_state).parts:
+        # Escape gitignore patterns; the selected state is one literal directory.
+        extra_ignore = "/" + "".join("\\" + x if x in "\\*?[]!# " else x for x in relative_state) + "/"
+    codex_block(config_path.relative_to(repo).as_posix(), command)
     if not config_path.exists():
-        if check: raise ValueError("init --check needs an existing .archctx/architecture.json")
+        if check: raise ValueError("init --check needs an existing selected architecture config")
         if not component: raise ValueError("new onboarding needs --component and --evidence; no architecture is inferred")
-        config_path.parent.mkdir(parents=True, exist_ok=True)
         facts = parsed_evidence(evidence_values)
-        config = {"version": CONFIG_VERSION, "repo": "..", "components": [{"id": component, "truth_sources": truth_sources or [x["path"] for x in facts], "evidence": facts}], "relations": []}
+        config = {"version": CONFIG_VERSION, "repo": Path(os.path.relpath(repo, config_path.parent)).as_posix(), "components": [{"id": component, "truth_sources": truth_sources or [x["path"] for x in facts], "evidence": facts}], "relations": []}
         if not check: atomic(config_path, config)
         created = True
     config = load(config_path)
     if repo_for(config_path, config) != repo.resolve(): raise ValueError("onboarding config repo must resolve to --repo")
-    ignored_added = ensure_ignored(repo, check)
-    install = install_codex(config_path, target, check)
-    refreshed = refresh(config_path, None) if not check else {"status": "CHECK"}
+    ignored_added = ensure_ignored(repo, check, extra_ignore)
+    install = install_codex(config_path, target, check, command, explicit)
+    refreshed = refresh(config_path, explicit) if not check else {"status": "CHECK"}
     return {"protocol_version": PROTOCOL_VERSION, "status": refreshed["status"], "action": "created" if created else "updated", "config": str(config_path), "gitignore_updated": ignored_added, "codex": install, "refresh": refreshed, "next_action": "start a new Codex session in this repo"}
 
 def authored(context_value: dict[str, Any], ident: str, direction: str) -> list[str]:
@@ -1534,9 +1573,9 @@ def main() -> int:
     x = sub.add_parser("accept"); x.add_argument("id"); x.add_argument("--bind", action="append", required=True)
     x = sub.add_parser("reject"); x.add_argument("id"); x.add_argument("--reason", required=True)
     x = sub.add_parser("watch"); x.add_argument("--once", action="store_true"); x.add_argument("--apply", action="store_true", help="promote only already-declared context after source, graph, gate, and optional Archify validation pass"); x.add_argument("--poll-ms", type=int, default=500); x.add_argument("--max-events", type=int)
-    x = sub.add_parser("install-codex"); x.add_argument("--target", default="AGENTS.md"); x.add_argument("--check", action="store_true")
+    x = sub.add_parser("install-codex"); x.add_argument("--target", default="AGENTS.md"); x.add_argument("--check", action="store_true"); x.add_argument("--command", dest="cli_command", default="archctx", help="CLI prefix written to AGENTS.md only; not executed")
     x = sub.add_parser("uninstall-codex"); x.add_argument("--target", default="AGENTS.md"); x.add_argument("--check", action="store_true")
-    x = sub.add_parser("init"); x.add_argument("--repo", default="."); x.add_argument("--target", default="AGENTS.md"); x.add_argument("--component"); x.add_argument("--truth-source", action="append", default=[]); x.add_argument("--evidence", action="append", default=[]); x.add_argument("--check", action="store_true")
+    x = sub.add_parser("init"); x.add_argument("--repo", default="."); x.add_argument("--target", default="AGENTS.md"); x.add_argument("--component"); x.add_argument("--truth-source", action="append", default=[]); x.add_argument("--evidence", action="append", default=[]); x.add_argument("--check", action="store_true"); x.add_argument("--command", dest="cli_command", default="archctx", help="CLI prefix written to AGENTS.md only; not executed")
     args = parser.parse_args()
     if args.command == "search" and bool(args.query) == bool(args.query_flag):
         parser.error("search requires exactly one query (positional or --query)")
@@ -1547,8 +1586,8 @@ def main() -> int:
     try:
         if args.command == "init":
             repo = Path(args.repo).resolve(); target = Path(args.target); target = target if target.is_absolute() else repo / target
-            dump(init(repo, target, args.component, args.truth_source, args.evidence, args.check)); return 0
-        config_path = Path(args.config).resolve() if args.config else (Path.cwd() / ".archctx" / "architecture.json").resolve()
+            dump(init(repo, target, args.component, args.truth_source, args.evidence, args.check, selected_config(repo, args.config), args.state_dir, args.cli_command)); return 0
+        config_path = selected_config(Path.cwd(), args.config)
         if args.command == "status" and args.diagnose:
             dump(diagnose_status(config_path, args.state_dir)); return 0
         if not config_path.is_file(): raise ValueError("--config is required except for init (or run from a repository with .archctx/architecture.json)")
@@ -1564,7 +1603,9 @@ def main() -> int:
             return watch(config_path, args.state_dir, args.poll_ms, args.max_events, args.apply)
         target = Path(args.target) if args.command in ("install-codex", "uninstall-codex") else None
         install_target = target if target and target.is_absolute() else (repo_for(config_path, load(config_path)) / target) if target else None
-        actions = {"status": lambda: status(config_path, args.state_dir), "refresh": lambda: refresh(config_path, args.state_dir, reset_candidate_baseline=args.reset_candidate_baseline), "snapshot": lambda: snapshot(config_path, args.state_dir), "candidates": lambda: candidates(config_path, args.state_dir, args.limit), "accept": lambda: accept_candidate(config_path, args.state_dir, args.id, args.bind), "reject": lambda: reject_candidate(config_path, args.state_dir, args.id, args.reason), "canonical": lambda: canonical(config_path, args.state_dir, args.component or args.id), "search": lambda: search(config_path, args.state_dir, args.query_flag or args.query, args.limit), "evidence": lambda: mcp_value(config_path, args.state_dir, "architecture_evidence", {"id": args.component or args.id}), "trace": lambda: trace(config_path, args.state_dir, args.source or args.id, args.direction, args.code, args.target), "impact": lambda: impact(config_path, args.state_dir, args.base, args.files), "changed-since": lambda: changed_since(config_path, args.state_dir, args.revision), "delta": lambda: delta(config_path, args.state_dir, args.revision), "drift": lambda: drift(config_path, args.base), "install-codex": lambda: install_codex(config_path, install_target.resolve(), args.check), "uninstall-codex": lambda: uninstall_codex(install_target.resolve(), args.check)}
+        if args.command == "install-codex":
+            dump(install_codex(config_path, install_target.resolve(), args.check, args.cli_command, args.state_dir)); return 0
+        actions = {"status": lambda: status(config_path, args.state_dir), "refresh": lambda: refresh(config_path, args.state_dir, reset_candidate_baseline=args.reset_candidate_baseline), "snapshot": lambda: snapshot(config_path, args.state_dir), "candidates": lambda: candidates(config_path, args.state_dir, args.limit), "accept": lambda: accept_candidate(config_path, args.state_dir, args.id, args.bind), "reject": lambda: reject_candidate(config_path, args.state_dir, args.id, args.reason), "canonical": lambda: canonical(config_path, args.state_dir, args.component or args.id), "search": lambda: search(config_path, args.state_dir, args.query_flag or args.query, args.limit), "evidence": lambda: mcp_value(config_path, args.state_dir, "architecture_evidence", {"id": args.component or args.id}), "trace": lambda: trace(config_path, args.state_dir, args.source or args.id, args.direction, args.code, args.target), "impact": lambda: impact(config_path, args.state_dir, args.base, args.files), "changed-since": lambda: changed_since(config_path, args.state_dir, args.revision), "delta": lambda: delta(config_path, args.state_dir, args.revision), "drift": lambda: drift(config_path, args.base), "uninstall-codex": lambda: uninstall_codex(install_target.resolve(), args.check)}
         started = time.monotonic(); value = actions[args.command]()
         elapsed = int((time.monotonic() - started) * 1000)
         if args.command not in ("status", "install-codex", "uninstall-codex"): telemetry(state(config_path, args.state_dir), args.command, value, elapsed)
