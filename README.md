@@ -222,6 +222,28 @@ unbounded result is genuinely needed.
 `canonical` and `evidence` also accept `--component`; `trace --from <id> --to <id>` reports
 authored reachability and whether that relation is direct.
 
+When a stale/missing baseline or multiple installs make the selected context
+ambiguous, use `archctx status --diagnose` (with your usual `--config` and optional
+`--state-dir`). The same read-only response adds resolved config/state/last-good
+paths, the state selection rule, core version, module/interpreter paths and the
+core source SHA-256 captured at import. It works without a config and writes
+nothing, including usage. Default `status` stays compact. MCP status/stale accept
+`{"diagnose":true}`. Diagnostics contain private local paths; keep them local.
+The core hash identifies that source file, not a Git revision, the other modules
+or an optional graph/render provider. A package version alone is not proof that
+two entrypoints run the same code. Retain the diagnostic with an existing task
+summary when investigating adoption; do not start logging every status poll.
+
+For a meaningful consumer problem or result, reuse the existing task summary:
+link the task/change, `used`/`skipped`/`unavailable` decision, core identity and
+context hash, and an existing usage receipt (time + operation). Separate the
+Agent's claimed decision effect from a checkable result and measured overhead;
+missing time/token observations are unknown, not zero. Ordinary skips need no
+report. Exchange new findings at task boundaries using the host's existing
+delivery mechanism, when available. A saved message is not proof it was read;
+a published fix is not proof the consumer adopted it. Do not poll by repeatedly
+starting models, or copy private diagnostics/evidence into a public issue.
+
 In a repository initialized with the standard `.archctx/architecture.json`, the
 CLI accepts `archctx status` (and the other non-`init` commands) without
 `--config`; it never searches elsewhere for a config. Explicit `--config`

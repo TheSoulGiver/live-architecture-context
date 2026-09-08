@@ -9,6 +9,12 @@ from pathlib import Path
 from typing import Any
 
 CONFIG_VERSION, PROTOCOL_VERSION, SERVER_VERSION = 1, "1.0", "0.1.7"
+# Capture core source identity at import, not after a running MCP's file is replaced.
+CORE_SOURCE_PATH = Path(__file__).resolve()
+try:
+    CORE_SOURCE_SHA256 = hashlib.sha256(CORE_SOURCE_PATH.read_bytes()).hexdigest()
+except OSError:
+    CORE_SOURCE_SHA256 = None
 SNAPSHOT_LIMIT, GENERATION_LIMIT, USAGE_LIMIT, USAGE_BYTES = 32, 4, 128, 64 * 1024
 CANDIDATE_ENTRY_LIMIT, CANDIDATE_BYTES, CANDIDATE_OUTPUT_LIMIT = 64, 32 * 1024, 8
 CANDIDATE_FILE_LIMIT, CANDIDATE_SOURCE_BYTES = 256, 4 * 1024 * 1024
@@ -901,6 +907,22 @@ def status(config_path: Path, explicit: str | None, record: dict[str, Any] | Non
     elif candidate_state in ("baseline_missing", "rules_changed"): result["next_action"] = "review current source, then run refresh with reset_candidate_baseline"
     return result
 
+def diagnose_status(config_path: Path, explicit: str | None) -> dict[str, Any]:
+    """Explain this invocation's selected inputs; never discover, migrate or refresh."""
+    config_path = config_path.resolve()
+    directory = state(config_path, explicit).resolve()
+    selection = "explicit" if explicit else "legacy_nested" if config_path.parent.name == ".archctx" and directory == (config_path.parent / ".archctx").resolve() else "config_adjacent"
+    try:
+        value = status(config_path, str(directory))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+        value = {"protocol_version": PROTOCOL_VERSION, "status": "INVALID", "freshness": "stale", "failures": [f"cannot read selected architecture state: {type(error).__name__}: {error}"], "next_action": "inspect the selected config and state; diagnosis does not require refresh"}
+    return value | {"diagnostics": {
+        "tool": {"version": SERVER_VERSION, "core_source_sha256": CORE_SOURCE_SHA256, "module": str(CORE_SOURCE_PATH), "python": sys.executable},
+        "config": {"path": str(config_path), "exists": config_path.is_file()},
+        "state": {"path": str(directory), "selection": selection},
+        "last_good": {"path": str(last_path(directory)), "exists": last_path(directory).is_file()},
+    }}
+
 def _refresh_locked(config_path: Path, explicit: str | None, directory: Path, changed: list[str] | None = None, acknowledged: dict[str, dict[str, Any]] | None = None, expected_context_hash: str | None = None, reset_candidate_baseline: bool = False) -> dict[str, Any]:
     try:
         config, repo, facts, relation_facts, candidate, inputs = refresh_inputs(config_path)
@@ -1419,6 +1441,7 @@ def watch(config_path: Path, explicit: str | None, poll_ms: int, max_events: int
 
 def mcp_tools() -> list[dict[str, Any]]:
     empty = {"type": "object", "properties": {}}
+    status_input = {"type": "object", "properties": {"diagnose": {"type": "boolean", "default": False}}}
     refresh_input = {"type": "object", "properties": {"reset_candidate_baseline": {"type": "boolean", "default": False}}}
     candidates_input = {"type": "object", "properties": {"limit": {"type": "integer", "minimum": 0, "default": CANDIDATE_OUTPUT_LIMIT}}}
     ident = {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}
@@ -1428,7 +1451,7 @@ def mcp_tools() -> list[dict[str, Any]]:
     accept_input = {"type": "object", "properties": {"id": {"type": "string"}, "bindings": {"type": "array", "minItems": 1, "items": {"type": "string"}}}, "required": ["id", "bindings"]}
     reject_input = {"type": "object", "properties": {"id": {"type": "string"}, "reason": {"enum": ["not_architecture", "existing_canonical", "test_fixture", "false_match"]}}, "required": ["id", "reason"]}
     return [
-        {"name": "architecture_status", "description": "Freshness and last-known-good metadata without context payload.", "inputSchema": empty},
+        {"name": "architecture_status", "description": "Freshness and last-known-good metadata; optional diagnose reports local input paths and core tool identity, without writes.", "inputSchema": status_input},
         {"name": "architecture_refresh", "description": "Validate and atomically promote context only when no candidate is pending; reset_candidate_baseline is an explicit audited migration.", "inputSchema": refresh_input},
         {"name": "architecture_snapshot", "description": "Compact last-known-good context.", "inputSchema": empty},
         {"name": "architecture_history", "description": "Bounded source-evidence snapshot history; pass context_hash only for one historical context.", "inputSchema": history_input},
@@ -1443,10 +1466,13 @@ def mcp_tools() -> list[dict[str, Any]]:
         {"name": "architecture_impact", "description": "Changed files to canonical ownership.", "inputSchema": {"type": "object", "properties": {"base": {"type": "string"}, "files": {"type": "array", "items": {"type": "string"}}}}},
         {"name": "architecture_changed_since", "description": "Retained architecture delta by revision.", "inputSchema": {"type": "object", "properties": {"revision": {"type": "string"}}, "required": ["revision"]}},
         {"name": "architecture_drift", "description": "Configured high-value historical Git-diff candidates only.", "inputSchema": {"type": "object", "properties": {"base": {"type": "string"}}, "required": ["base"]}},
-        {"name": "architecture_stale", "description": "Alias for freshness status.", "inputSchema": empty},
+        {"name": "architecture_stale", "description": "Alias for freshness status, including optional read-only diagnose.", "inputSchema": status_input},
     ]
 def mcp_value(config_path: Path, explicit: str | None, name: str, args: dict[str, Any]) -> dict[str, Any]:
-    if name in ("architecture_status", "architecture_stale"): return status(config_path, explicit)
+    if name in ("architecture_status", "architecture_stale"):
+        diagnose = args.get("diagnose", False)
+        if not isinstance(diagnose, bool): raise ValueError("diagnose must be boolean")
+        return diagnose_status(config_path, explicit) if diagnose else status(config_path, explicit)
     if name == "architecture_refresh":
         reset = args.get("reset_candidate_baseline", False)
         if not isinstance(reset, bool): raise ValueError("reset_candidate_baseline must be boolean")
@@ -1495,7 +1521,8 @@ def serve_mcp(config_path: Path, explicit: str | None) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(); parser.add_argument("--config", help="defaults to .archctx/architecture.json in the current repository"); parser.add_argument("--state-dir"); sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("status", "snapshot", "mcp", "telemetry"): sub.add_parser(name)
+    for name in ("snapshot", "mcp", "telemetry"): sub.add_parser(name)
+    x = sub.add_parser("status"); x.add_argument("--diagnose", action="store_true", help="read-only core identity and selected config/state paths; works even without a config")
     x = sub.add_parser("refresh"); x.add_argument("--reset-candidate-baseline", action="store_true")
     x = sub.add_parser("candidates"); x.add_argument("--limit", type=int, default=CANDIDATE_OUTPUT_LIMIT)
     x = sub.add_parser("history"); x.add_argument("--context-hash"); x.add_argument("--limit", type=int, default=10)
@@ -1522,6 +1549,8 @@ def main() -> int:
             repo = Path(args.repo).resolve(); target = Path(args.target); target = target if target.is_absolute() else repo / target
             dump(init(repo, target, args.component, args.truth_source, args.evidence, args.check)); return 0
         config_path = Path(args.config).resolve() if args.config else (Path.cwd() / ".archctx" / "architecture.json").resolve()
+        if args.command == "status" and args.diagnose:
+            dump(diagnose_status(config_path, args.state_dir)); return 0
         if not config_path.is_file(): raise ValueError("--config is required except for init (or run from a repository with .archctx/architecture.json)")
         if args.command == "mcp": return serve_mcp(config_path, args.state_dir)
         if args.command == "telemetry": dump(telemetry_summary(state(config_path, args.state_dir))); return 0
