@@ -56,6 +56,21 @@ and stays local: last-good, snapshots, watcher state, usage, and candidate
 decisions are not GitHub facts. This repository follows that pattern in its
 tracked [shared architecture config](architecture/architecture.json).
 
+For a fresh worktree, follow [Project-local onboarding](docs/WORKTREE_ONBOARDING.md).
+`--config` now also selects the configuration used by `init`; an existing
+reviewed definition is preserved, not replaced with a private one. `init` is
+an explicit setup operation: it updates the managed instruction block and
+ignore rule, then runs refresh (including trusted configured commands).
+Use `init --check` to preview without writes or command execution. If the
+conventional shared config exists, omission of `--config` is an error, not
+a silent choice between shared and private definitions. Legacy private-only
+repositories retain their default.
+
+`init` and `install-codex` accept `--command "python archctx.py"` (or your
+project-local CLI prefix). This is instruction text only: the installer does
+not execute it or change any installation. Explicit `--state-dir` is retained
+in the managed guidance and must be inside the repository for onboarding.
+
 Before a normal sync, fetch and compare the intended remote branch, inspect the
 staged content for secrets and runtime data, then make a clear commit and only
 fast-forward push. This is a convergence rhythm, not a development Gate:
@@ -246,7 +261,8 @@ starting models, or copy private diagnostics/evidence into a public issue.
 
 In a repository initialized with the standard `.archctx/architecture.json`, the
 CLI accepts `archctx status` (and the other non-`init` commands) without
-`--config`; it never searches elsewhere for a config. Explicit `--config`
+`--config` when no conventional shared config is present; it never searches
+elsewhere for a config. Explicit `--config`
 remains the portable form for a nonstandard location.
 
 MCP tools: `status`, `refresh`, `snapshot`, `history`, `usage`, `candidates`,

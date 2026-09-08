@@ -1,3 +1,11 @@
+<!-- archctx:begin -->
+## Architecture context
+
+Use Archctx only when it shrinks the next broad source read (canonical/truth/evidence, cross-component path, freshness/delta, or legacy ambiguity); skip obvious local work.
+From the repository root, run `python archctx.py --config architecture/architecture.json status`. Keep this exact CLI prefix for queries; do not substitute a global installation. Use `status --diagnose` if tool/config identity is unclear. Use its `FRESH`/`STALE` label, not unrelated Git dirtiness. If `FRESH`, use the smallest matching query: `search` to locate; `canonical`/`evidence` for a known component; `impact --files <paths>` before cross-component edits; `history` for prior context; `changed-since`/`drift` only with a supplied base revision.
+Read only returned evidence and the next directly needed source file. Source wins; stale, missing, or irrelevant context means normal targeted discovery. Default `watch` only observes; opt-in `watch --apply` may refresh already-declared evidence after validation, never candidates. Orientation, never a gate.
+<!-- archctx:end -->
+
 # Live Architecture Context agent guide
 
 ## GitHub-first code facts
@@ -28,15 +36,10 @@ holds rebuildable last-good, snapshots, watcher state, usage, and candidate
 decisions locally and stays ignored. Review a shared architecture config as
 code: its evidence and configured commands may be sensitive or executable.
 
-For architecture orientation, after establishing the remote revision, run
-`python archctx.py --config architecture/architecture.json status` before
-reading raw architecture JSON or whole implementation files. If local context
-is missing and the task requests restoration, use the setup/refresh commands
-below, then start with `search <task terms>`, `canonical <returned-id>`,
-`impact --files <paths>`, or `history --limit 3` on that same CLI prefix.
-Read the returned source anchors and only the next necessary wiring. Raw
-config/view are editing inputs, not the default query response. If context is
-stale or irrelevant, do targeted source discovery; never guess or block work.
+After establishing the remote revision, use the managed architecture entrypoint
+above. For a new worktree, follow `docs/WORKTREE_ONBOARDING.md`: its tracked
+definition travels with source; the local index and optional renderer do not.
+Raw config/view are editing inputs, not the default query response.
 
 The working human map and reproduction commands are in `docs/LIVING_BLUEPRINT.md`.
 For a new checkout, rebuild local context with `refresh` when the task includes
