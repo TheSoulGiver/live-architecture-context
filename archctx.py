@@ -19,9 +19,10 @@ SNAPSHOT_LIMIT, GENERATION_LIMIT, USAGE_LIMIT, USAGE_BYTES = 32, 4, 128, 64 * 10
 CANDIDATE_ENTRY_LIMIT, CANDIDATE_BYTES, CANDIDATE_OUTPUT_LIMIT = 64, 32 * 1024, 8
 CANDIDATE_FILE_LIMIT, CANDIDATE_SOURCE_BYTES = 256, 4 * 1024 * 1024
 WATCH_FILE_LIMIT, WATCH_SOURCE_BYTES = 512, 8 * 1024 * 1024
+UPDATES_BYTES = 16 * 1024
 DECISION_LIMIT, DECISION_BYTES = 64, 64 * 1024
 USAGE_OPERATIONS = {"refresh", "snapshot", "canonical", "search", "evidence", "trace", "impact", "changed-since", "delta", "drift", "candidates", "accept", "reject", "watch"}
-OBSERVATIONAL_OPERATIONS = {"status", "telemetry", "history", "usage"}
+OBSERVATIONAL_OPERATIONS = {"status", "telemetry", "history", "usage", "updates"}
 ACTIONABLE_OUTCOMES = {"promoted", "context_available", "matched", "evidence", "related", "affected", "changed", "candidate", "recovery_required"}
 NO_FINDING_OUTCOMES = {"empty", "unrelated", "unaffected", "unchanged", "none"}
 
@@ -873,7 +874,7 @@ def unavailable_status(directory: Path, record: dict[str, Any] | None, error: Ex
     }
 
 
-def status(config_path: Path, explicit: str | None, record: dict[str, Any] | None = None) -> dict[str, Any]:
+def status(config_path: Path, explicit: str | None, record: dict[str, Any] | None = None, *, _observed: dict[str, Any] | None = None) -> dict[str, Any]:
     directory = state(config_path, explicit); old_path = last_path(directory)
     try:
         config = load(config_path)
@@ -883,16 +884,25 @@ def status(config_path: Path, explicit: str | None, record: dict[str, Any] | Non
                 record = load(old_path)
             except ValueError:
                 record = None
+        if _observed is not None: _observed["record"] = record
         return unavailable_status(directory, record, error)
     try:
         repo = repo_for(config_path, config); facts, relation_facts, failures = validate(repo, config)
     except ValueError as e: repo, facts, relation_facts, failures = None, {}, [], [str(e)]
+    # Reuse this read for incremental delivery; the public status stays metadata-only.
+    if _observed is not None: _observed.update(config=config, repo=repo, facts=facts, relation_facts=relation_facts)
+    if _observed is not None:
+        try:
+            settings = archify_config(config, repo) if repo else None
+            _observed["view_hash"] = sha(settings["view"].read_bytes()) if settings else None
+        except (OSError, ValueError): _observed["view_hash"] = None
     if not old_path.exists(): return {"protocol_version": PROTOCOL_VERSION, "status": "MISSING", "freshness": "missing", "repo": str(repo) if repo else None, "next_action": "run refresh"}
     old = record if record is not None else load(old_path); current = context(config, revision(repo, {"components": facts, "relations": relation_facts}), facts, relation_facts) if repo and not failures else None
     try: visual_failure = archify_stale_reason(config, repo, directory, old) if repo and not failures else None
     except (OSError, ValueError) as error: visual_failure = f"Archify projection check failed: {error}"
     try: observation = candidate_observation(config, repo, old) if repo and not failures else {"state": "not_checked", "candidates": []}
     except (OSError, ValueError) as error: observation = {"state": "incomplete", "candidates": [], "error": str(error)}
+    if _observed is not None: _observed.update(record=old, current=current, candidates=observation, failures=failures)
     fresh = current is not None and architecture_semantic(current) == architecture_semantic(old["context"]) and semantic(config) == old.get("config_hash") and visual_failure is None
     candidate_state = observation.get("state")
     candidates = observation.get("candidates", [])
@@ -1054,7 +1064,9 @@ def codex_block(relative_config: str, command: str = "archctx", relative_state: 
 
 Use Archctx only when it shrinks the next broad source read (canonical/truth/evidence, cross-component path, freshness/delta, or legacy ambiguity); skip obvious local work.
 From the repository root, run `{prefix} status`. Keep this exact CLI prefix for queries; do not substitute a global installation. Use `status --diagnose` if tool/config identity is unclear. Use its `FRESH`/`STALE` label, not unrelated Git dirtiness. If `FRESH`, use the smallest matching query: `search` to locate; `canonical`/`evidence` for a known component; `impact --files <paths>` before cross-component edits; `history` for prior context; `changed-since`/`drift` only with a supplied base revision.
+When this installed version supports it, `updates` can replace that status read at the next relevant task boundary; reuse the returned cursor with `updates --since <cursor>` (MCP: `architecture_updates` with `since`). Keep the cursor in the caller, not a new event log. Do not invoke it on every tool call.
 Read only returned evidence and the next directly needed source file. Source wins; stale, missing, or irrelevant context means normal targeted discovery. Default `watch` only observes; opt-in `watch --apply` may refresh already-declared evidence after validation, never candidates. Orientation, never a gate.
+When completed work changes architecture semantics, maintain the affected shared config/view from source, whether or not this task queried LAC. Existing candidate review and validation still govern promotion.
 {CODEX_END}
 '''
 
@@ -1226,6 +1238,132 @@ def record_diff(old: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
         "changed_relations": sorted(x for x in shared_relations if semantic_relation(ar[x]) != semantic_relation(br[x])),
         "evidence_changed_relations": sorted(x for x in shared_relations if ar[x].get("evidence") != br[x].get("evidence")),
     }
+
+def bounded_updates(value: dict[str, Any]) -> dict[str, Any]:
+    """Updates are notices; explicit queries retain full identifiers and evidence."""
+    truncated = False
+    def compact(item: Any, key: str = "") -> Any:
+        nonlocal truncated
+        if isinstance(item, str) and key != "cursor" and len(item) > 240:
+            truncated = True
+            return item[:240]
+        if isinstance(item, dict): return {k: compact(v, k) for k, v in item.items()}
+        if isinstance(item, list): return [compact(v) for v in item]
+        return item
+    result = compact(value)
+    if truncated: result["truncated_strings"] = True; result["more_available"] = True
+    groups = [(result, "overview", "omitted_overview_components"), (result, "candidates", "omitted_candidate_count"), (result, "affected_components", "omitted_affected_components"), (result, "reason", "omitted_reason_count"), (result, "failures", "omitted_failure_count")]
+    delta = result.get("accepted_delta", {})
+    groups += [(delta, key, f"omitted_{key}") for key, items in delta.items() if isinstance(items, list)]
+    while len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode()) > UPDATES_BYTES:
+        available = [(parent, key, omitted) for parent, key, omitted in groups if parent.get(key)]
+        if not available: break
+        parent, key, omitted = max(available, key=lambda group: len(json.dumps(group[0][group[1]], ensure_ascii=False).encode()))
+        parent[key].pop(); parent[omitted] = parent.get(omitted, 0) + 1
+        result["more_available"] = True
+    return result
+
+
+def updates(config_path: Path, explicit: str | None, since: str | None = None) -> dict[str, Any]:
+    """Read relevant changes since a caller-held cursor; never advance watcher or accepted state."""
+    directory = state(config_path, explicit)
+    selection = semantic({"config": str(config_path.resolve()), "state": str(directory.resolve())})
+    previous = None
+    if since is not None:
+        if not isinstance(since, str) or len(since) > 300: raise ValueError("invalid updates cursor")
+        parts = since.split(":")
+        if len(parts) != 5 or parts[0] != "u1" or any(part != "-" and (len(part) != 64 or any(c not in "0123456789abcdef" for c in part)) for part in parts[1:]):
+            raise ValueError("invalid updates cursor")
+        previous = dict(zip(("selection", "context", "view", "observation"), parts[1:]))
+        if previous["selection"] != selection: raise ValueError("updates cursor belongs to another config/state selection")
+    observed: dict[str, Any] = {}
+    value = status(config_path, explicit, _observed=observed)
+    old = observed.get("record")
+    config, repo = observed.get("config", {}), observed.get("repo")
+    candidate = observed.get("candidates", {"state": "not_checked", "candidates": []})
+    view_hash = None
+    if repo:
+        try:
+            if settings := archify_config(config, repo): view_hash = sha(settings["view"].read_bytes())
+        except (OSError, ValueError): pass  # The status response already reports the unavailable view.
+    def identity(path: Path) -> str | None:
+        try: return semantic(load(path))
+        except (OSError, ValueError): return None
+    # Publication/config/view can change during this read. Never consume a mixed observation.
+    if identity(config_path) != (semantic(config) if "config" in observed else None) or identity(last_path(directory)) != (semantic(old) if old else None) or view_hash != observed.get("view_hash"):
+        return {"protocol_version": PROTOCOL_VERSION, "kind": "architecture_updates", "status": "RETRY", "freshness": "stale", "changed": False, "cursor": since, "reason": ["config, accepted context, or view changed during the observation"], "next_action": "retry the relevant read with the same cursor"}
+    current = observed.get("current")
+    observation_hash = semantic({
+        "config": semantic(config), "context": architecture_semantic(current) if current else None,
+        "facts": observed.get("facts"), "relation_facts": observed.get("relation_facts"),
+        "status": value.get("status"), "reason": value.get("reason", value.get("failures")),
+        "candidate_state": candidate.get("state"), "candidate_ids": sorted(x["id"] for x in candidate.get("candidates", [])),
+        "blueprint": {key: (old or {}).get("archify", {}).get(key) for key in ("view_sha256", "ir_sha256", "html_sha256")},
+    })
+    context_hash = old.get("context_hash") if isinstance(old, dict) else None
+    cursor = ":".join(("u1", selection, context_hash or "-", view_hash or "-", observation_hash))
+    base = {key: value[key] for key in ("protocol_version", "status", "freshness", "confidence", "next_action") if key in value}
+    base.update(kind="architecture_updates", cursor=cursor)
+    if previous and since == cursor: return base | {"changed": False}
+    before = snapshot_record(directory, previous["context"]) if previous and previous["context"] != "-" else None
+    if old and previous and previous["context"] == context_hash: before = old
+    baseline = "initial" if previous is None or previous["context"] == "-" else "retained" if before else "unavailable"
+    accepted: dict[str, Any] = {"baseline": baseline, "from_context_hash": previous["context"] if previous and previous["context"] != "-" else None, "to_context_hash": context_hash}
+    accepted_changed = baseline == "unavailable"
+    difference: dict[str, Any] = {}
+    if before and old:
+        difference = record_diff(before, old)
+        for key, items in difference.items():
+            # Relationship evidence stays in explicit queries, not repeated update notices.
+            compact = [relation_id(item) if isinstance(item, dict) else item for item in items]
+            accepted[key] = compact[:CANDIDATE_OUTPUT_LIMIT]
+            accepted[f"omitted_{key}"] = max(0, len(compact) - CANDIDATE_OUTPUT_LIMIT)
+        accepted["coverage_changed"] = before["context"].get("coverage") != old["context"].get("coverage")
+        accepted_changed = any(difference.values()) or accepted["coverage_changed"]
+    view_changed = previous is not None and previous["view"] != (view_hash or "-")
+    changed = previous is None or previous["observation"] != observation_hash or view_changed or accepted_changed
+    if not changed: return base | {"changed": False}
+    paths_before = {e["path"]: e.get("sha256") for x in (old or {}).get("context", {}).get("components", []) for e in x.get("evidence", [])}
+    paths_before.update({e["path"]: e.get("sha256") for x in (old or {}).get("context", {}).get("relations", []) for e in x.get("evidence", [])})
+    paths_now = {e["path"]: e.get("sha256") for evidence_items in observed.get("facts", {}).values() for e in evidence_items}
+    paths_now.update({e["path"]: e.get("sha256") for evidence_items in observed.get("relation_facts", []) for e in evidence_items})
+    changed_paths = sorted(path for path in paths_before.keys() | paths_now.keys() if paths_before.get(path) != paths_now.get(path)) if repo else []
+    try: affected = set(owners(config, changed_paths)) if repo else set()
+    except ValueError: affected = set()
+    if old: affected.update(owners({"version": CONFIG_VERSION, **old["context"]}, changed_paths))
+    affected.update(difference.get("changed_components", [])); affected.update(difference.get("evidence_changed_components", []))
+    working = record_diff(old, {"context": current}) if old and current else {}
+    affected.update(working.get("changed_components", [])); affected.update(working.get("evidence_changed_components", []))
+    changed_relations = set(difference.get("changed_relations", []) + difference.get("evidence_changed_relations", []))
+    changed_relations.update(working.get("changed_relations", []) + working.get("evidence_changed_relations", []))
+    contexts = ((before or {}).get("context", {}), (old or {}).get("context", {}), current or {})
+    for relation in difference.get("added_relations", []) + difference.get("removed_relations", []) + working.get("added_relations", []) + working.get("removed_relations", []) + [r for ctx in contexts for r in ctx.get("relations", []) if relation_id(r) in changed_relations]:
+        affected.update((relation["from"], relation["to"]))
+    affected_list = sorted(affected)
+    blueprint = (old or {}).get("archify", {})
+    answer = base | {
+        "changed": True, "accepted_delta": accepted,
+        "affected_components": affected_list[:CANDIDATE_OUTPUT_LIMIT], "affected_component_count": len(affected_list), "omitted_affected_components": max(0, len(affected_list) - CANDIDATE_OUTPUT_LIMIT),
+        **candidate_fields(candidate),
+        "view_changed": view_changed, "view_sha256": view_hash,
+        "accepted_blueprint": {key: blueprint[key] for key in ("configured", "view_sha256", "ir_sha256", "html_sha256") if key in blueprint} | {"context_hash": context_hash},
+    }
+    for key in ("reason", "failures"):
+        if value.get(key):
+            items = value[key] if isinstance(value[key], list) else [value[key]]
+            answer[key] = bounded_strings(items)
+            if len(items) > len(answer[key]): answer[f"omitted_{key}_count"] = len(items) - len(answer[key])
+    if previous is None:
+        declared = (old or {}).get("context", {}).get("components", [])
+        answer["overview"] = [{key: str(item[key]) if key == "id" else str(item[key])[:160] for key in ("id", "name", "purpose") if key in item} for item in declared[:CANDIDATE_OUTPUT_LIMIT]]
+        answer["component_count"] = len(declared); answer["omitted_overview_components"] = max(0, len(declared) - CANDIDATE_OUTPUT_LIMIT)
+        answer["revision"] = (old or {}).get("revision")
+        coverage_value = (old or {}).get("context", {}).get("coverage")
+        if isinstance(coverage_value, dict):
+            limitations = coverage_value.get("limitations", [])
+            answer["coverage"] = {"scope": str(coverage_value.get("scope", ""))[:240], "limitations": bounded_strings(limitations), "omitted_limitations": max(0, len(limitations) - CANDIDATE_OUTPUT_LIMIT)}
+    return bounded_updates(answer)
+
 def history(directory: Path, context_hash: str | None, limit: int) -> dict[str, Any]:
     if context_hash is not None:
         record = snapshot_record(directory, context_hash)
@@ -1487,6 +1625,7 @@ def mcp_tools() -> list[dict[str, Any]]:
     search_input = {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 0, "default": 3}}, "required": ["query"]}
     history_input = {"type": "object", "properties": {"context_hash": {"type": "string"}, "limit": {"type": "integer", "minimum": 0, "default": 10}}}
     usage_input = {"type": "object", "properties": {"operation": {"type": "string"}, "limit": {"type": "integer", "minimum": 0, "default": 10}}}
+    updates_input = {"type": "object", "properties": {"since": {"type": "string"}}}
     accept_input = {"type": "object", "properties": {"id": {"type": "string"}, "bindings": {"type": "array", "minItems": 1, "items": {"type": "string"}}}, "required": ["id", "bindings"]}
     reject_input = {"type": "object", "properties": {"id": {"type": "string"}, "reason": {"enum": ["not_architecture", "existing_canonical", "test_fixture", "false_match"]}}, "required": ["id", "reason"]}
     return [
@@ -1495,6 +1634,7 @@ def mcp_tools() -> list[dict[str, Any]]:
         {"name": "architecture_snapshot", "description": "Compact last-known-good context.", "inputSchema": empty},
         {"name": "architecture_history", "description": "Bounded source-evidence snapshot history; pass context_hash only for one historical context.", "inputSchema": history_input},
         {"name": "architecture_usage", "description": "Bounded local receipts of meaningful architecture operations, not session logs.", "inputSchema": usage_input},
+        {"name": "architecture_updates", "description": "Read-only bounded changes since a caller-held cursor; no refresh, renderer or delivery state writes.", "inputSchema": updates_input},
         {"name": "architecture_candidates", "description": "Pending deterministic high-value source candidates; not canonical facts. Default is compact; limit 0 returns the bounded full set.", "inputSchema": candidates_input},
         {"name": "architecture_accept_candidate", "description": "Promote a manually updated canonical config after one candidate is bound to changed source-evidence-backed architecture.", "inputSchema": accept_input},
         {"name": "architecture_reject_candidate", "description": "Record one bounded fixed-code rejection and advance the verified candidate baseline.", "inputSchema": reject_input},
@@ -1519,6 +1659,7 @@ def mcp_value(config_path: Path, explicit: str | None, name: str, args: dict[str
     if name == "architecture_snapshot": return snapshot(config_path, explicit)
     if name == "architecture_history": return history(state(config_path, explicit), args.get("context_hash"), int(args.get("limit", 10)))
     if name == "architecture_usage": return usage(state(config_path, explicit), args.get("operation"), int(args.get("limit", 10)))
+    if name == "architecture_updates": return updates(config_path, explicit, args.get("since"))
     if name == "architecture_candidates":
         limit = args.get("limit", CANDIDATE_OUTPUT_LIMIT)
         if not isinstance(limit, int) or isinstance(limit, bool): raise ValueError("candidate limit must be an integer")
@@ -1548,7 +1689,7 @@ def serve_mcp(config_path: Path, explicit: str | None) -> int:
                 name, arguments = str(params.get("name", "")), params.get("arguments", {})
                 if not isinstance(arguments, dict): raise ValueError("tool arguments must be an object")
                 started = time.monotonic(); value = mcp_value(config_path, explicit, name, arguments); elapsed = int((time.monotonic() - started) * 1000)
-                if name not in ("architecture_status", "architecture_stale", "architecture_history", "architecture_usage"): telemetry(state(config_path, explicit), f"mcp:{name}", value, elapsed)
+                if name not in ("architecture_status", "architecture_stale", "architecture_history", "architecture_usage", "architecture_updates"): telemetry(state(config_path, explicit), f"mcp:{name}", value, elapsed)
                 record_usage(state(config_path, explicit), name, value, elapsed, "mcp", arguments.get("id") if isinstance(arguments, dict) else None)
                 result = {"content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False, separators=(",", ":"))}], "isError": value.get("status") in ("ERROR", "INVALID")}
             elif "id" not in request: continue
@@ -1566,6 +1707,7 @@ def main() -> int:
     x = sub.add_parser("candidates"); x.add_argument("--limit", type=int, default=CANDIDATE_OUTPUT_LIMIT)
     x = sub.add_parser("history"); x.add_argument("--context-hash"); x.add_argument("--limit", type=int, default=10)
     x = sub.add_parser("usage"); x.add_argument("--operation"); x.add_argument("--limit", type=int, default=10); x.add_argument("--import-legacy", action="store_true")
+    x = sub.add_parser("updates"); x.add_argument("--since")
     x = sub.add_parser("canonical"); x.add_argument("id", nargs="?"); x.add_argument("--component"); x = sub.add_parser("search"); x.add_argument("query", nargs="?"); x.add_argument("--query", dest="query_flag"); x.add_argument("--limit", type=int, default=3); x = sub.add_parser("evidence"); x.add_argument("id", nargs="?"); x.add_argument("--component")
     x = sub.add_parser("trace"); x.add_argument("id", nargs="?"); x.add_argument("--from", dest="source"); x.add_argument("--to", dest="target"); x.add_argument("--direction", choices=("upstream", "downstream"), default="downstream"); x.add_argument("--code", action="store_true")
     x = sub.add_parser("impact"); x.add_argument("--base"); x.add_argument("--files", nargs="*")
@@ -1595,6 +1737,7 @@ def main() -> int:
         if args.command == "telemetry": dump(telemetry_summary(state(config_path, args.state_dir))); return 0
         if args.command == "history": dump(history(state(config_path, args.state_dir), args.context_hash, args.limit)); return 0
         if args.command == "usage": dump(import_legacy_usage(state(config_path, args.state_dir)) if args.import_legacy else usage(state(config_path, args.state_dir), args.operation, args.limit)); return 0
+        if args.command == "updates": dump(updates(config_path, args.state_dir, args.since)); return 0
         if args.command == "watch":
             if args.once:
                 started = time.monotonic(); value = watch_once(config_path, args.state_dir, args.apply); elapsed = int((time.monotonic() - started) * 1000)
