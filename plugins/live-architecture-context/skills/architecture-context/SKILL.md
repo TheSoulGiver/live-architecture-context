@@ -17,6 +17,7 @@ step), use the smallest lookup below. Reuse still-valid context already obtained
 task; don't repeat a query to prove usage. Known local work goes directly to source.
 
 1. Only if freshness still needs checking, run `status` with the exact project CLI prefix and config from local guidance; don't substitute a global install. Without such guidance, if this repository has `.archctx/architecture.json`, run `archctx status`.
+   If project guidance exposes `updates`, use it instead: retain its cursor and pass `--since <cursor>` on the next relevant read, not after every edit. It coalesces current changes, not a promise that a watcher event reached this session.
 2. When context is `FRESH` and the answer is still missing, make one smallest query: `search` to locate a capability; `canonical` or
    `evidence` for a known component; `trace` only when the declared component relation is the
    question; `impact --files <paths>` for uncertain edit impact; `changed-since` or `drift`
@@ -28,6 +29,9 @@ Ponytail remains optional and independently usable; don't load its whole ruleset
 this lookup. Correctness, readability and required invariants outrank shortest diff,
 fewest files or fixed test counts. If architecture really changes, maintain the existing
 shared definition/blueprint through its authorized update path, not a new approval step.
+This maintenance also applies when the task needed no LAC lookup: update affected
+responsibilities, entries, relations or trust boundaries from source; leave uncertain
+signals as candidates. Implementation-only edits need no new declarations.
 
 If the index is missing, stale, invalid, or does not reduce the next read, use ordinary targeted
 discovery. Do not refresh merely to answer a read-only question, and never treat Archctx as a gate.

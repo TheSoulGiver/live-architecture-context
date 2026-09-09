@@ -7,6 +7,7 @@
       "Relations are authored, source-evidence-backed architecture claims; this view is not a complete call graph.",
       "CALM is packaged as an optional loopback adapter but is not configured for this repository, so no CALM code facts are shown.",
       "The diagram is a focused human view. Source, accepted context, and retained local receipts remain the authority for details and history.",
+      "Native hook configuration does not prove host trust or delivery; offered cursors are not consumption receipts.",
       "Rendered IR, HTML, comparisons, snapshots, watcher state, and pinned renderer checkout stay in local .archctx state and are not GitHub facts."
     ]
   },
@@ -14,12 +15,13 @@
     {
       "id": "archctx-cli",
       "name": "Archctx CLI and MCP",
-      "purpose": "Canonical source-evidence validation and compact CLI/MCP architecture queries.",
+      "purpose": "Canonical source-evidence validation and compact CLI/MCP queries, including caller-cursor deltas for the next relevant development read.",
       "truth_sources": ["archctx.py", "pyproject.toml"],
       "code_symbol": "main",
       "tags": ["canonical", "agent-protocol", "source-evidence"],
       "evidence": [
         {"path": "archctx.py", "contains": "def mcp_tools() -> list[dict[str, Any]]:"},
+        {"path": "archctx.py", "contains": "def updates(config_path: Path"},
         {"path": "pyproject.toml", "contains": "archctx = \"archctx:main\""}
       ]
     },
@@ -99,17 +101,28 @@
     },
     {
       "id": "codex-skills",
-      "name": "Codex architecture skills",
-      "purpose": "Directs an Agent to use compact architecture context only when it avoids the next broad source read.",
-      "truth_sources": ["plugins/live-architecture-context/.codex-plugin/plugin.json", "plugins/live-architecture-context/skills/architecture-context/SKILL.md"],
-      "tags": ["agent-entry", "optional", "on-demand"],
+      "name": "Codex architecture entry",
+      "purpose": "Offers bounded deltas through optional trusted host hooks or on-demand skills; the Agent owns semantic maintenance, never the hook or its offered cursor.",
+      "truth_sources": ["plugins/live-architecture-context/.codex-plugin/plugin.json", "plugins/live-architecture-context/skills/architecture-context/SKILL.md", "archctx_hook.py", ".codex/hooks.json"],
+      "tags": ["agent-entry", "optional", "on-demand", "advisory-hook"],
       "evidence": [
         {"path": "plugins/live-architecture-context/.codex-plugin/plugin.json", "contains": "\"skills\": \"./skills/\""},
-        {"path": "plugins/live-architecture-context/skills/architecture-context/SKILL.md", "contains": "Use architecture context only when it will eliminate the next broad source read."}
+        {"path": "plugins/live-architecture-context/skills/architecture-context/SKILL.md", "contains": "Use architecture context only when it will eliminate the next broad source read."},
+        {"path": ".codex/hooks.json", "contains": "\"PostToolUse\""},
+        {"path": "archctx_hook.py", "contains": "def offer(config: Path"}
       ]
     }
   ],
   "relations": [
+    {
+      "id": "hook-reads-updates",
+      "from": "codex-skills",
+      "to": "archctx-cli",
+      "kind": "reads-advisory-updates",
+      "evidence": [
+        {"path": "archctx_hook.py", "contains": "archctx.updates(config, explicit, since)"}
+      ]
+    },
     {
       "id": "skills-guide-cli",
       "from": "codex-skills",
@@ -205,6 +218,8 @@
   "watch": {
     "paths": [
       "archctx.py",
+      "archctx_hook.py",
+      ".codex/hooks.json",
       "archctx_to_archify.py",
       "calm_query.py",
       "archctx_blueprint.py",

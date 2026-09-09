@@ -2,8 +2,9 @@
 ## Architecture context
 
 Use Archctx only when it shrinks the next broad source read (canonical/truth/evidence, cross-component path, freshness/delta, or legacy ambiguity); skip obvious local work.
-From the repository root, run `python archctx.py --config architecture/architecture.json status`. Keep this exact CLI prefix for queries; do not substitute a global installation. Use `status --diagnose` if tool/config identity is unclear. Use its `FRESH`/`STALE` label, not unrelated Git dirtiness. If `FRESH`, use the smallest matching query: `search` to locate; `canonical`/`evidence` for a known component; `impact --files <paths>` before cross-component edits; `history` for prior context; `changed-since`/`drift` only with a supplied base revision.
+From the repository root, run `python archctx.py --config architecture/architecture.json updates` when orientation or freshness needs checking; reuse its cursor with `updates --since <cursor>` at the next relevant read. Keep this exact CLI prefix for queries; do not substitute a global installation. Use `status --diagnose` if tool/config identity is unclear. Use its `FRESH`/`STALE` label, not unrelated Git dirtiness. If `FRESH`, use the smallest matching query: `search` to locate; `canonical`/`evidence` for a known component; `impact --files <paths>` before cross-component edits; `history` for prior context; `changed-since`/`drift` only with a supplied base revision.
 Read only returned evidence and the next directly needed source file. Source wins; stale, missing, or irrelevant context means normal targeted discovery. Default `watch` only observes; opt-in `watch --apply` may refresh already-declared evidence after validation, never candidates. Orientation, never a gate.
+Whether or not this task queried LAC, maintain affected shared definitions/view when responsibilities, canonical entries, relations, or trust boundaries actually change; leave uncertain signals as candidates. Ordinary implementation changes do not need new architecture declarations.
 <!-- archctx:end -->
 
 # Live Architecture Context agent guide

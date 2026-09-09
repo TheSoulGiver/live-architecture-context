@@ -1,0 +1,26 @@
+{
+  "description": "Optional, non-blocking architecture updates. Review and trust in Codex; never starts a model or refresh.",
+  "hooks": {
+    "SessionStart": [{"matcher": "startup|resume|compact", "hooks": [{
+      "type": "command",
+      "command": "python3 \"$(git rev-parse --show-toplevel)/archctx_hook.py\" --config \"$(git rev-parse --show-toplevel)/architecture/architecture.json\"",
+      "commandWindows": "powershell.exe -NoProfile -NonInteractive -Command \"$lacRoot = git rev-parse --show-toplevel; & python (Join-Path $lacRoot 'archctx_hook.py') --config (Join-Path $lacRoot 'architecture/architecture.json')\"",
+      "timeout": 5,
+      "additionalContextLimit": 1200
+    }]}],
+    "UserPromptSubmit": [{"hooks": [{
+      "type": "command",
+      "command": "python3 \"$(git rev-parse --show-toplevel)/archctx_hook.py\" --config \"$(git rev-parse --show-toplevel)/architecture/architecture.json\"",
+      "commandWindows": "powershell.exe -NoProfile -NonInteractive -Command \"$lacRoot = git rev-parse --show-toplevel; & python (Join-Path $lacRoot 'archctx_hook.py') --config (Join-Path $lacRoot 'architecture/architecture.json')\"",
+      "timeout": 5,
+      "additionalContextLimit": 1200
+    }]}],
+    "PostToolUse": [{"matcher": "^apply_patch$", "hooks": [{
+      "type": "command",
+      "command": "python3 \"$(git rev-parse --show-toplevel)/archctx_hook.py\" --config \"$(git rev-parse --show-toplevel)/architecture/architecture.json\"",
+      "commandWindows": "powershell.exe -NoProfile -NonInteractive -Command \"$lacRoot = git rev-parse --show-toplevel; & python (Join-Path $lacRoot 'archctx_hook.py') --config (Join-Path $lacRoot 'architecture/architecture.json')\"",
+      "timeout": 5,
+      "additionalContextLimit": 1200
+    }]}]
+  }
+}

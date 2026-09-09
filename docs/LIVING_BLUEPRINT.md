@@ -58,6 +58,34 @@ already-declared, validated changes; it does not invoke a model or silently
 invent canonical structure. Fresh sessions read `AGENTS.md` and the tracked
 config, then rebuild their own local index. No previous chat is required.
 
+## Consume changes during development
+
+At the next relevant development read, `updates` replaces a separate status check:
+
+```sh
+python archctx.py --config architecture/architecture.json updates
+python archctx.py --config architecture/architecture.json updates --since <returned-cursor>
+```
+
+The caller keeps the cursor, including across task boundaries when useful. The
+response coalesces current source/candidate changes and accepted deltas; repeated
+reads of the same state stay compact. Expired snapshot baselines are explicit.
+The CLI/MCP needs no server-side session state and never renders or refreshes.
+Watcher output alone is not proof an Agent consumed a change.
+
+This checkout also offers [native Codex hooks](../.codex/hooks.json): review them
+with `/hooks` and trust the exact definitions to enable advisory context at
+session/prompt boundaries and after `apply_patch`. The small adapter calls the
+same `updates` path, retaining only bounded, local **offered** cursors, not
+prompts, tool results, an event queue, or proof of reading. It starts no models
+and changes no architecture. Hooks skipped by trust, input limits, or host tool
+coverage leave the next-read path available; shell edits are caught there or at
+the next prompt, not by a pretend all-tool hook. These are synchronous bounded
+reads (five-second host timeout), not background hooks; they never reject a
+tool call or extend a turn. Global settings are untouched.
+Agents maintain semantic changes at completion even if they did not need a
+lookup before editing. The packaged skills remain usable without these hooks.
+
 ## One accepted version
 
 A refresh holds a process-scoped writer lock, validates source/config/view,
