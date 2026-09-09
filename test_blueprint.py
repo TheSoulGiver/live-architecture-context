@@ -72,15 +72,15 @@ function displayed(id,frame){
         harness = r"""
 const assert=require('node:assert/strict'),vm=require('node:vm'),source=require('node:fs').readFileSync(0,'utf8');
 for(const available of [false,true]){
- const events={},messages=[],calls=[],parent={postMessage:value=>messages.push(value)};
- const context=vm.createContext({TextEncoder,parent,document:{documentElement:{setAttribute(){}},
-  querySelector:()=>available?{querySelectorAll:()=>[]}:null,querySelectorAll:()=>[]},
+ const events={},messages=[],calls=[],attributes={},parent={postMessage:value=>messages.push(value)};
+ const context=vm.createContext({TextEncoder,parent,document:{documentElement:{setAttribute:(k,v)=>attributes[k]=v},
+  querySelector:()=>available?{parentElement:{removeAttribute:k=>attributes.removed=k},querySelectorAll:()=>[]}:null,querySelectorAll:()=>[]},
   window:{addEventListener:(name,fn)=>events[name]=fn},MutationObserver:class{observe(){}},
   Archify:{view:{centerAt:(...args)=>calls.push(args),zoomIn:()=>assert.fail('restore must not race separate zoom animations')}},
   setTimeout(){},clearTimeout(){}});
  vm.runInContext(source,context);
  assert.equal(messages.length,available?1:0);if(!available){assert.equal(events.message,undefined);continue}
- assert.equal(messages[0].kind,'lac-ready');
+ assert.equal(messages[0].kind,'lac-ready');assert.equal(attributes['data-embed'],'true');assert.equal(attributes.removed,'data-wide-diagram');
  const restore=scale=>events.message({source:parent,data:{kind:'lac-map',restore:{scale,viewport:{x:10,y:20,width:100,height:200}}}});
  restore(2.4);assert.equal(calls.length,1);assert.equal(calls[0][0],60);assert.equal(calls[0][1],120);
  assert.equal(calls[0][2].scale,2.4);assert.equal(calls[0][2].instant,true);
