@@ -1,12 +1,14 @@
 import copy
 import http.client
 import json
+import shutil
 import subprocess
 import tempfile
 import threading
 import unittest
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import archctx
@@ -15,6 +17,80 @@ from tools import archify as launcher
 
 
 class BlueprintTest(unittest.TestCase):
+    def test_page_swaps_accepted_identity_only_after_current_frame_is_ready(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node is needed for the real PAGE script state check")
+        # Controlled DOM/transport fixture, not browser layout or rendering evidence.
+        script = blueprint.PAGE.split("<script>", 1)[1].split("</script>", 1)[0]
+        harness = r"""
+const assert=require('node:assert/strict'),vm=require('node:vm'),fs=require('node:fs');
+class Element {
+ constructor(tag='div'){this.tag=tag;this.children=[];this.dataset={};this.style={};this.textContent='';this.contentWindow={messages:[],postMessage(value){this.messages.push(value)}};}
+ append(...items){this.children.push(...items)} replaceChildren(...items){this.children=items}
+ insertBefore(item,before){let at=this.children.indexOf(before);this.children.splice(at<0?this.children.length:at,0,item)}
+ querySelector(tag){return this.children.find(x=>x.tag===tag)||null}
+ setAttribute(name,value){this[name]=value} removeAttribute(name){delete this[name]}
+ cloneNode(){return new Element(this.tag)} remove(){this.removed=true}
+}
+const elements={},timers=[],get=id=>elements[id]??=(new Element()),packet=id=>({status:'FRESH',context_hash:id,
+ generation:id,revision:id,artifacts:['current.html','comparison.html'],components:[{id:'service',purpose:'purpose-'+id,
+ evidence:[{path:'service.py',line:1}]}],relations:[],development:{observation_id:'obs-'+id,observer_running:true,changes:[]}});
+let next=packet('accepted-A'),message;
+const context=vm.createContext({TextEncoder,document:{getElementById:get,createElement:tag=>new Element(tag)},
+ window:{addEventListener:(_name,handler)=>{message=handler}},fetch:async()=>({status:200,ok:true,json:async()=>next,headers:{get:()=>next.context_hash}}),
+ setTimeout:(fn,ms)=>{let timer={fn,ms};timers.push(timer);return timer},clearTimeout:timer=>{if(timer)timer.cancelled=true}});
+const read=expression=>vm.runInContext(expression,context),ready=frame=>message({source:frame.contentWindow,data:{kind:'lac-ready'}});
+function displayed(id,frame){
+ assert.equal(read('data.context_hash'),id);assert.equal(read('picture'),frame);assert.ok(get('identity').textContent.includes(id));
+ assert.ok(get('detail').children.some(x=>x.textContent==='purpose-'+id));
+ assert.ok(get('detail').querySelector('details').children.some(x=>x.href?.includes('context='+id)));
+ assert.equal(frame.contentWindow.messages.at(-1).context,id);
+}
+(async()=>{
+ vm.runInContext(fs.readFileSync(0,'utf8'),context);await new Promise(setImmediate);
+ const first=read('loading');assert.equal(read('data'),null);ready(first);read("select('service')");displayed('accepted-A',first);
+ next=packet('accepted-B');await context.poll();const delayed=read('loading');assert.notEqual(delayed,first);displayed('accepted-A',first);
+ timers.findLast(t=>t.ms===8000&&!t.cancelled).fn();assert.equal(read('loading'),null);assert.ok(delayed.removed);displayed('accepted-A',first);
+ assert.ok(get('reason').textContent.includes('加载失败'));
+ await context.poll();const second=read('loading');ready(second);assert.ok(first.removed);displayed('accepted-B',second);
+ assert.equal(read('version'),'accepted-B:current.html');
+ get('delta').onclick();const abandoned=read('loading');assert.ok(abandoned.src.endsWith('/comparison.html'));
+ get('now').onclick();assert.equal(read('loading'),null);assert.ok(abandoned.removed);ready(abandoned);
+ assert.equal(read('mode'),'now');assert.equal(read('version'),'accepted-B:current.html');displayed('accepted-B',second);
+ console.log('PASS: delayed/failed frame retains accepted identity; current ready swaps atomically; abandoned ready ignored');
+})().catch(error=>{console.error(error);process.exitCode=1});
+"""
+        result = subprocess.run([node, "-e", harness], input=script, text=True, encoding="utf-8", capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_map_bridge_restores_camera_atomically_and_requires_svg(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node is needed for the real MAP_BRIDGE script check")
+        script = blueprint.MAP_BRIDGE.split("<script>", 1)[1].split("</script>", 1)[0]
+        harness = r"""
+const assert=require('node:assert/strict'),vm=require('node:vm'),source=require('node:fs').readFileSync(0,'utf8');
+for(const available of [false,true]){
+ const events={},messages=[],calls=[],parent={postMessage:value=>messages.push(value)};
+ const context=vm.createContext({TextEncoder,parent,document:{documentElement:{setAttribute(){}},
+  querySelector:()=>available?{querySelectorAll:()=>[]}:null,querySelectorAll:()=>[]},
+  window:{addEventListener:(name,fn)=>events[name]=fn},MutationObserver:class{observe(){}},
+  Archify:{view:{centerAt:(...args)=>calls.push(args),zoomIn:()=>assert.fail('restore must not race separate zoom animations')}},
+  setTimeout(){},clearTimeout(){}});
+ vm.runInContext(source,context);
+ assert.equal(messages.length,available?1:0);if(!available){assert.equal(events.message,undefined);continue}
+ assert.equal(messages[0].kind,'lac-ready');
+ const restore=scale=>events.message({source:parent,data:{kind:'lac-map',restore:{scale,viewport:{x:10,y:20,width:100,height:200}}}});
+ restore(2.4);assert.equal(calls.length,1);assert.equal(calls[0][0],60);assert.equal(calls[0][1],120);
+ assert.equal(calls[0][2].scale,2.4);assert.equal(calls[0][2].instant,true);
+ for(const invalid of [NaN,0,3.1])restore(invalid);assert.equal(calls.length,1);
+}
+console.log('PASS: camera restore passes scale in one centerAt call; absent SVG never announces ready');
+"""
+        result = subprocess.run([node, "-e", harness], input=script, text=True, encoding="utf-8", capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_renderer_receipts_and_missing_before_recovery(self):
         # Synthetic renderer contract, not a claim of real Archify rendering.
         for scenario in ("valid", "wrong_delivery", "wrong_comparison", "missing_before"):
@@ -76,7 +152,10 @@ class BlueprintTest(unittest.TestCase):
         self.assertNotEqual(blueprint.definition_hash(context), blueprint.definition_hash(updated))
 
     def test_serves_only_accepted_unchanged_artifacts_and_evidence(self):
-        with tempfile.TemporaryDirectory() as temporary:
+        # Synthetic renderer/observer HTTP contract; no natural adoption claim.
+        fixture_root = Path(__file__).parent / ".archctx"
+        fixture_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=fixture_root) as temporary:
             repo = Path(temporary)
             source = "def serve():\n    return '<script>not executable</script>'\n"
             (repo / "service.py").write_text(source, encoding="utf-8")
@@ -94,40 +173,104 @@ class BlueprintTest(unittest.TestCase):
                        "artifacts": {"current.html": archctx.sha(output.read_bytes())}}
             value = {"status": "FRESH", "last_good_context_hash": "accepted-context", "archify": receipt,
                      "context": {"components": [{"id": "service", "evidence": [{"path": "service.py", "line": 1, "sha256": archctx.sha(source.encode())}]}]}}
+            record = {"repo": str(repo), "context": value["context"], "context_hash": "accepted-context", "archify": receipt}
+            development = {"status": "FRESH", "stale": False, "accepted_context_hash": "accepted-context",
+                           "observation_id": "observation-1", "observer_running": True, "updates": {"status": "FRESH"},
+                           "changes": [{"path": "service.py", "sha256": archctx.sha((repo / "service.py").read_bytes())},
+                                       {"path": "private.txt", "sha256": None, "observation": "metadata_only"}]}
+            (repo / "private.txt").write_text("synthetic private bytes", encoding="utf-8")
+            observer = SimpleNamespace(bundle=lambda: (copy.deepcopy(development), copy.deepcopy(record)))
             real_snapshot = archctx.snapshot
             with patch.object(archctx, "snapshot", return_value=value) as snapshot_mock:
-                server = ThreadingHTTPServer(("127.0.0.1", 0), blueprint.handler(config, None))
+                server = ThreadingHTTPServer(("127.0.0.1", 0), blueprint.handler(config, None, observer))
                 worker = threading.Thread(target=server.serve_forever, daemon=True)
                 worker.start()
                 try:
-                    def get(path, host=None):
+                    response_headers = {}
+
+                    def get(path, host=None, headers=None):
                         connection = http.client.HTTPConnection("127.0.0.1", server.server_port)
-                        connection.request("GET", path, headers={"Host": host} if host else {})
+                        connection.request("GET", path, headers=({"Host": host} if host else {}) | (headers or {}))
                         response = connection.getresponse()
                         result = response.status, response.read().decode()
+                        response_headers.clear()
+                        response_headers.update(dict(response.getheaders()))
                         connection.close()
                         return result
-                    self.assertEqual(get("/api/current")[0], 200)
+                    code, body = get("/api/current")
+                    self.assertEqual(code, 200)
+                    current = json.loads(body)
+                    self.assertEqual(current["context_hash"], current["development"]["accepted_context_hash"])
+                    self.assertEqual(current["components"], record["context"]["components"])
+                    self.assertEqual(snapshot_mock.call_count, 0)  # One paired observer read, not a competing snapshot.
+                    etag = response_headers["ETag"]
+                    self.assertEqual(get("/api/current", headers={"If-None-Match": etag}), (304, ""))
+                    development["observation_id"] = "observation-2"
+                    self.assertEqual(get("/api/current", headers={"If-None-Match": etag})[0], 200)
+                    self.assertNotEqual(response_headers["ETag"], etag)
+                    etag = response_headers["ETag"]
+                    development["observer_running"] = False
+                    self.assertEqual(get("/api/current", headers={"If-None-Match": etag})[0], 200)
+                    self.assertNotEqual(response_headers["ETag"], etag)
+                    development["observer_running"] = True
                     self.assertEqual(get("/api/current", "evil.example")[0], 403)
                     self.assertEqual(get(f"/artifact/{generation_id}/current.html"), (200, "<svg></svg>"))
+                    original = output.read_bytes()
+                    code, mapped = get(f"/map/{generation_id}/current.html")
+                    self.assertEqual((code, mapped), (200, original.decode() + blueprint.MAP_BRIDGE))
+                    self.assertEqual(output.read_bytes(), original)
+                    self.assertEqual(archctx.sha(original), receipt["artifacts"]["current.html"])
+                    self.assertIn('sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"', get("/")[1])
+                    self.assertNotIn("allow-same-origin", blueprint.PAGE)
+                    self.assertIn("e.source!==parent", blueprint.MAP_BRIDGE)
+                    self.assertEqual(get(f"/map/{generation_id}/comparison.html")[0], 409)
+                    artifact_path = blueprint.artifact_path
+
+                    def modify_after_path_check(*args):
+                        path = artifact_path(*args)
+                        path.write_text("synthetic concurrent artifact replacement", encoding="utf-8")
+                        return path
+
+                    with patch.object(blueprint, "artifact_path", side_effect=modify_after_path_check):
+                        self.assertEqual(get(f"/map/{generation_id}/current.html")[0], 409)
+                    output.write_bytes(original)
                     self.assertEqual(get("/artifact/older/current.html")[0], 409)
                     self.assertEqual(get(f"/artifact/{generation_id}/secrets.json")[0], 409)
                     code, text = get("/source?component=service&item=0&context=accepted-context")
                     self.assertEqual(code, 200)
                     self.assertIn("&lt;script&gt;", text)
                     self.assertNotIn("<script>", text)
+                    working = "/working-source?path=service.py&observation=observation-2"
+                    code, text = get(working)
+                    self.assertEqual(code, 200)
+                    self.assertIn("not accepted evidence", text)
+                    self.assertIn("&lt;script&gt;", text)
+                    self.assertNotIn("<script>", text)
+                    for query in ("path=service.py&observation=observation-1", "path=private.txt&observation=observation-2",
+                                  "path=../private.txt&observation=observation-2", "path=/private.txt&observation=observation-2"):
+                        code, body = get("/working-source?" + query)
+                        self.assertEqual(code, 409)
+                        self.assertNotIn("synthetic private bytes", body)
                     (repo / "service.py").write_text("changed", encoding="utf-8")
+                    self.assertEqual(get(working)[0], 409)
                     self.assertEqual(get("/source?component=service&item=0&context=accepted-context")[0], 409)
                     output.write_text("modified", encoding="utf-8")
                     self.assertEqual(get(f"/artifact/{generation_id}/current.html")[0], 409)
                     output.write_text("<svg></svg>", encoding="utf-8")
-                    archctx.atomic(archctx.last_path(directory), {"repo": str(repo), "context": value["context"],
-                                   "context_hash": "accepted-context", "archify": receipt})
+                    archctx.atomic(archctx.last_path(directory), record)
                     config.write_text("{ unfinished edit", encoding="utf-8")
+                    development.update(status="INVALID", stale=True, error="synthetic invalid configuration",
+                                       observation_id="observation-invalid", observer_running=False,
+                                       updates={"status": "INVALID", "freshness": "stale"})
                     snapshot_mock.side_effect = real_snapshot
                     code, body = get("/api/current")
-                    self.assertEqual((code, json.loads(body)["status"]), (200, "STALE"))
+                    current = json.loads(body)
+                    self.assertEqual((code, current["status"]), (200, "INVALID"))
+                    self.assertEqual(current["context_hash"], "accepted-context")
+                    self.assertEqual(current["components"], record["context"]["components"])
                     self.assertEqual(get(f"/artifact/{generation_id}/current.html"), (200, "<svg></svg>"))
+                    self.assertEqual(get(f"/map/{generation_id}/current.html")[0], 200)
+                    self.assertEqual(get(working)[0], 409)
                     self.assertEqual(get("/source?component=service&item=0&context=accepted-context")[0], 409)
                     self.assertTrue(blueprint.handler(config, None))  # Restart also works during the invalid edit.
                 finally:
