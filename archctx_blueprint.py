@@ -6,6 +6,7 @@ import argparse
 import html
 import json
 import mimetypes
+import re
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -13,9 +14,44 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 import archctx
+import archctx_understand as understand
 from archctx_development import DevelopmentObserver
 
 MAX_ARTIFACT_BYTES = 8 * 1024 * 1024
+
+
+def analysis_source(repo: Path, directory: Path, args: dict[str, list[str]]) -> str:
+    """Read only a current receipt's captured source, never arbitrary worktree files."""
+    receipt_path = understand.current_path(directory)
+    receipt = understand.local_json(receipt_path, understand.SUMMARY_BYTES)
+    if not isinstance(receipt.get("source_hashes"), dict):
+        raise ValueError("invalid analysis source manifest")
+    ident, relative, digest = (args.get(key, [""])[0] for key in ("analysis", "path", "sha"))
+    if not re.fullmatch(r"[0-9a-f]{64}", ident) or ident != receipt["analysis_id"] or Path(receipt["worktree"]).resolve() != repo:
+        raise ValueError("analysis version/worktree changed; reopen the source analysis")
+    if not re.fullmatch(r"[0-9a-f]{64}", digest) or receipt["source_hashes"].get(relative) != digest:
+        raise ValueError("source is outside this content-bound analysis")
+    runs = (directory / "understand/runs").resolve()
+    runs.relative_to(directory.resolve())
+    source = (runs / ident / "source").resolve()
+    source.relative_to(runs)
+    if Path(receipt["source_root"]).resolve() != source:
+        raise ValueError("analysis snapshot location changed")
+    path, normalized = archctx.repo_file(source, relative, "analysis source")
+    if normalized != relative or {p.casefold() for p in Path(relative).parts + path.relative_to(source).parts}.intersection({".git", ".archctx", ".ua"}):
+        raise ValueError("invalid captured source path")
+    raw = understand.bounded_raw(path, understand.SOURCE_BYTES)
+    if archctx.sha(raw) != digest or understand.local_json(receipt_path, understand.SUMMARY_BYTES) != receipt:
+        raise ValueError("captured source or analysis receipt changed while reading")
+    lines = raw.decode("utf-8", errors="replace").splitlines()
+    line = int(args.get("line", ["1"])[0])
+    if not 1 <= line <= max(1, len(lines)):
+        raise ValueError("invalid captured source line")
+    first = max(0, line - 6)
+    snippet = "\n".join(f"{first+i+1}: {text}" for i, text in enumerate(lines[first:first + 25]))
+    return ('<meta charset="utf-8"><title>Historical analysis source · not accepted</title><h2>' + html.escape(relative)
+            + '</h2><p>Historical captured analysis source · not accepted architecture evidence · not current worktree</p><p>Analysis '
+            + ident + ' · SHA-256 ' + digest + '</p><pre>' + html.escape(snippet) + '</pre>')
 
 
 def definition_hash(context: dict[str, Any]) -> str:
@@ -145,7 +181,7 @@ footer{height:34px;border-top:1px solid var(--line);display:flex;justify-content
 <nav aria-label="地图视图"><button id="now" aria-pressed="true">当前系统</button><button id="recent" aria-pressed="false">最近变化</button><button id="delta" aria-pressed="false">Before / After</button><button id="all-changes" aria-pressed="true">全部修改</button><span class="spacer"></span><a id="raw" target="_blank" rel="noopener">打开原始 Archify 图 ↗</a></nav>
 <main><section class="canvas"><div class="canvas-head"><div><h2 id="map-title">已接受的系统蓝图</h2><small id="map-caption">点击组件，查看职责、原始关系和源码。</small><div class="legend"><span>已接受</span><span class="direct">直接涉及</span><span class="dependency">依赖对象</span><span class="dependent">依赖者</span><span class="both">两者重合</span></div></div><div class="map-controls"><button id="zoom-out" aria-label="缩小">−</button><button id="zoom-in" aria-label="放大">＋</button><button id="fit">全景</button><button id="focus" aria-pressed="false">聚焦邻居</button></div></div>
 <div id="stage"><iframe id="picture" title="Archify 系统图与开发变化" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"></iframe><div id="empty">等待可用的已接受 Archify 图。<p>局部变化不会被猜成正式架构。</p></div></div><div id="reason" role="status"></div></section>
-<aside><div class="section-label" id="panel-title">开发观察 / 非运行状态</div><div id="summary"></div><div id="detail"></div><div id="changes"></div><details id="components-list"><summary>全部组件</summary><div id="sources"></div></details><details id="coverage"><summary>覆盖范围与可信边界</summary><p id="scope"></p><ul id="limits"></ul><p id="graph" class="muted"></p></details></aside></main>
+<aside><div class="section-label" id="panel-title">开发观察 / 非运行状态</div><div id="summary"></div><div id="detail"></div><section id="analysis" aria-label="源码分析调查"></section><div id="changes"></div><details id="components-list"><summary>全部组件</summary><div id="sources"></div></details><details id="coverage"><summary>覆盖范围与可信边界</summary><p id="scope"></p><ul id="limits"></ul><p id="graph" class="muted"></p></details></aside></main>
 <footer><span id="observation">OBSERVATION —</span><span>文件活动 ≠ 任务进度 ≠ 线上运行 · 本地只读页面</span></footer>
 <script>
 let data=null,latest=null,mode='now',selected=null,selectedChange=null,focused=false,version='',navigation=null,lastObservation='',detailVersion='',etag='',loading=null,loadingKey='',loadTimer;
@@ -181,6 +217,17 @@ function scopeGroup(parent,label,scope,working=false){let box=el('div',undefined
  for(let e of r.evidence||[])witness.append(el('code',e.path+(e.line?':'+e.line:'')));if(r.omitted_evidence>0)witness.append(el('p','另有 '+r.omitted_evidence+' 个锚点；使用 --details 查看。','scope-note'));details.append(witness);}
  for(let a of scope.associations||[])details.append(el('p',a.component+' ← '+(a.paths||[]).join('、'),'scope-note'));
  if(scope.config_seeds?.length)details.append(el('p','配置变更涉及：'+scope.config_seeds.join('、'),'scope-note'));box.append(details);
+}
+function drawAnalysis(){let a=data?.development?.updates?.source_analysis,box=$('analysis');box.replaceChildren();box.hidden=!a?.configured;if(box.hidden)return;
+ box.append(el('h2','源码分析 / 未接受调查'),el('p',a.status==='FRESH'?'FRESH · 源内容一致；分析认识不是正式架构':(a.status||'UNKNOWN')+' · 源码分析不可当作当前接受事实','change pending'));
+ box.append(el('code',(a.provider?.name||'Understand Anything')+' @ '+(a.provider?.revision||'unknown').slice(0,12)),el('p','分析 '+(a.analysis_id||'unknown').slice(0,12)+' · '+(a.source_files||[]).length+' 个选定文件','scope-note'));
+ if(a.reason)box.append(el('p',a.reason,'scope-note'));if(a.changed_files?.length)box.append(el('p','分析后已变化：'+a.changed_files.join('、'),'scope-note'));if(a.retained_previous_observation)box.append(el('p','保留上次观察；当前分析状态未知。','scope-note'));
+ for(let c of a.candidates||[]){let d=el('details');d.append(el('summary',(c.title||c.id)+' · '+(c.review_state||'unreviewed')),el('p',c.summary||''),el('p','已有 owner 的证据交集（不是职责证明）：'+((c.related_components||[]).join('、')||'尚未匹配'),'scope-note'));
+ for(let e of c.evidence||[]){let link=el('a',e.path+':'+e.line+' · 历史分析源码','source');link.target='_blank';link.rel='noopener';link.href='/analysis-source?analysis='+enc(a.analysis_id)+'&path='+enc(e.path)+'&sha='+enc(e.sha256)+'&line='+enc(e.line);d.append(link)}
+ for(let r of c.raw_relations||[])d.append(el('p',r.source+' → '+r.target+' · '+r.type+' · direction='+r.direction,'scope-note'));
+ if(c.omitted_raw_relations||c.omitted_evidence)d.append(el('p','省略关系 '+(c.omitted_raw_relations||0)+' / 锚点 '+(c.omitted_evidence||0)+'；使用分析查询查看范围。','scope-note'));box.append(d);}
+ if(a.tour?.length){let d=el('details');d.append(el('summary','分析导览 · 非 canonical 流程'));for(let step of a.tour)d.append(el('h3',step.order+'. '+step.title),el('p',step.description));box.append(d)}
+ if(a.limitations?.length){let d=el('details');d.append(el('summary','分析覆盖边界'));for(let limitation of a.limitations)d.append(el('p',limitation,'scope-note'));box.append(d)}if(a.details_omitted||a.omitted_candidate_count||a.omitted_tour_steps)box.append(el('p','有界页面已省略部分分析；请用现有分析查询。','scope-note'));
 }
 function drawChanges(){let d=data.development||{},p=d.pending||{},box=$('changes');box.replaceChildren();
  if(mode==='recent'){let delta=data.recent_delta||{},changed=delta.changed_components||[];box.append(el('h2','最近接受的变化'));if(data.before_available){box.append(card('已接受 · '+(data.delta_kind||'unknown'),'',changed,'accepted'));for(let [key,label] of [['added_relations','新增关系'],['removed_relations','移除关系'],['changed_relations','关系语义变化']])for(let r of delta[key]||[])box.append(card(label,typeof r==='string'?r:(r.id||r.from+' → '+r.to),[],'accepted'));if(delta.evidence_changed_components?.length)box.append(card('源码证据更新（不等于新增架构）','',delta.evidence_changed_components,'accepted'));}else box.append(el('p',data.before_reason||'没有可用的上一接受版本。'));}
@@ -232,7 +279,7 @@ function paint(next){if(!next)return;data=next;let d=data.development||{},fresh=
  $('scope').textContent=data.coverage?.scope||'仅覆盖配置声明的组件与证据。';$('limits').replaceChildren(...[...(data.coverage?.limitations||[]),...(d.limitations||[])].map(s=>el('li',s)));
  $('graph').textContent=data.graph?.configured?'代码图：'+(data.graph.provider||'external')+' / '+(data.graph.freshness||'unverified'):'CALM 未接入；图中是架构声明，不是完整调用图。';
  $('observation').textContent='OBS '+(d.observation_id||'—').slice(0,12)+' · '+(d.observed_at||'').replace('T',' ').slice(0,19)+' UTC · '+(d.counts?.unmapped||0)+' 项未覆盖';
- let observation=data.context_hash+':'+d.observation_id;if(observation!==lastObservation){lastObservation=observation;$('sources').replaceChildren(...(data.components||[]).map(c=>{let b=el('button',c.name||c.id,'node-button');b.append(el('small',c.id));b.onclick=()=>select(c.id);return b}));detail();send();}drawChanges();}
+ let observation=data.context_hash+':'+d.observation_id;if(observation!==lastObservation){lastObservation=observation;$('sources').replaceChildren(...(data.components||[]).map(c=>{let b=el('button',c.name||c.id,'node-button');b.append(el('small',c.id));b.onclick=()=>select(c.id);return b}));detail();send();}drawChanges();drawAnalysis();}
 async function poll(){try{let r=await fetch('/api/current',{cache:'no-store',headers:etag?{'If-None-Match':etag}:{}});if(r.status===304)return;if(!r.ok)throw Error(await r.text());let next=await r.json();etag=r.headers.get('ETag')||'';
  if(next.status==='RETRY')throw Error('观察期间状态已变化，保留当前画面，下一次读取重试。');latest=next;view();
 }catch(e){etag='';$('state').textContent='暂不可更新 · 保留当前画面';$('reason').textContent=String(e)}finally{setTimeout(poll,1500)}}poll();
@@ -296,6 +343,11 @@ def handler(config_path: Path, explicit: str | None, observer: DevelopmentObserv
             try:
                 if url.path == "/":
                     self.reply(200, PAGE)
+                    return
+                if url.path == "/analysis-source":
+                    if archctx.repo_for(config_path, archctx.load(config_path)) != repo:
+                        raise ValueError("repository changed; restart the viewer")
+                    self.reply(200, analysis_source(repo, directory, parse_qs(url.query)))
                     return
                 development = None
                 if observer and url.path == "/api/current":
@@ -394,7 +446,7 @@ def handler(config_path: Path, explicit: str | None, observer: DevelopmentObserv
                                '</p><pre>'+html.escape(snippet)+'</pre>')
                     return
                 self.reply(404, "Not found", "text/plain")
-            except (KeyError, IndexError, StopIteration, ValueError, OSError) as error:
+            except (KeyError, IndexError, StopIteration, ValueError, OSError, TypeError) as error:
                 self.reply(409, "Blueprint unavailable: " + html.escape(str(error)))
     return Handler
 

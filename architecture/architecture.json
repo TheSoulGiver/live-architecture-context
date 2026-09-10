@@ -6,6 +6,7 @@
     "limitations": [
       "Relations are authored, source-evidence-backed architecture claims; this view is not a complete call graph.",
       "CALM is packaged as an optional loopback adapter but is not configured for this repository, so no CALM code facts are shown.",
+      "Optional pinned Understand analysis supplies partial investigation leads, not canonical components or runtime proof. Its raw graph and Codex-derived layers/tour can miss imports/calls; absence is not deletion evidence.",
       "The diagram is a focused human view. Source, accepted context, and retained local receipts remain the authority for details and history.",
       "Saved-worktree activity is a separate local observation, not canonical architecture or runtime. Codex maintains semantic declarations; the live page never invokes a model.",
       "Native hook configuration does not prove host trust or delivery; offered cursors are not consumption receipts.",
@@ -54,7 +55,7 @@
     {
       "id": "candidate-review",
       "name": "Candidate review",
-      "purpose": "Finds bounded high-value source signals and requires an Agent to accept or reject them before a changed architecture is promoted.",
+      "purpose": "Requires Agent review of deterministic high-value drift signals before promotion. Optional source-analysis findings are non-blocking leads; explicit acceptance reconciles them to reviewed existing/new component or relation bindings.",
       "truth_sources": ["archctx.py"],
       "code_symbol": "candidate_observation",
       "tags": ["drift", "manual-semantic-review", "bounded"],
@@ -103,6 +104,20 @@
       ]
     },
     {
+      "id": "source-analysis",
+      "name": "Optional saved-source analysis",
+      "purpose": "Captures explicit saved-worktree bytes for pinned Understand Anything structure and Codex semantic analysis; reuses unchanged file results, imports bounded non-canonical findings, and binds explicit Agent acceptance to the same source/graph through existing refresh and LKG.",
+      "truth_sources": ["archctx_understand.py"],
+      "code_symbol": "prepare",
+      "tags": ["optional", "source-analysis", "non-blocking", "local-only"],
+      "evidence": [
+        {"path": "archctx_understand.py", "contains": "def prepare(config_path: Path"},
+        {"path": "archctx_understand.py", "contains": "def import_graph(config_path: Path"},
+        {"path": "archctx_understand.py", "contains": "def check_publication(repo: Path"},
+        {"path": "archctx_understand.py", "contains": "PROVIDER_REVISION = \"5feed1f2ce4f9c368d860f4c0ebc36d98a4693fc\""}
+      ]
+    },
+    {
       "id": "calm-query-adapter",
       "name": "CALM query adapter (optional)",
       "purpose": "When explicitly configured, returns bounded loopback CALM caller/callee facts with provider freshness; it does not own canonical relations or start CALM.",
@@ -129,6 +144,32 @@
     }
   ],
   "relations": [
+    {
+      "id": "cli-reads-source-analysis", "from": "archctx-cli", "to": "source-analysis",
+      "kind": "reads-nonblocking-investigation", "dependency": "from_to",
+      "evidence": [{"path": "archctx.py", "contains": "analysis = discoveries(config_path, explicit)"}]
+    },
+    {
+      "id": "candidate-reviews-source-analysis", "from": "candidate-review", "to": "source-analysis",
+      "kind": "dispatches-explicit-source-review", "dependency": "from_to",
+      "evidence": [{"path": "archctx.py", "contains": "return review(config_path, explicit, ident, bindings=bindings)"}]
+    },
+    {
+      "id": "analysis-requests-refresh", "from": "source-analysis", "to": "refresh-transaction",
+      "kind": "publishes-only-explicit-reviewed-bindings", "dependency": "from_to",
+      "evidence": [{"path": "archctx_understand.py", "contains": "result = archctx._refresh_locked(config_path, explicit, directory,"}]
+    },
+    {
+      "id": "viewer-reads-analysis-source", "from": "blueprint-viewer", "to": "source-analysis",
+      "kind": "reads-content-bound-captured-source", "dependency": "from_to",
+      "evidence": [{"path": "archctx_blueprint.py", "contains": "receipt_path = understand.current_path(directory)"},
+                   {"path": "archctx_blueprint.py", "contains": "self.reply(200, analysis_source(repo, directory, parse_qs(url.query)))"}]
+    },
+    {
+      "id": "observer-stats-analysis-scope", "from": "development-observer", "to": "source-analysis",
+      "kind": "observes-receipt-and-saved-source-metadata", "dependency": "from_to",
+      "evidence": [{"path": "archctx_development.py", "contains": "analysis_path = understand.current_path(self.directory)"}]
+    },
     {
       "id": "viewer-starts-observer",
       "from": "blueprint-viewer",
@@ -278,6 +319,7 @@
       "calm_query.py",
       "archctx_blueprint.py",
       "archctx_development.py",
+      "archctx_understand.py",
       "tools/archify.py",
       "pyproject.toml",
       "plugins/live-architecture-context/.codex-plugin/plugin.json",

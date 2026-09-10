@@ -936,7 +936,7 @@ def diagnose_status(config_path: Path, explicit: str | None) -> dict[str, Any]:
         "last_good": {"path": str(last_path(directory)), "exists": last_path(directory).is_file()},
     }}
 
-def _refresh_locked(config_path: Path, explicit: str | None, directory: Path, changed: list[str] | None = None, acknowledged: dict[str, dict[str, Any]] | None = None, expected_context_hash: str | None = None, reset_candidate_baseline: bool = False) -> dict[str, Any]:
+def _refresh_locked(config_path: Path, explicit: str | None, directory: Path, changed: list[str] | None = None, acknowledged: dict[str, dict[str, Any]] | None = None, expected_context_hash: str | None = None, reset_candidate_baseline: bool = False, understand_proof: dict[str, Any] | None = None) -> dict[str, Any]:
     try:
         config, repo, facts, relation_facts, candidate, inputs = refresh_inputs(config_path)
     except (OSError, ValueError) as error:
@@ -944,6 +944,11 @@ def _refresh_locked(config_path: Path, explicit: str | None, directory: Path, ch
     old = load(last_path(directory)) if last_path(directory).exists() else None
     if expected_context_hash is not None and (not isinstance(old, dict) or old.get("context_hash") != expected_context_hash):
         return {"protocol_version": PROTOCOL_VERSION, "status": "INVALID", "freshness": "stale", "failures": ["last-good changed while candidate was being reviewed"], "last_good_preserved": bool(old), "next_action": "re-run candidate review"}
+    if understand_proof is not None:
+        from archctx_understand import check_publication
+        try: check_publication(repo, directory, understand_proof)
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            return refresh_retry(directory, old, str(error), ["source_analysis"])
     try:
         observation = candidate_observation(config, repo, old)
     except (OSError, ValueError) as error:
@@ -963,14 +968,24 @@ def _refresh_locked(config_path: Path, explicit: str | None, directory: Path, ch
     except (OSError, RuntimeError, subprocess.TimeoutExpired, ValueError) as error:
         return {"protocol_version": PROTOCOL_VERSION, "status": "INVALID", "freshness": "stale", "failures": [str(error)], "last_good_preserved": last_path(directory).exists(), "next_action": "repair external validator, then refresh"}
     changed_inputs, input_error = final_refresh_check(config_path, inputs)
+    if understand_proof is not None:
+        try: check_publication(repo, directory, understand_proof)
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            changed_inputs.append("source_analysis"); input_error = str(error)
     if changed_inputs:
         cleanup_generation(directory, archify.get("generation"))
         detail = input_error or "source, config, or view changed while refresh validation was running"
         return refresh_retry(directory, old, detail, changed_inputs)
-    decisions = [{key: value[key] for key in ("id", "kind", "rule_id", "decision") if key in value} for value in acknowledged.values()]
+    decisions = [{key: value[key] for key in ("id", "kind", "rule_id", "decision", "bindings", "source_analysis") if key in value} for value in acknowledged.values()]
     record = {"record_version": CONFIG_VERSION, "created_at": datetime.now(timezone.utc).isoformat(), "repo": str(repo), "revision": candidate["revision"], "config_hash": semantic(config), "context_hash": semantic(candidate), "context": candidate, "graph": persistent_graph(graph), "gates": persistent_gates(receipts), "archify": archify, "candidate_baseline": observation["current"], "transaction": {"input_hash": semantic(inputs), "generation_limit": GENERATION_LIMIT}}
     previous_snapshot = snapshot_record(directory, record["context_hash"])
     previous_decisions = previous_snapshot.get("candidate_decisions", []) if isinstance(previous_snapshot, dict) and isinstance(previous_snapshot.get("candidate_decisions"), list) else []
+    if old:
+        before, after = declaration_context(old["context"]), declaration_context(candidate)
+        stable_bindings = {f"{kind}:{relation_id(item) if kind == 'relation' else item['id']}"
+                           for key, kind in (("components", "component"), ("relations", "relation"))
+                           for item in before[key] if item in after[key]}
+        previous_decisions += [d for d in analysis_decisions(directory, old) if d.get("bindings") and set(d["bindings"]) <= stable_bindings]
     merged_decisions = []
     for decision in previous_decisions + decisions:
         if isinstance(decision, dict) and decision not in merged_decisions:
@@ -1015,11 +1030,31 @@ def snapshot(config_path: Path, explicit: str | None) -> dict[str, Any]:
     if not path.exists(): return status(config_path, explicit)
     old = load(path)
     value = status(config_path, explicit, old)
-    return value | {"context": old["context"], "graph": persistent_graph(old.get("graph", {})) if isinstance(old.get("graph"), dict) else {}, "gates": persistent_gates(old.get("gates", [])) if isinstance(old.get("gates"), list) else [], "archify": old.get("archify", {"configured": False})}
+    return value | {"context": old["context"], "graph": persistent_graph(old.get("graph", {})) if isinstance(old.get("graph"), dict) else {}, "gates": persistent_gates(old.get("gates", [])) if isinstance(old.get("gates"), list) else [], "archify": old.get("archify", {"configured": False}), "candidate_decisions": old.get("candidate_decisions", [])}
+
+def analysis_decisions(directory: Path, record: dict[str, Any]) -> list[dict[str, Any]]:
+    decisions = list(record.get("candidate_decisions", []))
+    try:
+        decisions += [d for d in decision_store(directory) if d.get("state") == "final" and d.get("context_hash") == record.get("context_hash")]
+    except (OSError, ValueError): pass
+    return [{k: d[k] for k in ("id", "kind", "decision", "bindings", "source_analysis") if k in d}
+            for d in decisions if d.get("decision") == "accepted" and isinstance(d.get("source_analysis"), dict)]
+
+def accepted_analysis(directory: Path, record: dict[str, Any], binding: str) -> list[dict[str, Any]]:
+    """Historical interpretation provenance; never evidence of current source/runtime freshness."""
+    found = {}
+    for decision in analysis_decisions(directory, record):
+        if binding in decision.get("bindings", []):
+            found[decision["id"]] = {"candidate_id": decision["id"], **decision["source_analysis"], "meaning": "historical accepted analysis provenance; not current source or runtime proof"}
+    return list(found.values())[-CANDIDATE_OUTPUT_LIMIT:]
+
 def canonical(config_path: Path, explicit: str | None, ident: str) -> dict[str, Any]:
     value = snapshot(config_path, explicit)
     for x in value.get("context", {}).get("components", []):
-        if x["id"] == ident: return {k: value[k] for k in ("protocol_version", "status", "revision", "freshness", "confidence", "next_action") if k in value} | {"canonical": x, "warning": value.get("reason")}
+        if x["id"] == ident:
+            directory = state(config_path, explicit)
+            record = {"context_hash": value.get("last_good_context_hash"), "candidate_decisions": value.get("candidate_decisions", [])}
+            return {k: value[k] for k in ("protocol_version", "status", "revision", "freshness", "confidence", "next_action") if k in value} | {"canonical": x, "warning": value.get("reason"), "source_analysis": accepted_analysis(directory, record, f"component:{ident}")}
     return {k: value[k] for k in ("protocol_version", "status", "revision", "freshness", "next_action") if k in value} | {"error": f"unknown component: {ident}", "warning": value.get("reason")}
 
 def search(config_path: Path, explicit: str | None, query: str, limit: int = 3) -> dict[str, Any]:
@@ -1378,6 +1413,8 @@ def bounded_updates(value: dict[str, Any]) -> dict[str, Any]:
     groups = [(result, "overview", "omitted_overview_components"), (result, "candidates", "omitted_candidate_count"), (result, "affected_components", "omitted_affected_components"), (result, "reason", "omitted_reason_count"), (result, "failures", "omitted_failure_count")]
     delta = result.get("accepted_delta", {})
     groups += [(delta, key, f"omitted_{key}") for key, items in delta.items() if isinstance(items, list)]
+    analysis = result.get("source_analysis", {})
+    groups += [(analysis, key, {"candidates": "omitted_candidate_count", "tour": "omitted_tour_steps"}.get(key, f"omitted_{key}")) for key, items in analysis.items() if isinstance(items, list)]
     while len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode()) > UPDATES_BYTES:
         available = [(parent, key, omitted) for parent, key, omitted in groups if parent.get(key)]
         if not available: break
@@ -1385,6 +1422,18 @@ def bounded_updates(value: dict[str, Any]) -> dict[str, Any]:
         parent[key].pop(); parent[omitted] = parent.get(omitted, 0) + 1
         result["more_available"] = True
     return result
+
+
+def analysis_receipt_identity(directory: Path) -> str | None:
+    from archctx_understand import current_path, bounded_raw, SUMMARY_BYTES
+    path = current_path(directory)
+    if not path.exists(): return None
+    try:
+        decisions = candidate_decision_path(directory)
+        return semantic({"receipt": sha(bounded_raw(path, SUMMARY_BYTES)),
+                         "decisions": sha(bounded_raw(decisions, DECISION_BYTES)) if decisions.exists() else None})
+    except (OSError, ValueError) as error:
+        return semantic({"invalid_analysis": str(error)})
 
 
 def updates(config_path: Path, explicit: str | None, since: str | None = None) -> dict[str, Any]:
@@ -1401,6 +1450,9 @@ def updates(config_path: Path, explicit: str | None, since: str | None = None) -
         if previous["selection"] != selection: raise ValueError("updates cursor belongs to another config/state selection")
     observed: dict[str, Any] = {}
     value = status(config_path, explicit, _observed=observed)
+    analysis_identity = analysis_receipt_identity(directory)
+    from archctx_understand import discoveries
+    analysis = discoveries(config_path, explicit) if analysis_identity is not None else {"configured": False}
     old = observed.get("record")
     config, repo = observed.get("config", {}), observed.get("repo")
     candidate = observed.get("candidates", {"state": "not_checked", "candidates": []})
@@ -1413,14 +1465,15 @@ def updates(config_path: Path, explicit: str | None, since: str | None = None) -
         try: return semantic(load(path))
         except (OSError, ValueError): return None
     # Publication/config/view can change during this read. Never consume a mixed observation.
-    if identity(config_path) != (semantic(config) if "config" in observed else None) or identity(last_path(directory)) != (semantic(old) if old else None) or view_hash != observed.get("view_hash"):
-        return {"protocol_version": PROTOCOL_VERSION, "kind": "architecture_updates", "status": "RETRY", "freshness": "stale", "changed": False, "cursor": since, "reason": ["config, accepted context, or view changed during the observation"], "next_action": "retry the relevant read with the same cursor"}
+    if identity(config_path) != (semantic(config) if "config" in observed else None) or identity(last_path(directory)) != (semantic(old) if old else None) or view_hash != observed.get("view_hash") or analysis_receipt_identity(directory) != analysis_identity:
+        return {"protocol_version": PROTOCOL_VERSION, "kind": "architecture_updates", "status": "RETRY", "freshness": "stale", "changed": False, "cursor": since, "reason": ["config, accepted context, view, or source analysis changed during the observation"], "next_action": "retry the relevant read with the same cursor"}
     current = observed.get("current")
     observation_hash = semantic({
         "config": semantic(config), "context": architecture_semantic(current) if current else None,
         "facts": observed.get("facts"), "relation_facts": observed.get("relation_facts"),
         "status": value.get("status"), "reason": value.get("reason", value.get("failures")),
         "candidate_state": candidate.get("state"), "candidate_ids": sorted(x["id"] for x in candidate.get("candidates", [])),
+        "source_analysis": analysis, "analysis_receipt": analysis_identity,
         "blueprint": {key: (old or {}).get("archify", {}).get(key) for key in ("view_sha256", "ir_sha256", "html_sha256")},
     })
     context_hash = old.get("context_hash") if isinstance(old, dict) else None
@@ -1468,6 +1521,7 @@ def updates(config_path: Path, explicit: str | None, since: str | None = None) -
         "changed": True, "accepted_delta": accepted,
         "affected_components": affected_list[:CANDIDATE_OUTPUT_LIMIT], "affected_component_count": len(affected_list), "omitted_affected_components": max(0, len(affected_list) - CANDIDATE_OUTPUT_LIMIT),
         **candidate_fields(candidate),
+        "source_analysis": analysis,
         "view_changed": view_changed, "view_sha256": view_hash,
         "accepted_blueprint": {key: blueprint[key] for key in ("configured", "view_sha256", "ir_sha256", "html_sha256") if key in blueprint} | {"context_hash": context_hash},
     }
@@ -1510,14 +1564,21 @@ def delta(config_path: Path, explicit: str | None, rev: str) -> dict[str, Any]: 
 
 def candidates(config_path: Path, explicit: str | None, limit: int = CANDIDATE_OUTPUT_LIMIT) -> dict[str, Any]:
     config, directory = load(config_path), state(config_path, explicit)
-    if not last_path(directory).exists(): return {"protocol_version": PROTOCOL_VERSION, "status": "MISSING", "freshness": "missing", "next_action": "run refresh to establish canonical and candidate baselines"}
+    analysis_identity = analysis_receipt_identity(directory)
+    from archctx_understand import discoveries
+    analysis = discoveries(config_path, explicit, limit) if analysis_identity is not None else {"configured": False}
+    if analysis_receipt_identity(directory) != analysis_identity:
+        return {"protocol_version": PROTOCOL_VERSION, "status": "RETRY", "freshness": "stale", "next_action": "analysis changed during query; retry"}
+    if not last_path(directory).exists(): return {"protocol_version": PROTOCOL_VERSION, "status": "MISSING", "freshness": "missing", "source_analysis": analysis, "next_action": "run refresh to establish canonical and candidate baselines"}
     old = load(last_path(directory))
     try: observation = candidate_observation(config, repo_for(config_path, config), old)
     except (OSError, ValueError) as error: return {"protocol_version": PROTOCOL_VERSION, "status": "CANDIDATE_CHECK_INCOMPLETE", "freshness": "stale", "last_good_preserved": True, "failures": [str(error)], "next_action": "repair drift rule observation"}
     state_name, found = observation["state"], observation["candidates"]
     status_name = "CANDIDATE_REVIEW_REQUIRED" if found else "CANDIDATE_CHECK_INCOMPLETE" if state_name in ("incomplete", "baseline_missing", "baseline_incomplete", "rules_changed") else "PASS"
     next_action = "inspect candidates, then accept or reject" if found else "query normally" if status_name == "PASS" else "review current source, then run refresh with reset_candidate_baseline" if state_name in ("baseline_missing", "rules_changed") else "run refresh to establish or repair candidate baseline"
-    return {"protocol_version": PROTOCOL_VERSION, "status": status_name, "freshness": "stale" if status_name != "PASS" else "fresh", "base_context_hash": old.get("context_hash"), "last_good_preserved": True, "provenance": "deterministic_rule_derived_source_fact", "next_action": next_action} | candidate_fields(observation, limit)
+    if analysis_receipt_identity(directory) != analysis_identity:
+        return {"protocol_version": PROTOCOL_VERSION, "status": "RETRY", "freshness": "stale", "next_action": "analysis changed during query; retry"}
+    return {"protocol_version": PROTOCOL_VERSION, "status": status_name, "freshness": "stale" if status_name != "PASS" else "fresh", "base_context_hash": old.get("context_hash"), "last_good_preserved": True, "provenance": "deterministic_rule_derived_source_fact", "next_action": next_action, "source_analysis": analysis} | candidate_fields(observation, limit)
 
 def binding_parts(value: str) -> tuple[str, str]:
     if not isinstance(value, str) or ":" not in value: raise ValueError("bind must be component:<id> or relation:<id>")
@@ -1614,6 +1675,9 @@ def submit_candidate_decision(config_path: Path, explicit: str | None, ident: st
 def accept_candidate(config_path: Path, explicit: str | None, ident: str, bindings: list[str]) -> dict[str, Any]:
     directory = state(config_path, explicit)
     try:
+        if ident.startswith("ua:"):
+            from archctx_understand import review
+            return review(config_path, explicit, ident, bindings=bindings)
         with refresh_lock(directory):
             config, _, old, _, candidate_value = candidate_for_review(config_path, explicit, ident)
             summary = {"id": ident, "kind": candidate_value["kind"], "rule_id": candidate_value["rule_id"], "decision": "accepted"}
@@ -1627,6 +1691,9 @@ def reject_candidate(config_path: Path, explicit: str | None, ident: str, reason
     if reason not in allowed: raise ValueError("reject reason must be one of not_architecture, existing_canonical, test_fixture, false_match")
     directory = state(config_path, explicit)
     try:
+        if ident.startswith("ua:"):
+            from archctx_understand import review
+            return review(config_path, explicit, ident, reason=reason)
         with refresh_lock(directory):
             config, _, old, _, candidate_value = candidate_for_review(config_path, explicit, ident)
             if changed_candidate_bindings(config, old, current_context(config_path, config), candidate_value): raise ValueError("candidate has changed canonical evidence; accept it instead of rejecting")

@@ -15,6 +15,7 @@ archctx-to-archify = "archctx_to_archify:main"
 archctx-calm-query = "calm_query:main"
 archctx-blueprint = "archctx_blueprint:main"
 archctx-hook = "archctx_hook:main"
+archctx-understand = "archctx_understand:main"
 
 [tool.setuptools]
-py-modules = ["archctx", "archctx_to_archify", "calm_query", "archctx_blueprint", "archctx_development", "archctx_hook"]
+py-modules = ["archctx", "archctx_to_archify", "calm_query", "archctx_blueprint", "archctx_development", "archctx_hook", "archctx_understand"]

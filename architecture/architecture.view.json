@@ -21,6 +21,15 @@
       "size": [220, 76]
     },
     {
+      "id": "source-analysis",
+      "type": "external",
+      "label": "Understand source analysis",
+      "sublabel": "Captured source / pending findings",
+      "tag": "optional · Agent reviewed",
+      "pos": [650, 70],
+      "size": [220, 76]
+    },
+    {
       "id": "archify-projection",
       "type": "external",
       "label": "Archify projection",
@@ -85,6 +94,9 @@
     }
   ],
   "relations": [
+    {"id": "cli-reads-source-analysis", "label": "investigate", "variant": "dashed"},
+    {"id": "analysis-requests-refresh", "label": "reviewed only", "variant": "dashed"},
+    {"id": "viewer-reads-analysis-source", "label": "captured source", "variant": "dashed"},
     {"id": "viewer-starts-observer", "label": "", "variant": "dashed"},
     {"id": "hook-reads-updates", "label": "updates", "variant": "default"},
     {"id": "cli-requests-refresh", "label": "", "variant": "emphasis"},

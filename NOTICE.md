@@ -13,5 +13,12 @@ Understand Anything: https://github.com/Egonex-AI/Understand-Anything
 The live development map's layered focus and layout-preserving change overlay
 were informed by Understand Anything at
 `5feed1f2ce4f9c368d860f4c0ebc36d98a4693fc` (MIT; copyright 2026 Yuxiang Lin and
-Infinite Universe, Inc.). This is design inspiration only: no source is copied
-or vendored, and no Understand Anything runtime dependency is required.
+Infinite Universe, Inc.). No upstream source is copied or vendored.
+
+The optional `archctx-understand` adapter now also invokes that pinned
+upstream's actual scanner, import resolver, Tree-sitter extraction, graph merge,
+schema and fingerprints. Its file/architecture/tour agent instructions are
+executed by the user's existing authorized coding agent, not by a new model
+service. The separately installed checkout retains upstream's MIT license and
+copyright notice. Normal LAC queries and the viewer do not require its Node
+dependencies or execute a model. See `docs/UNDERSTAND.md` for the exact boundary.
