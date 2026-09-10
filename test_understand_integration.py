@@ -13,6 +13,18 @@ import archctx_understand as understand
 
 
 class UnderstandIntegrationTest(unittest.TestCase):
+    def test_compact_edges_preserve_group_discovery_and_explicit_details(self):
+        self.receipt["candidates"][0]["raw_relations"] = [
+            {"source": "caller", "target": str(i), "type": "calls", "direction": "forward"} for i in range(8)]
+        self.receipt["candidates"][0]["omitted_raw_relations"] = 3
+        self.install_analysis()
+        compact = archctx.updates(self.config, None)["source_analysis"]["candidates"][0]
+        self.assertEqual(len(compact["raw_relations"]), 2)
+        self.assertEqual(compact["omitted_raw_relations"], 9)
+        detailed = understand.discoveries(self.config, None, details=True)["candidates"][0]
+        self.assertEqual(len(detailed["raw_relations"]), 8)
+        self.assertEqual(detailed["omitted_raw_relations"], 3)
+
     def test_accept_new_source_analysis_refreshes_evidence_without_new_architecture(self):
         self.source.write_text("class Store: pass\n# actual implementation edit\n", encoding="utf-8")
         self.receipt["source_hashes"]["source.py"] = archctx.sha(self.source.read_bytes())

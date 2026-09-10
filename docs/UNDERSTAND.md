@@ -78,6 +78,9 @@ discoveries and LKG; absent symbols/files are not deletion authorization.
 
 Existing `candidates` and `updates` return independent `source_analysis`.
 `python archctx_understand.py ... show` returns bounded investigation details.
+Default responses retain two raw edge witnesses per group; use `show --details`
+for all retained witnesses and explicit omission counts. This keeps group
+discovery useful inside the shared 16 KiB update budget.
 An evidence overlap identifies where to look, not who canonically owns it.
 Read actual source, preserve existing component IDs, and edit affected shared
 config/view yourself. Leave uncertainty pending or use the existing rejection

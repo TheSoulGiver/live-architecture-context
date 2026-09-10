@@ -421,7 +421,7 @@ def import_graph(config_path: Path, explicit: str | None, input_path: Path) -> d
     return discoveries(config_path, explicit)
 
 
-def discoveries(config_path: Path, explicit: str | None, limit: int = 8) -> dict[str, Any]:
+def discoveries(config_path: Path, explicit: str | None, limit: int = 8, details: bool = False) -> dict[str, Any]:
     directory = archctx.state(config_path, explicit)
     path = current_path(directory)
     if not path.exists():
@@ -437,9 +437,14 @@ def discoveries(config_path: Path, explicit: str | None, limit: int = 8) -> dict
         for candidate in receipt["candidates"]:
             matches = archctx.owners(config, candidate["files"])
             decision = completed.get(candidate["id"])
-            findings.append({**candidate, "related_components": matches,
+            finding = {**candidate, "related_components": matches,
                              "match": "evidence_overlap" if matches else "unmapped",
-                             "review_state": decision.get("decision") if decision else "unreviewed"})
+                             "review_state": decision.get("decision") if decision else "unreviewed"}
+            if not details:
+                edges = candidate.get("raw_relations", [])
+                finding["raw_relations"] = edges[:2]
+                finding["omitted_raw_relations"] = candidate.get("omitted_raw_relations", 0) + max(0, len(edges) - 2)
+            findings.append(finding)
         limit = len(findings) if limit == 0 else max(0, min(limit, 64))
         return {"configured": True, "status": "STALE" if changed else "FRESH",
                 "analysis_id": receipt["analysis_id"], "graph_sha256": receipt["graph_sha256"],
@@ -451,6 +456,7 @@ def discoveries(config_path: Path, explicit: str | None, limit: int = 8) -> dict
                 "omitted_candidate_count": max(0, len(findings) - limit),
                 "tour": receipt["tour"][:8], "omitted_tour_steps": max(0, len(receipt["tour"]) - 8),
                 "blocking": False,
+                "detail_query": "archctx-understand with the same config/state: show --details",
                 "limitations": ["Analysis is an explicit partial source scope, not accepted architecture or runtime proof.",
                                 "Raw imports/calls/semantic edges retain provider meaning; file/layer overlap is not canonical ownership.",
                                 "Provider coverage can omit dynamic imports, embedded languages and cross-batch calls; absent edges are not proof of no dependency.",
@@ -562,7 +568,8 @@ def main():
     command.add_argument("--input", type=Path, required=True)
     command = commands.add_parser("finish", help="assemble real upstream batch/layer/tour results and fingerprints")
     command.add_argument("--input", type=Path, required=True)
-    commands.add_parser("show", help="compact pending source analysis; no models or render")
+    command = commands.add_parser("show", help="compact pending source analysis; no models or render")
+    command.add_argument("--details", action="store_true", help="include the retained raw edge witnesses")
     args = parser.parse_args()
     try:
         config_path = Path(args.config).resolve()
@@ -573,7 +580,7 @@ def main():
         elif args.command == "finish":
             result = finish(config_path, args.state_dir, args.input)
         else:
-            result = discoveries(config_path, args.state_dir)
+            result = discoveries(config_path, args.state_dir, details=args.details)
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
         archctx.dump({"status": "INVALID", "reason": str(error), "last_good_preserved": True})
         raise SystemExit(1)
