@@ -28,7 +28,8 @@ class AnalysisInventoryTest(unittest.TestCase):
             config_before = (repo / ".git/config").read_bytes()
             expected = inputs.inventory(repo)
             with patch.dict(os.environ, {"GIT_TEST_ASSUME_DIFFERENT_OWNER": "1"}):
-                blocked = subprocess.run(["git", "-C", str(repo), "ls-files"], capture_output=True)
+                # CI may already trust a parent/wildcard; isolate the negative oracle.
+                blocked = subprocess.run(["git", "-c", "safe.directory=", "-C", str(repo), "ls-files"], capture_output=True)
                 self.assertNotEqual(blocked.returncode, 0)
                 self.assertIn(b"dubious ownership", blocked.stderr)
                 actual = inputs.inventory(repo)
