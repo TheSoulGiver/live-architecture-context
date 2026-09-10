@@ -16,13 +16,14 @@
     {
       "id": "archctx-cli",
       "name": "Archctx CLI and MCP",
-      "purpose": "Canonical source-evidence validation and compact CLI/MCP queries, including caller-cursor deltas for the next relevant development read.",
+      "purpose": "Canonical source-evidence validation and compact CLI/MCP queries, including caller-cursor deltas and the shared, version-separated declared change scope consumed by the viewer.",
       "truth_sources": ["archctx.py", "pyproject.toml"],
       "code_symbol": "main",
       "tags": ["canonical", "agent-protocol", "source-evidence"],
       "evidence": [
         {"path": "archctx.py", "contains": "def mcp_tools() -> list[dict[str, Any]]:"},
         {"path": "archctx.py", "contains": "def updates(config_path: Path"},
+        {"path": "archctx.py", "contains": "def change_scope(record: dict[str, Any]"},
         {"path": "pyproject.toml", "contains": "archctx = \"archctx:main\""}
       ]
     },
@@ -91,7 +92,7 @@
     {
       "id": "development-observer",
       "name": "Development observation",
-      "purpose": "Caches bounded observations from the selected worktree and caller-cursor updates. Ordinary saves change the overlay; settled shared definitions can request existing validation/publication. It owns no canonical architecture or event ledger.",
+      "purpose": "Caches bounded worktree observations and caller-cursor updates, reusing the core declared change scope. Ordinary saves change the overlay; settled definitions request existing validation/publication. It owns no canonical architecture or event ledger.",
       "truth_sources": ["archctx_development.py"],
       "code_symbol": "DevelopmentObserver",
       "tags": ["development-overlay", "bounded", "local-only"],
@@ -133,6 +134,7 @@
       "from": "blueprint-viewer",
       "to": "development-observer",
       "kind": "owns-local-observation-lifecycle",
+      "dependency": "from_to",
       "evidence": [
         {"path": "archctx_blueprint.py", "contains": "observer = DevelopmentObserver(path, args.state_dir, live=args.live).start()"},
         {"path": "archctx_blueprint.py", "contains": "development, record = observer.bundle()"}
@@ -143,8 +145,10 @@
       "from": "development-observer",
       "to": "archctx-cli",
       "kind": "reads-caller-cursor-updates",
+      "dependency": "from_to",
       "evidence": [
-        {"path": "archctx_development.py", "contains": "packet = archctx.updates(self.config_path, self.explicit, self._cursor)"}
+        {"path": "archctx_development.py", "contains": "packet = archctx.updates(self.config_path, self.explicit, self._cursor)"},
+        {"path": "archctx_development.py", "contains": "item[\"change_scope\"] = archctx.change_scope(record, config,"}
       ]
     },
     {
@@ -152,6 +156,7 @@
       "from": "development-observer",
       "to": "refresh-transaction",
       "kind": "requests-existing-publication-after-definition-settles",
+      "dependency": "from_to",
       "evidence": [
         {"path": "archctx_development.py", "contains": "result = archctx.refresh(self.config_path, self.explicit, expected_context_hash=record.get(\"context_hash\")"}
       ]
@@ -161,6 +166,7 @@
       "from": "codex-skills",
       "to": "archctx-cli",
       "kind": "reads-advisory-updates",
+      "dependency": "from_to",
       "evidence": [
         {"path": "archctx_hook.py", "contains": "archctx.updates(config, explicit, since)"}
       ]
@@ -170,6 +176,7 @@
       "from": "codex-skills",
       "to": "archctx-cli",
       "kind": "guides-to",
+      "dependency": "none",
       "evidence": [
         {"path": "plugins/live-architecture-context/skills/architecture-context/SKILL.md", "contains": "run `archctx status`"}
       ]
@@ -179,6 +186,7 @@
       "from": "archctx-cli",
       "to": "refresh-transaction",
       "kind": "requests-refresh",
+      "dependency": "from_to",
       "evidence": [
         {"path": "archctx.py", "contains": "if name == \"architecture_refresh\":"}
       ]
@@ -188,8 +196,9 @@
       "from": "candidate-review",
       "to": "refresh-transaction",
       "kind": "blocks-promotion-until-reviewed",
+      "dependency": "to_from",
       "evidence": [
-        {"path": "archctx.py", "contains": "CANDIDATE_REVIEW_REQUIRED"}
+        {"path": "archctx.py", "contains": "observation = candidate_observation(config, repo, old)"}
       ]
     },
     {
@@ -197,6 +206,7 @@
       "from": "refresh-transaction",
       "to": "last-known-good-state",
       "kind": "promotes-last-good",
+      "dependency": "from_to",
       "evidence": [
         {"path": "archctx.py", "contains": "atomic(last_path(directory), record)"}
       ]
@@ -206,6 +216,7 @@
       "from": "refresh-transaction",
       "to": "archify-projection",
       "kind": "validates-before-promotion",
+      "dependency": "from_to",
       "evidence": [
         {"path": "archctx.py", "contains": "archify_projection(config, repo, directory"}
       ]
@@ -224,6 +235,7 @@
       "from": "last-known-good-state",
       "to": "archctx-cli",
       "kind": "serves-accepted-context",
+      "dependency": "to_from",
       "evidence": [
         {"path": "archctx.py", "contains": "return value | {\"context\": old[\"context\"]"}
       ]

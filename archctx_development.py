@@ -251,6 +251,10 @@ class DevelopmentObserver:
                             "sha256": current.get(path), "observation": "manifested_content" if path in current else "metadata_only",
                             "evidence_changed": bool(changed_evidence.intersection(paths)), "covered": bool(direct)})
         changes.sort(key=lambda item: (not item["covered"], item["path"]))
+        for item in changes[:CHANGE_LIMIT]:
+            item["change_scope"] = archctx.change_scope(record, config, [item["path"]] + ([item["old_path"]] if item.get("old_path") else []),
+                                                       str(self.config_path.relative_to(self.repo)).replace("\\", "/") if self.config_path.is_relative_to(self.repo) else None,
+                                                       packet.get("freshness", "unknown"))
         self._refresh_paths = sorted({path for item in changes if item["covered"] for path in (item["path"], item.get("old_path")) if path})
         working = archctx.context(config, record.get("revision", "unknown"), {c["id"]: c["evidence"] for c in config["components"]},
                                   [r.get("evidence", []) for r in config.get("relations", [])])
@@ -290,6 +294,7 @@ class DevelopmentObserver:
                         "counts": {"changed": len(changes), "unmapped": sum(not c["covered"] for c in changes), "omitted": 0},
                         "limitations": [git_error] if git_error else [], "watched_files": len(current),
                         "live": self.live, "metadata_stat_limit": CHANGE_LIMIT,
+                        "legacy_semantics": {"components": "union of working/accepted evidence owners", "impacted_components": "all-kind incoming authored reach in accepted graph, minus legacy direct IDs; use change_scope instead"},
                         "omitted_dirty_metadata_stats": max(0, len(dirty) - CHANGE_LIMIT),
                         "auto_publish": "initial reconstruction, then settled shared config/view only" if self.live else "disabled; observation only"}
 
@@ -375,6 +380,10 @@ class DevelopmentObserver:
 
     def _failure(self, error):
         with self._lock:
+            for change in self._payload.get("changes", []):
+                if scope := change.get("change_scope"):
+                    scope.update(freshness="stale", observation_state="retained_previous_observation", working_config_hash=None,
+                                 working={"error": "Current inputs unavailable; previous observation retained"})
             if self._refresh.get("status") == "REFRESHING":
                 self._refresh = {**self._refresh, "status": "INVALID", "reasons": [str(error)[:500]], "last_good_preserved": bool(self._record)}
             identity = archctx.semantic({"error": str(error), "accepted": self._record.get("context_hash")})

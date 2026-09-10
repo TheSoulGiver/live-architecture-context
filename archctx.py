@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 CONFIG_VERSION, PROTOCOL_VERSION, SERVER_VERSION = 1, "1.0", "0.1.7"
+COMPONENT_FIELDS = ("id", "name", "purpose", "truth_sources", "tags", "code_symbol")
 # Capture core source identity at import, not after a running MCP's file is replaced.
 CORE_SOURCE_PATH = Path(__file__).resolve()
 try:
@@ -289,6 +290,8 @@ def components(config: dict[str, Any]) -> list[dict[str, Any]]:
     for relation in config.get("relations", []):
         if not isinstance(relation, dict) or relation.get("from") not in known or relation.get("to") not in known: raise ValueError("relations must use declared component ids")
         if not isinstance(relation.get("kind"), str) or not relation["kind"]: raise ValueError("every relation needs explicit kind")
+        if "dependency" in relation and relation["dependency"] not in ("from_to", "to_from", "none"):
+            raise ValueError("relation.dependency must be from_to, to_from, or none")
         if "evidence" in relation and (not isinstance(relation["evidence"], list) or not relation["evidence"]): raise ValueError("relation evidence must be a non-empty array when supplied")
         ident = relation_id(relation)
         if ident in relation_ids: raise ValueError(f"relation ids must be unique: {ident}")
@@ -352,7 +355,7 @@ def context(config: dict[str, Any], rev: str, facts: dict[str, list[dict[str, An
         relations.append(value)
     result: dict[str, Any] = {"schema_version": CONFIG_VERSION, "revision": rev, "components": [], "relations": relations}
     for x in components(config):
-        result["components"].append({k: x[k] for k in ("id", "name", "purpose", "truth_sources", "tags", "code_symbol") if k in x} | {"evidence": facts[x["id"]], "confidence": "source_evidence"})
+        result["components"].append({k: x[k] for k in COMPONENT_FIELDS if k in x} | {"evidence": facts[x["id"]], "confidence": "source_evidence"})
     if value := coverage(config):
         result["coverage"] = value
     return result
@@ -1186,7 +1189,7 @@ def trace(config_path: Path, explicit: str | None, ident: str, direction: str, i
 def paths_for(repo: Path, base: str | None, files: list[str] | None) -> list[str]:
     if files: return sorted({x.replace("\\", "/") for x in files})
     if not base: raise ValueError("impact needs --base or --files")
-    result = git(repo, "diff", "--name-only", f"{base}..HEAD")
+    result = git(repo, "diff", "--no-renames", "--name-only", f"{base}..HEAD")  # Keep both old/new names as scope inputs.
     if result is None: raise ValueError(f"cannot diff base {base}")
     return [x.replace("\\", "/") for x in result.splitlines() if x]
 def owners(config: dict[str, Any], paths: list[str]) -> list[str]:
@@ -1198,11 +1201,131 @@ def owners(config: dict[str, Any], paths: list[str]) -> list[str]:
     for relation in config.get("relations", []):
         if matches(relation): affected.update((relation["from"], relation["to"]))
     return [x["id"] for x in declared if x["id"] in affected]
-def impact(config_path: Path, explicit: str | None, base: str | None, files: list[str] | None) -> dict[str, Any]:
-    config = load(config_path); changed = paths_for(repo_for(config_path, config), base, files); direct = owners(config, changed); retained = snapshot(config_path, explicit); ctx = retained.get("context", {})
+def declaration_context(value: dict[str, Any]) -> dict[str, Any]:
+    """Compare authored inputs without treating validated evidence locations as edits."""
+    result = {}
+    for key in ("components", "relations"):
+        result[key] = [{k: ([{field: e[field] for field in ("path", "contains") if field in e} for e in v] if k == "evidence" else v)
+                        for k, v in item.items() if k not in ("confidence", "provenance") and (key != "components" or k in (*COMPONENT_FIELDS, "evidence"))}
+                       for item in value.get(key, [])]
+    return result
+
+
+def dependency_direction(relation: dict[str, Any]) -> tuple[str, str]:
+    if "dependency" in relation:
+        return relation["dependency"], "explicit"
+    if relation["kind"] in ("calls", "uses", "depends-on"):
+        return "from_to", "kind_default"
+    return "unclassified", "unclassified"
+
+
+def change_scope(record: dict[str, Any], config: dict[str, Any] | None, paths: list[str],
+                 config_path_relative: str | None = None, freshness: str = "unknown", details: bool = False) -> dict[str, Any]:
+    """One pure, version-separated review scope for Agent queries and saved-file overlays."""
+    old = record.get("context", {"components": [], "relations": []})
+    paths = sorted({p.replace("\\", "/") for p in paths})
+    selected_config = config_path_relative in paths
+    invalid = None
+    try:
+        if config is None: raise ValueError("working config is unavailable")
+        components(config)
+        definition_changed = declaration_context(old) != declaration_context(config)
+    except (ValueError, KeyError, TypeError) as error:
+        invalid, definition_changed = str(error)[:500], True
+    seeds = {"accepted": set(), "working": set()}
+    if selected_config and definition_changed and not invalid:
+        difference = record_diff({"context": declaration_context(old)}, {"context": declaration_context(config)})
+        affected_relations = set(difference["changed_relations"] + difference["evidence_changed_relations"])
+        affected_relations.update(relation_id(r) for r in difference["added_relations"] + difference["removed_relations"])
+        for name, ctx in (("accepted", old), ("working", config)):
+            ids = {c["id"] for c in ctx.get("components", [])}
+            seeds[name].update(ids.intersection(difference["changed_components"] + difference["evidence_changed_components"]))
+            for relation in ctx.get("relations", []):
+                if relation_id(relation) in affected_relations:
+                    seeds[name].update((relation["from"], relation["to"]))
+
+    def scope(ctx, name):
+        declared = {"version": CONFIG_VERSION, **ctx}
+        associations = {}
+        for path in paths:
+            for ident in owners(declared, [path]):
+                associations.setdefault(ident, []).append(path)
+        direct = set(associations) | seeds[name]
+        edges = []
+        for relation in ctx.get("relations", []):
+            direction, _ = dependency_direction(relation)
+            if direction in ("from_to", "to_from"):
+                source, target = (relation["from"], relation["to"]) if direction == "from_to" else (relation["to"], relation["from"])
+                edges.append({"from": source, "to": target})
+        graph = {"relations": edges}
+        downstream = set().union(*(set(authored(graph, ident, "downstream")) for ident in direct)) if direct else set()
+        upstream = set().union(*(set(authored(graph, ident, "upstream")) for ident in direct)) if direct else set()
+        witnesses = []
+        for relation in sorted(ctx.get("relations", []), key=relation_id):
+            direction, semantics = dependency_direction(relation)
+            source, target = (relation["to"], relation["from"]) if direction == "to_from" else (relation["from"], relation["to"])
+            if not ({source, target} & direct or direction in ("none", "unclassified") and {source, target} & (downstream | upstream) or direction in ("from_to", "to_from") and
+                    ({source, target} <= downstream or {source, target} <= upstream)):
+                continue
+            evidence_items = relation.get("evidence", [])
+            witnesses.append({"id": relation_id(relation), "from": relation["from"], "to": relation["to"], "kind": relation["kind"],
+                              "dependency": direction, "semantics": semantics,
+                              "evidence_state": ("accepted_source_evidence" if name == "accepted" else "working_anchor_unvalidated") if evidence_items else "authored_only",
+                              "evidence": evidence_items if details else [{k: e[k] for k in ("path", "line", "sha256") if k in e} for e in evidence_items[:1]],
+                              "omitted_evidence": 0 if details else max(0, len(evidence_items) - 1)})
+        return {"direct_components": sorted(direct), "dependencies": sorted(downstream - direct), "dependents": sorted(upstream - direct),
+                "relations": witnesses, "associations": [{"component": k, "paths": v} for k, v in sorted(associations.items())],
+                "config_seeds": sorted(seeds[name]), "uncovered_files": [p for p in paths if p != config_path_relative and not any(p in v for v in associations.values())], "omitted": {}}
+
+    value = {"contract": "declared_change_scope/v1", "proof": "declared_review_scope_not_runtime_impact",
+             "accepted_context_hash": record.get("context_hash"), "accepted_revision": record.get("revision"),
+             "working_config_hash": semantic(config) if config else None, "freshness": "stale" if invalid else freshness,
+             "accepted": scope(old, "accepted") if old.get("components") else None,
+             "working": {"error": invalid} if invalid else scope(config, "working") if definition_changed else None,
+             "working_provenance": "unaccepted_definition" if definition_changed else "same_declarations_as_accepted",
+             "limitations": ["Declared dependency directions define checks, not runtime impact. Other kinds retain raw direction and do not propagate.",
+                             "Accepted evidence belongs to its context; recheck stale evidence. Working anchors are unvalidated. Uncovered files are unknown."],
+             "detail_query": "impact with the same files and --details (MCP details:true); compare context/config hashes"}
+    if not details:
+        groups = [(s, key) for s in (value["accepted"], value["working"]) if s and "omitted" in s
+                  for key in ("direct_components", "dependencies", "dependents", "relations", "associations", "config_seeds", "uncovered_files")]
+        for parent, key in groups:
+            limit = 8 if key == "relations" else 12
+            if len(parent[key]) > limit:
+                parent["omitted"][key] = len(parent[key]) - limit
+                parent[key] = parent[key][:limit]
+        while len(json.dumps(value, ensure_ascii=False).encode()) > 8 * 1024:
+            available = [(parent, key) for parent, key in groups if parent[key]]
+            if not available: break
+            parent, key = max(available, key=lambda pair: len(json.dumps(pair[0][pair[1]], ensure_ascii=False).encode()))
+            parent[key].pop()
+            parent["omitted"][key] = parent["omitted"].get(key, 0) + 1
+    return value
+
+
+def impact(config_path: Path, explicit: str | None, base: str | None, files: list[str] | None, details: bool = False) -> dict[str, Any]:
+    if not isinstance(details, bool): raise ValueError("details must be a boolean")
+    observed: dict[str, Any] = {}
+    retained = status(config_path, explicit, _observed=observed)
+    config, record, repo = observed.get("config"), observed.get("record") or {}, observed.get("repo")
+    changed = paths_for(repo, base, files) if repo else paths_for(Path(), None, files)
+    relative = os.path.relpath(config_path, repo).replace("\\", "/") if repo else None
+    scopes = change_scope(record, config, changed, relative, retained.get("freshness", "unknown"), details)
+    # Preserve the old fields' direction/selection, but do not use them as the shared contract.
+    direct = owners(config, changed) if config and not (scopes.get("working") or {}).get("error") else []
+    ctx = record.get("context", {})
     reach = sorted(set().union(*(set(authored(ctx, x, "downstream")) for x in direct))) if direct else []
     next_action = "inspect affected evidence and test" if retained.get("status") == "FRESH" else "refresh" if direct else "no canonical evidence owner; no architecture refresh needed"
-    return {"protocol_version": PROTOCOL_VERSION, "kind": "authored_architecture_impact", "provenance": "source_evidence_plus_authored_architecture", "base": base, "changed_files": changed, "direct_components": direct, "reachable_components": reach, "code_graph": {"available": isinstance(config.get("code_graph"), dict), "note": "Code edges remain separate provider facts; use trace --code."}, "freshness": retained.get("freshness"), "next_action": next_action}
+    try:
+        current_record = load(last_path(state(config_path, explicit))) if last_path(state(config_path, explicit)).exists() else {}
+        moved = current_record != record or config is not None and load(config_path) != config
+    except (ValueError, OSError):
+        moved = True
+    if moved:
+        return {"protocol_version": PROTOCOL_VERSION, "status": "RETRY", "freshness": "stale", "reason": "config or accepted context changed during impact; retry the read"}
+    return {"protocol_version": PROTOCOL_VERSION, "kind": "authored_architecture_impact", "provenance": "source_evidence_plus_authored_architecture", "base": base, "changed_files": changed, "direct_components": direct, "reachable_components": reach,
+            "legacy_semantics": {"direct_components": "working evidence owners only", "reachable_components": "all-kind outgoing authored reach from legacy direct IDs in the accepted graph; not dependency or runtime impact"},
+            "change_scope": scopes, "code_graph": {"available": isinstance((config or {}).get("code_graph"), dict), "note": "Code edges remain separate provider facts; use trace --code."}, "freshness": retained.get("freshness"), "status": retained.get("status"), "warning": retained.get("reason"), "next_action": next_action}
 
 def snapshot_files(directory: Path) -> list[Path]:
     root = directory / "snapshots"
@@ -1642,7 +1765,7 @@ def mcp_tools() -> list[dict[str, Any]]:
         {"name": "architecture_search", "description": "Match the current task to compact canonical components; defaults to three results and reports omissions.", "inputSchema": search_input},
         {"name": "architecture_evidence", "description": "Source evidence for one component.", "inputSchema": ident},
         {"name": "architecture_trace", "description": "Authored relations; optional code graph stays separate.", "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}, "direction": {"enum": ["upstream", "downstream"]}, "include_code_edges": {"type": "boolean"}}, "required": ["id"]}},
-        {"name": "architecture_impact", "description": "Changed files to canonical ownership.", "inputSchema": {"type": "object", "properties": {"base": {"type": "string"}, "files": {"type": "array", "items": {"type": "string"}}}}},
+        {"name": "architecture_impact", "description": "Shared declared change_scope: direct components, dependencies, dependents, typed relation evidence; accepted and unaccepted working definitions stay separate. Not runtime impact. details expands omissions; legacy reachable_components is all-kind outgoing reach.", "inputSchema": {"type": "object", "properties": {"base": {"type": "string"}, "files": {"type": "array", "items": {"type": "string"}}, "details": {"type": "boolean"}}}},
         {"name": "architecture_changed_since", "description": "Retained architecture delta by revision.", "inputSchema": {"type": "object", "properties": {"revision": {"type": "string"}}, "required": ["revision"]}},
         {"name": "architecture_drift", "description": "Configured high-value historical Git-diff candidates only.", "inputSchema": {"type": "object", "properties": {"base": {"type": "string"}}, "required": ["base"]}},
         {"name": "architecture_stale", "description": "Alias for freshness status, including optional read-only diagnose.", "inputSchema": status_input},
@@ -1674,7 +1797,7 @@ def mcp_value(config_path: Path, explicit: str | None, name: str, args: dict[str
     if name == "architecture_evidence":
         value = canonical(config_path, explicit, str(args.get("id", ""))); return {k: value[k] for k in value if k != "canonical"} | {"evidence": value.get("canonical", {}).get("evidence", [])}
     if name == "architecture_trace": return trace(config_path, explicit, str(args.get("id", "")), str(args.get("direction", "downstream")), bool(args.get("include_code_edges")))
-    if name == "architecture_impact": return impact(config_path, explicit, args.get("base"), args.get("files"))
+    if name == "architecture_impact": return impact(config_path, explicit, args.get("base"), args.get("files"), args.get("details", False))
     if name == "architecture_changed_since": return changed_since(config_path, explicit, str(args.get("revision", "")))
     if name == "architecture_drift": return drift(config_path, str(args.get("base", "")))
     return {"status": "ERROR", "error": f"unknown tool: {name}"}
@@ -1710,7 +1833,7 @@ def main() -> int:
     x = sub.add_parser("updates"); x.add_argument("--since")
     x = sub.add_parser("canonical"); x.add_argument("id", nargs="?"); x.add_argument("--component"); x = sub.add_parser("search"); x.add_argument("query", nargs="?"); x.add_argument("--query", dest="query_flag"); x.add_argument("--limit", type=int, default=3); x = sub.add_parser("evidence"); x.add_argument("id", nargs="?"); x.add_argument("--component")
     x = sub.add_parser("trace"); x.add_argument("id", nargs="?"); x.add_argument("--from", dest="source"); x.add_argument("--to", dest="target"); x.add_argument("--direction", choices=("upstream", "downstream"), default="downstream"); x.add_argument("--code", action="store_true")
-    x = sub.add_parser("impact"); x.add_argument("--base"); x.add_argument("--files", nargs="*")
+    x = sub.add_parser("impact"); x.add_argument("--base"); x.add_argument("--files", nargs="*"); x.add_argument("--details", action="store_true", help="expand declared scope/evidence omissions; not runtime impact")
     x = sub.add_parser("changed-since"); x.add_argument("--revision", required=True); x = sub.add_parser("delta"); x.add_argument("--revision", required=True); x = sub.add_parser("drift"); x.add_argument("--base", required=True)
     x = sub.add_parser("accept"); x.add_argument("id"); x.add_argument("--bind", action="append", required=True)
     x = sub.add_parser("reject"); x.add_argument("id"); x.add_argument("--reason", required=True)
@@ -1748,7 +1871,7 @@ def main() -> int:
         install_target = target if target and target.is_absolute() else (repo_for(config_path, load(config_path)) / target) if target else None
         if args.command == "install-codex":
             dump(install_codex(config_path, install_target.resolve(), args.check, args.cli_command, args.state_dir)); return 0
-        actions = {"status": lambda: status(config_path, args.state_dir), "refresh": lambda: refresh(config_path, args.state_dir, reset_candidate_baseline=args.reset_candidate_baseline), "snapshot": lambda: snapshot(config_path, args.state_dir), "candidates": lambda: candidates(config_path, args.state_dir, args.limit), "accept": lambda: accept_candidate(config_path, args.state_dir, args.id, args.bind), "reject": lambda: reject_candidate(config_path, args.state_dir, args.id, args.reason), "canonical": lambda: canonical(config_path, args.state_dir, args.component or args.id), "search": lambda: search(config_path, args.state_dir, args.query_flag or args.query, args.limit), "evidence": lambda: mcp_value(config_path, args.state_dir, "architecture_evidence", {"id": args.component or args.id}), "trace": lambda: trace(config_path, args.state_dir, args.source or args.id, args.direction, args.code, args.target), "impact": lambda: impact(config_path, args.state_dir, args.base, args.files), "changed-since": lambda: changed_since(config_path, args.state_dir, args.revision), "delta": lambda: delta(config_path, args.state_dir, args.revision), "drift": lambda: drift(config_path, args.base), "uninstall-codex": lambda: uninstall_codex(install_target.resolve(), args.check)}
+        actions = {"status": lambda: status(config_path, args.state_dir), "refresh": lambda: refresh(config_path, args.state_dir, reset_candidate_baseline=args.reset_candidate_baseline), "snapshot": lambda: snapshot(config_path, args.state_dir), "candidates": lambda: candidates(config_path, args.state_dir, args.limit), "accept": lambda: accept_candidate(config_path, args.state_dir, args.id, args.bind), "reject": lambda: reject_candidate(config_path, args.state_dir, args.id, args.reason), "canonical": lambda: canonical(config_path, args.state_dir, args.component or args.id), "search": lambda: search(config_path, args.state_dir, args.query_flag or args.query, args.limit), "evidence": lambda: mcp_value(config_path, args.state_dir, "architecture_evidence", {"id": args.component or args.id}), "trace": lambda: trace(config_path, args.state_dir, args.source or args.id, args.direction, args.code, args.target), "impact": lambda: impact(config_path, args.state_dir, args.base, args.files, args.details), "changed-since": lambda: changed_since(config_path, args.state_dir, args.revision), "delta": lambda: delta(config_path, args.state_dir, args.revision), "drift": lambda: drift(config_path, args.base), "uninstall-codex": lambda: uninstall_codex(install_target.resolve(), args.check)}
         started = time.monotonic(); value = actions[args.command]()
         elapsed = int((time.monotonic() - started) * 1000)
         if args.command not in ("status", "install-codex", "uninstall-codex"): telemetry(state(config_path, args.state_dir), args.command, value, elapsed)
