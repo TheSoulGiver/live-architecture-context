@@ -184,17 +184,19 @@ const context=vm.createContext({TextEncoder,document:{getElementById:get,createE
  fetch:async()=>({status:200,ok:true,json:async()=>next,headers:{get:()=>next.development.observation_id}})});
 const read=s=>vm.runInContext(s,context);
 (async()=>{vm.runInContext(require('node:fs').readFileSync(0,'utf8'),context);await new Promise(setImmediate);message({source:read('loading').contentWindow,data:{kind:'lac-ready'}});
- assert.equal(get('analysis').hidden,true);const frame=read('picture');
+ assert.equal(get('analysis').hidden,false);assert.ok(text(get('analysis')).includes('尚未进行源码理解'));const frame=read('picture');
  next=JSON.parse(JSON.stringify(next));next.development.observation_id='two';next.development.updates.source_analysis={configured:true,status:'FRESH',analysis_id:'a'.repeat(64),provider:{name:'understand-anything',revision:'pin'},source_files:['scope.py'],
- candidates:[{title:'<img src=x onerror=bad()>',summary:'<script>bad()</script>',review_state:'unreviewed',related_components:['owner'],evidence:[{path:'scope.py',line:2,sha256:'b'.repeat(64)}],raw_relations:[{source:'file:a',target:'file:b',type:'imports',direction:'backward'}]}],
+ candidates:[{id:'ua:fixture',content_revision:'content-1',evidence_revision:'evidence-1',title:'<img src=x onerror=bad()>',summary:'<script>bad()</script>',review_state:'unreviewed',related_components:['owner'],evidence:[{path:'scope.py',line:2,sha256:'b'.repeat(64)}],raw_relations:[{source:'file:a',target:'file:b',type:'imports',direction:'backward'}]}],
  tour:Array.from({length:7},(_,i)=>({order:i+1,title:'step-'+i,description:'scoped reading'}))};
  await context.poll();assert.equal(read('picture'),frame);assert.equal(read('data.components.length'),1);assert.equal(get('analysis').hidden,false);
- const body=text(get('analysis'));for(const expected of ['未接受调查','不是正式架构','<img src=x onerror=bad()>','<script>bad()</script>','owner','imports','direction=backward','非 canonical 流程','step-6'])assert.ok(body.includes(expected),expected);
+ const body=text(get('analysis'));for(const expected of ['已发现 · 待复审','尚未确认归属','不是 canonical 组件','<img src=x onerror=bad()>','<script>bad()</script>','owner','imports','direction=backward'])assert.ok(body.includes(expected),expected);
  const links=e=>e.children.flatMap(v=>[...(v.tag==='a'?[v]:[]),...links(v)]);assert.ok(links(get('analysis'))[0].href.includes('/analysis-source?analysis='+'a'.repeat(64)));
  assert.deepEqual(Array.from(frame.contentWindow.messages.at(-1).direct),[]);
+ assert.equal(read('data.relations.length'),0);get('flow-view').onclick();assert.equal(get('flows').hidden,false);assert.equal(get('analysis').hidden,true);
+ for(const expected of ['已发现的源码导览 · 待核对流程','step-6'])assert.ok(text(get('flows')).includes(expected),expected);get('now').onclick();assert.equal(read('picture'),frame);
  next.development.observation_id='three';next.development.updates.source_analysis.status='STALE';next.development.updates.source_analysis.changed_files=['scope.py'];await context.poll();assert.ok(text(get('analysis')).includes('STALE'));assert.ok(text(get('analysis')).includes('分析后已变化：scope.py'));assert.equal(read('data.context_hash'),'accepted');
  next.development.observation_id='four';next.development.updates.source_analysis={configured:true,status:'INVALID',reason:'bad receipt',candidates:[]};await context.poll();assert.ok(text(get('analysis')).includes('INVALID'));assert.equal(read('picture'),frame);
- next.development.updates.source_analysis={configured:false};await context.poll();assert.equal(get('analysis').hidden,true);console.log('PASS: analysis is a separate text-only investigation; accepted map/navigation preserved');
+ next.development.updates.source_analysis={configured:false};await context.poll();assert.equal(get('analysis').hidden,false);assert.ok(text(get('analysis')).includes('尚未进行源码理解'));assert.equal(read('data.components.length'),1);assert.equal(read('data.context_hash'),'accepted');console.log('PASS: native analysis empty state, separate discovery/tour, text-only content and accepted map/navigation preserved');
 })().catch(e=>{console.error(e);process.exitCode=1});
 """
         result = subprocess.run([node, "-e", harness], input=source, text=True, encoding="utf-8", capture_output=True, timeout=10)

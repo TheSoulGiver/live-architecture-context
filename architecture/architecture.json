@@ -2,11 +2,11 @@
   "version": 1,
   "repo": "..",
   "coverage": {
-    "scope": "This Living Blueprint covers the public Live Architecture Context product loop: accepted source evidence, bounded candidate review, refresh and local last-good state, the optional Archify projection, and the local agent/viewer surfaces.",
+    "scope": "This system map covers the public Live Architecture Context development loop: project-local setup, bounded source understanding with the current Agent, reviewed source evidence, refresh and local last-good state, Archify projection, and the shared Agent/human map.",
     "limitations": [
       "Relations are authored, source-evidence-backed architecture claims; this view is not a complete call graph.",
       "CALM is packaged as an optional loopback adapter but is not configured for this repository, so no CALM code facts are shown.",
-      "Optional pinned Understand analysis supplies partial investigation leads, not canonical components or runtime proof. Its raw graph and Codex-derived layers/tour can miss imports/calls; absence is not deletion evidence.",
+      "Source understanding supplies partial leads, not canonical components or runtime proof. Extraction and Agent-derived groups/tour can miss imports/calls; absence is not deletion evidence. Provider identity is diagnostic provenance.",
       "The diagram is a focused human view. Source, accepted context, and retained local receipts remain the authority for details and history.",
       "Saved-worktree activity is a separate local observation, not canonical architecture or runtime. Codex maintains semantic declarations; the live page never invokes a model.",
       "Native hook configuration does not prove host trust or delivery; offered cursors are not consumption receipts.",
@@ -17,12 +17,14 @@
     {
       "id": "archctx-cli",
       "name": "Archctx CLI and MCP",
-      "purpose": "Canonical source-evidence validation and compact CLI/MCP queries, including caller-cursor deltas and the shared, version-separated declared change scope consumed by the viewer.",
+      "purpose": "Provides native setup/understand/map entrypoints alongside compact CLI/MCP queries. Mechanical analysis errors remain request-local; caller-cursor deltas and declared change scope share component identities with the human map.",
       "truth_sources": ["archctx.py", "pyproject.toml"],
       "code_symbol": "main",
       "tags": ["canonical", "agent-protocol", "source-evidence"],
       "evidence": [
         {"path": "archctx.py", "contains": "def mcp_tools() -> list[dict[str, Any]]:"},
+        {"path": "archctx.py", "contains": "def main() -> int:"},
+        {"path": "archctx.py", "contains": "def understand(config_path: Path"},
         {"path": "archctx.py", "contains": "def updates(config_path: Path"},
         {"path": "archctx.py", "contains": "def change_scope(record: dict[str, Any]"},
         {"path": "pyproject.toml", "contains": "archctx = \"archctx:main\""}
@@ -31,7 +33,7 @@
     {
       "id": "last-known-good-state",
       "name": "Last-good context state",
-      "purpose": "Locally retains the accepted context, snapshots, and verified blueprint generation; failures leave the previous accepted record available and stale-labelled.",
+      "purpose": "Locally retains accepted context, snapshots, review provenance and verified map generations; atomic publication keeps failures from replacing the prior readable, freshness-labelled record.",
       "truth_sources": ["archctx.py"],
       "code_symbol": "refresh_lock",
       "tags": ["state", "trust", "local-only"],
@@ -43,19 +45,20 @@
     {
       "id": "refresh-transaction",
       "name": "Refresh transaction",
-      "purpose": "Coordinates source validation, candidate checks, optional graph/gates, and Archify projection before publishing one accepted architecture version.",
+      "purpose": "Coordinates source validation, candidate checks, optional graph/gates and Archify projection; rechecks actual source/config/view input identity and explicit understanding proof before one atomic accepted publication, including concurrent live observation.",
       "truth_sources": ["archctx.py"],
       "code_symbol": "refresh",
       "tags": ["canonical", "incremental", "fail-closed"],
       "evidence": [
         {"path": "archctx.py", "contains": "def refresh(config_path: Path"},
+        {"path": "archctx.py", "contains": "def final_refresh_check(config_path: Path"},
         {"path": "archctx.py", "contains": "def refresh_input_fingerprint("}
       ]
     },
     {
       "id": "candidate-review",
       "name": "Candidate review",
-      "purpose": "Requires Agent review of deterministic high-value drift signals before promotion. Optional source-analysis findings are non-blocking leads; explicit acceptance reconciles them to reviewed existing/new component or relation bindings.",
+      "purpose": "Requires Agent review of deterministic high-value drift signals before promotion. Source-understanding findings remain non-blocking leads; explicit acceptance binds stable finding content/evidence revisions to reviewed component or relation identities through existing publication.",
       "truth_sources": ["archctx.py"],
       "code_symbol": "candidate_observation",
       "tags": ["drift", "manual-semantic-review", "bounded"],
@@ -67,20 +70,22 @@
     {
       "id": "archify-projection",
       "name": "Archify projection",
-      "purpose": "Projects the declared canonical view into typed Archify IR, validates it through the pinned external renderer, and keeps generated artifacts local.",
-      "truth_sources": ["archctx.py", "archctx_to_archify.py", "tools/archify.py"],
+      "purpose": "Projects the canonical view into typed Archify IR through the pinned renderer. archctx_runtime owns compatible project-local setup and trusted renderer execution; generated state is ignored before installation can fail. tools/archify.py remains a compatibility entry.",
+      "truth_sources": ["archctx.py", "archctx_to_archify.py", "archctx_runtime.py", "tools/archify.py"],
       "code_symbol": "archify_projection",
       "tags": ["visualization", "typed-ir", "external-renderer"],
       "evidence": [
         {"path": "archctx.py", "contains": "def archify_projection("},
         {"path": "archctx_to_archify.py", "contains": "Project a declared Archctx view into Archify's typed architecture IR."},
-        {"path": "tools/archify.py", "contains": "REVISION = \"5de7275fe87a66a19d52a4d9b0b3a4f2a5a90115\""}
+        {"path": "archctx_runtime.py", "contains": "ARCHIFY_REVISION = \"5de7275fe87a66a19d52a4d9b0b3a4f2a5a90115\""},
+        {"path": "archctx_runtime.py", "contains": "def archify_main(directory: Path, args: list[str]) -> int:"},
+        {"path": "tools/archify.py", "contains": "from archctx_runtime import ARCHIFY_REVISION as REVISION"}
       ]
     },
     {
       "id": "blueprint-viewer",
-      "name": "Local Living Blueprint viewer",
-      "purpose": "Displays the accepted Archify map and a separate saved-worktree overlay; node details, source evidence and retained deltas share accepted context identity. The local HTTP UI remains read-only; --live owns only its observer.",
+      "name": "Local system map",
+      "purpose": "Organizes the accepted Archify map around project, components, declared flows and changes. Related understanding findings, source evidence and exact Agent queries use the same component IDs with distinct accepted/analysis freshness. The local HTTP UI remains read-only and owns only its observer.",
       "truth_sources": ["archctx_blueprint.py"],
       "code_symbol": "render_bundle",
       "tags": ["human-view", "local-only", "source-evidence"],
@@ -93,7 +98,7 @@
     {
       "id": "development-observer",
       "name": "Development observation",
-      "purpose": "Caches bounded worktree observations and caller-cursor updates, reusing the core declared change scope. Ordinary saves change the overlay; settled definitions request existing validation/publication. It owns no canonical architecture or event ledger.",
+      "purpose": "Caches bounded worktree observations and caller-cursor updates, reusing the core declared change scope and source-understanding metadata. Ordinary saves update the overlay; settled definitions request the existing serialized validation/publication without model execution.",
       "truth_sources": ["archctx_development.py"],
       "code_symbol": "DevelopmentObserver",
       "tags": ["development-overlay", "bounded", "local-only"],
@@ -105,16 +110,20 @@
     },
     {
       "id": "source-analysis",
-      "name": "Optional saved-source analysis",
-      "purpose": "Captures explicit saved-worktree bytes for pinned Understand Anything structure and Codex semantic analysis; reuses unchanged file results, imports bounded non-canonical findings, and binds explicit Agent acceptance to the same source/graph through existing refresh and LKG.",
-      "truth_sources": ["archctx_understand.py"],
-      "code_symbol": "prepare",
+      "name": "Source understanding",
+      "purpose": "Captures bounded saved source and advances pinned mechanics around the current Agent's semantic contract. Reuses unchanged results and stable findings with independent content/evidence revisions; first and subsequent explicit reviews bind canonical IDs through the same refresh and LKG transaction.",
+      "truth_sources": ["archctx_understand.py", "archctx_runtime.py"],
+      "code_symbol": "native_understand",
       "tags": ["optional", "source-analysis", "non-blocking", "local-only"],
       "evidence": [
         {"path": "archctx_understand.py", "contains": "def prepare(config_path: Path"},
+        {"path": "archctx_understand.py", "contains": "def native_understand(config_path: Path"},
+        {"path": "archctx_understand.py", "contains": "def review_revisions(candidate: dict"},
         {"path": "archctx_understand.py", "contains": "def import_graph(config_path: Path"},
         {"path": "archctx_understand.py", "contains": "def check_publication(repo: Path"},
-        {"path": "archctx_understand.py", "contains": "PROVIDER_REVISION = \"5feed1f2ce4f9c368d860f4c0ebc36d98a4693fc\""}
+        {"path": "archctx_understand.py", "contains": "def _review_transaction(config_path: Path"},
+        {"path": "archctx_understand.py", "contains": "PROVIDER_REVISION = \"5feed1f2ce4f9c368d860f4c0ebc36d98a4693fc\""},
+        {"path": "archctx_runtime.py", "contains": "def setup(config_path: Path"}
       ]
     },
     {
@@ -132,7 +141,7 @@
     {
       "id": "codex-skills",
       "name": "Codex architecture entry",
-      "purpose": "Offers bounded deltas through optional trusted host hooks or on-demand skills; the Agent owns semantic maintenance, never the hook or its offered cursor.",
+      "purpose": "Offers bounded deltas through optional trusted host hooks, managed guidance or on-demand skills. The existing Agent owns scoped source understanding and semantic maintenance; hooks offer read-only orientation and never invoke a model.",
       "truth_sources": ["plugins/live-architecture-context/.codex-plugin/plugin.json", "plugins/live-architecture-context/skills/architecture-context/SKILL.md", "archctx_hook.py", ".codex/hooks.json"],
       "tags": ["agent-entry", "optional", "on-demand", "advisory-hook"],
       "evidence": [
@@ -285,9 +294,9 @@
   "archify": {
     "view": "architecture/architecture.view.json",
     "output": "architecture/.archctx/architecture.archify.json",
-    "validate": ["{python}", "tools/archify.py", "validate", "architecture", "{archify_output}", "--quality", "standard", "--repo-root", "{repo}", "--json"],
-    "render": ["{python}", "tools/archify.py", "deliver", "architecture", "{archify_output}", "{archify_html}", "--quality", "standard", "--repo-root", "{repo}", "--json"],
-    "compare": ["{python}", "tools/archify.py", "compare", "architecture", "{archify_before}", "{archify_output}", "{archify_compare}", "--receipt", "{archify_receipt}", "--quality", "standard", "--repo-root", "{repo}", "--json"],
+    "validate": ["{python}", "{lac_runtime}", "--state", "{state}", "validate", "architecture", "{archify_output}", "--quality", "standard", "--repo-root", "{repo}", "--json"],
+    "render": ["{python}", "{lac_runtime}", "--state", "{state}", "deliver", "architecture", "{archify_output}", "{archify_html}", "--quality", "standard", "--repo-root", "{repo}", "--json"],
+    "compare": ["{python}", "{lac_runtime}", "--state", "{state}", "compare", "architecture", "{archify_before}", "{archify_output}", "{archify_compare}", "--receipt", "{archify_receipt}", "--quality", "standard", "--repo-root", "{repo}", "--json"],
     "timeout_seconds": 180
   },
   "drift_rules": [
@@ -306,8 +315,8 @@
     {
       "id": "archify-renderer-revision",
       "kind": "renderer-boundary-change",
-      "paths": ["tools/archify.py"],
-      "added_contains": ["REVISION ="]
+      "paths": ["archctx_runtime.py"],
+      "added_contains": ["ARCHIFY_REVISION ="]
     }
   ],
   "watch": {
@@ -320,6 +329,7 @@
       "archctx_blueprint.py",
       "archctx_development.py",
       "archctx_understand.py",
+      "archctx_runtime.py",
       "tools/archify.py",
       "pyproject.toml",
       "plugins/live-architecture-context/.codex-plugin/plugin.json",

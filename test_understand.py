@@ -37,15 +37,16 @@ class UnderstandTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "snapshot was modified"):
                     ua.prepare(config, None, repo, ["source.py"])
 
-    def test_finding_identity_ignores_other_analysis_versions_not_its_own_source(self):
+    def test_finding_identity_is_stable_while_source_revision_changes(self):
         graph = {"nodes": [{"id": "file:a.py", "type": "file", "filePath": "a.py", "name": "A", "summary": "scope"}],
                  "layers": [], "edges": []}
         receipt = {"analysis_id": "one", "graph_sha256": "one", "source_hashes": {"a.py": "a" * 64}}
-        first = ua.graph_candidates(graph, receipt, {"a.py": b"x=1\n"})[0]["id"]
-        second = ua.graph_candidates(graph, {**receipt, "analysis_id": "two", "graph_sha256": "two"}, {"a.py": b"x=1\n"})[0]["id"]
-        self.assertEqual(first, second)
-        changed = ua.graph_candidates(graph, {**receipt, "source_hashes": {"a.py": "b" * 64}}, {"a.py": b"x=2\n"})[0]["id"]
-        self.assertNotEqual(first, changed)
+        first = ua.graph_candidates(graph, receipt, {"a.py": b"x=1\n"})[0]
+        second = ua.graph_candidates(graph, {**receipt, "analysis_id": "two", "graph_sha256": "two"}, {"a.py": b"x=1\n"})[0]
+        self.assertEqual(first["id"], second["id"])
+        changed = ua.graph_candidates(graph, {**receipt, "source_hashes": {"a.py": "b" * 64}}, {"a.py": b"x=2\n"})[0]
+        self.assertEqual(first["id"], changed["id"])
+        self.assertNotEqual(first["evidence_revision"], changed["evidence_revision"])
 
     def test_reuse_preserves_unchanged_nodes_and_incoming_edges(self):
         with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as directory:

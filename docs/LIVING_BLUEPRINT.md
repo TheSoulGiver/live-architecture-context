@@ -1,30 +1,39 @@
-# Open and update this repository's blueprint
+# Open and update this repository's system map
 
-From this checkout, with Python 3.10+, Git and Node.js 18+:
+From this checkout, with Python 3.10+, Git and Node.js 20+:
 
 ```sh
-python tools/archify.py setup
-python archctx_blueprint.py --live
+python archctx.py --config architecture/architecture.json setup
+python archctx.py --config architecture/architecture.json map
 ```
 
-The first command installs the reviewed Archify commit
-`5de7275fe87a66a19d52a4d9b0b3a4f2a5a90115` (2.16.0) inside ignored local
-state. An existing clean checkout at that revision can be reused with
-`ARCHIFY_HOME`. Nothing is downloaded by refresh or the viewer. `setup`
-does not overwrite an existing installation.
+`setup` explicitly provisions the compatible source-understanding and Archify
+components in ignored project-local state. Existing reviewed definitions and
+incompatible or modified installations are preserved. Nothing is downloaded
+by ordinary queries, refresh or the viewer. Provider versions and overrides
+are diagnostics; [source understanding](UNDERSTAND.md) uses the same setup.
 
-Run `setup` once; thereafter `python archctx_blueprint.py --live` is the single
-development entrypoint. It opens an unused loopback port and starts its own
+Run `setup` once; thereafter `map` is the development entrypoint, with live
+observation enabled by default. It opens an unused loopback port and starts its own
 project-local observer. If no last-good exists, it requests the existing
 refresh transaction to build the first accepted blueprint. Failed validation
 does not create a pretend baseline. An existing last-good remains readable.
 
-The page's **Current system / 当前系统** view shows the accepted Archify diagram
-with a separate saved-worktree overlay. Select a component for responsibilities,
-upstream/downstream relations and evidence; **Focus neighbors / 聚焦邻居** reduces
-clutter. **Recent changes / 最近变化** shows the latest retained accepted delta;
-**Before / After** opens Archify's real comparison. Selection, expanded evidence
-and camera position are retained where their identities still exist.
+The page opens on the project overview and accepted Archify diagram with a
+separate saved-worktree overlay. Its **Project / 项目**, **Components / 组件**,
+**Flows / 流程** and **Changes / 变化** navigation uses the same accepted component
+and relation IDs as Agent queries. Select a component for responsibilities,
+related discoveries, source evidence and exact CLI commands for this config/state.
+Confirmed components, discoveries awaiting review and changed source are labelled
+separately. Source-understanding freshness never substitutes for accepted-source
+freshness; provider provenance stays in expandable diagnostics.
+
+Flows retain declared relation direction and dependency semantics; the discovered
+source tour is explicitly a separate investigation aid. **Focus neighbors / 聚焦邻居**
+reduces clutter. Changes shows saved worktree changes and the latest retained
+accepted delta; **Before / After** opens Archify's real comparison. Selection,
+expanded component evidence and camera position are retained where their
+identities still exist.
 
 Saved implementation changes highlight affected components without rendering or
 inventing architecture nodes. Unmapped files remain explicitly uncovered.
@@ -34,8 +43,10 @@ automatically. Invalid intermediate saves and failed refreshes retain the old
 map with specific reasons. The development observation has its own identity;
 its file activity is neither accepted architecture, task progress nor runtime.
 
-`archctx-blueprint` is also installed by `python -m pip install .`.
-Use `--no-open --port 0` for an unattended local viewer, or omit `--live` for
+Use `archctx map --no-open --port 0` for an unattended local viewer, or
+`archctx map --read-only` for observation without automatic publication. The older
+`archctx-blueprint` / `python archctx_blueprint.py` entrypoints remain compatible;
+their explicit `--live` flag retains its original meaning, and omission provides
 observation without automatic publication. Ctrl+C stops this viewer and its own
 observer, not other sessions or services. No second watch terminal is needed;
 the standalone `archctx.py ... watch` remains available for CLI-only use.
@@ -79,10 +90,16 @@ python archctx.py --config architecture/architecture.json reject <id> --reason n
 ```
 
 Codex supplies the semantic judgment and edits the tracked declarations.
-Deterministic drift candidates must be decided before promotion. Optional
-[source-analysis findings](UNDERSTAND.md) are separate, non-blocking leads:
-the sidebar shows their captured version, pending/accepted review state and
-historical source links without inserting them into the accepted diagram.
+Deterministic drift candidates must be decided before promotion. Native
+[source-understanding findings](UNDERSTAND.md) are separate, non-blocking leads:
+the component panel joins findings through real component IDs and shows their
+stable finding IDs, content/evidence revisions, current review bindings and
+historical source links without inserting raw analysis groups into the accepted
+diagram. Use `understand "question" --files ...` at a meaningful development
+boundary; follow its compact Agent contract and resume with the returned ID.
+The live map remains open during this work and explicit acceptance. Publication
+rechecks actual input hashes and proof under the shared writer lock; a busy
+writer returns a retry without changing another session's observer.
 The watcher only promotes
 already-declared, validated changes; it does not invoke a model or silently
 invent canonical structure. Fresh sessions read `AGENTS.md` and the tracked

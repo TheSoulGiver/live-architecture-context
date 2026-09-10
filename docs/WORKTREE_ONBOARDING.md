@@ -9,20 +9,29 @@ of adoption or net token savings.
 
 ```sh
 python archctx.py --config architecture/architecture.json status --diagnose
-python tools/archify.py setup
-python archctx.py --config architecture/architecture.json init --command "python archctx.py"
-python archctx.py --config architecture/architecture.json canonical refresh-transaction
-python archctx_blueprint.py --config architecture/architecture.json
+python archctx.py --config architecture/architecture.json setup --command "python archctx.py"
+python archctx.py --config architecture/architecture.json map
 ```
 
 `status --diagnose` identifies the running core source, interpreter, selected
 config and state paths without writes or configured command execution. This
 source checkout is the tool: a stale `archctx` on PATH cannot replace it.
-`setup` explicitly fetches the pinned Archify renderer. `init` reuses the
-tracked definition, installs the existing managed AGENTS block, and refreshes
-through its reviewed validators. `--check` previews onboarding without writes
-or executing those validators. Neither setup nor refresh starts a watcher;
-use the existing [live loop](LIVING_BLUEPRINT.md) when needed.
+`setup` explicitly provisions compatible source-understanding and rendering
+components in this worktree, preserves the tracked definition and installs the
+managed AGENTS block. `READY` means tools are ready, not architecture acceptance.
+`map` starts its own live observer and requests the existing validated refresh
+when a local accepted baseline is missing. It keeps failed validation visible.
+Leave the map running while developing. At a relevant understanding boundary,
+follow the returned compact Agent contract and resume with
+`understand --resume <analysis_id>`; see [source understanding](UNDERSTAND.md).
+The previous `init --check` and expert entrypoints remain available for diagnosis.
+
+While the map remains open, the Agent or another terminal can use the same prefix:
+
+```sh
+python archctx.py --config architecture/architecture.json understand "How is accepted context published?" --files archctx.py archctx_blueprint.py
+python archctx.py --config architecture/architecture.json canonical refresh-transaction
+```
 
 The query and viewer select the same `architecture/architecture.json` and its
 adjacent `architecture/.archctx/` state. A new worktree starts MISSING, even if
@@ -49,9 +58,8 @@ Windows PowerShell, from the consumer root:
 python -m venv .archctx/venv
 .archctx/venv/Scripts/python.exe -m pip install "git+https://github.com/TheSoulGiver/live-architecture-context.git@<reviewed-commit>"
 .archctx/venv/Scripts/python.exe -I -m archctx --config architecture/architecture.json status --diagnose
-.archctx/venv/Scripts/python.exe -I -m archctx --config architecture/architecture.json init --command ".archctx/venv/Scripts/python.exe -I -m archctx"
-.archctx/venv/Scripts/python.exe -I -m archctx --config architecture/architecture.json search "<task capability>"
-.archctx/venv/Scripts/python.exe -I -m archctx_blueprint --config architecture/architecture.json
+.archctx/venv/Scripts/python.exe -I -m archctx --config architecture/architecture.json setup --command ".archctx/venv/Scripts/python.exe -I -m archctx"
+.archctx/venv/Scripts/python.exe -I -m archctx --config architecture/architecture.json map
 ```
 
 On Linux/macOS use `.archctx/venv/bin/python` in place of
@@ -62,18 +70,26 @@ cross-platform team, put the platform-specific executable choice in an existing
 project script and supply that script as `--command`; keep its config explicit.
 The installer records guidance, not executable provenance: verify actual
 module/interpreter paths and core hash with diagnostics after installation.
+Use this same explicit prefix for `search`, bounded `understand`, `--resume`
+and acceptance from the Agent or another terminal while the map remains open.
 
-The consumer owner must provide/review a real Archify view and local pinned
-renderer commands to obtain a human blueprint. Reuse the project's existing
-renderer; do not invent a code graph or copy this repository's component names.
-The consumer's config/adapter belongs only in that consumer repository.
+The current native entrypoints are available in the reviewed commit containing
+them; earlier releases retain their earlier onboarding contract. `setup` wires
+the compatible renderer and a presentation view only when absent. Preserve and
+review any existing custom commands/view. The Agent maintains source-grounded
+component and relation declarations; neither empty setup nor generated positions
+prove architecture. Do not invent a code graph or copy this repository's component
+names. Consumer config and adapters remain only in their owning repository.
 
-For a new declaration, the same explicit `--config ... init --component ...
---evidence 'relative/path::exact source anchor'` writes the requested path and
-relative repo binding. Existing definitions are never replaced. Missing anchors
-need a source review, not automatic weakening. If shared and private conventional
-configs coexist, even `status` requires an explicit selection. Arbitrary custom
-locations are never discovered. Configs representing independent contexts should
+For a new declaration, use bounded `understand` with the existing Agent, follow
+its contract/resume boundary, review the source and update shared config/view
+before explicit `accept`. Keep the map open; acceptance shares its publication
+lock and validates the same evidence. The expert `init --component ... --evidence
+'relative/path::exact source anchor'` path remains compatible. Missing anchors
+need source review, not automatic weakening. The three native entrypoints can
+discover a sole conventional config; existing query commands retain the explicit
+shared-config rule. If shared and private definitions coexist, choose explicitly.
+Arbitrary custom locations are never discovered. Independent contexts should
 use separate tracked directories (or explicit, repository-local state dirs).
 `init` ignores a selected custom state directory with an anchored literal rule
 and refuses the repository root as state. Don't select a source directory as

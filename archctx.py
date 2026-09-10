@@ -363,7 +363,11 @@ def semantic(value: dict[str, Any]) -> str: return sha(json.dumps(value, ensure_
 def architecture_semantic(value: dict[str, Any]) -> str: return semantic({key: item for key, item in value.items() if key != "revision"})
 def substitution(command: list[Any], values: dict[str, str]) -> list[str]: return [values.get(str(x), str(x)) for x in command]
 def run(command: list[Any], repo: Path, timeout: int, values: dict[str, str], extra_env: dict[str, Any] | None = None) -> tuple[list[str], subprocess.CompletedProcess[str]]:
-    argv = substitution(command, {"{python}": sys.executable, **values}); env = os.environ.copy()
+    argv = substitution(command, {**values, "{python}": sys.executable,
+                                 "{lac_runtime}": str(CORE_SOURCE_PATH.with_name("archctx_runtime.py"))})
+    if command[:2] == ["{python}", "{lac_runtime}"] and sys.flags.isolated:
+        argv.insert(1, "-I")
+    env = os.environ.copy()
     if extra_env:
         if not all(isinstance(k, str) and isinstance(v, str) for k, v in extra_env.items()): raise ValueError("command env must be a string map")
         env.update(extra_env)
@@ -936,7 +940,7 @@ def diagnose_status(config_path: Path, explicit: str | None) -> dict[str, Any]:
         "last_good": {"path": str(last_path(directory)), "exists": last_path(directory).is_file()},
     }}
 
-def _refresh_locked(config_path: Path, explicit: str | None, directory: Path, changed: list[str] | None = None, acknowledged: dict[str, dict[str, Any]] | None = None, expected_context_hash: str | None = None, reset_candidate_baseline: bool = False, understand_proof: dict[str, Any] | None = None) -> dict[str, Any]:
+def _refresh_locked(config_path: Path, explicit: str | None, directory: Path, changed: list[str] | None = None, acknowledged: dict[str, dict[str, Any]] | None = None, expected_context_hash: str | None = None, reset_candidate_baseline: bool = False, understand_proof: dict[str, Any] | None = None, expected_input_hash: str | None = None) -> dict[str, Any]:
     try:
         config, repo, facts, relation_facts, candidate, inputs = refresh_inputs(config_path)
     except (OSError, ValueError) as error:
@@ -944,6 +948,8 @@ def _refresh_locked(config_path: Path, explicit: str | None, directory: Path, ch
     old = load(last_path(directory)) if last_path(directory).exists() else None
     if expected_context_hash is not None and (not isinstance(old, dict) or old.get("context_hash") != expected_context_hash):
         return {"protocol_version": PROTOCOL_VERSION, "status": "INVALID", "freshness": "stale", "failures": ["last-good changed while candidate was being reviewed"], "last_good_preserved": bool(old), "next_action": "re-run candidate review"}
+    if expected_input_hash is not None and semantic(inputs) != expected_input_hash:
+        return refresh_retry(directory, old, "source, config, or view changed after semantic binding review", ["reviewed_inputs"])
     if understand_proof is not None:
         from archctx_understand import check_publication
         try: check_publication(repo, directory, understand_proof)
@@ -961,10 +967,18 @@ def _refresh_locked(config_path: Path, explicit: str | None, directory: Path, ch
     acknowledged = acknowledged or {}
     if pending and set(value["id"] for value in pending) != set(acknowledged):
         return {"protocol_version": PROTOCOL_VERSION, "status": "CANDIDATE_REVIEW_REQUIRED", "freshness": "stale", "last_good_preserved": bool(old), "next_action": "inspect every candidate, then accept or reject it before refresh"} | candidate_fields(observation)
+    reused_validation = False
     try:
-        graph = graph_refresh(config, repo, directory, changed, candidate, old)
-        receipts = gates(config, repo, directory)
-        archify = archify_projection(config, repo, directory, candidate, old)
+        reused_validation = bool(understand_proof is not None and expected_input_hash is not None and old
+            and old.get("transaction", {}).get("input_hash") == semantic(inputs)
+            and old.get("context_hash") == semantic(candidate) and old.get("config_hash") == semantic(config)
+            and archify_stale_reason(config, repo, directory, old) is None)
+        if reused_validation:
+            graph, receipts, archify = old.get("graph", {}), old.get("gates", []), old.get("archify", {"configured": False})
+        else:
+            graph = graph_refresh(config, repo, directory, changed, candidate, old)
+            receipts = gates(config, repo, directory)
+            archify = archify_projection(config, repo, directory, candidate, old)
     except (OSError, RuntimeError, subprocess.TimeoutExpired, ValueError) as error:
         return {"protocol_version": PROTOCOL_VERSION, "status": "INVALID", "freshness": "stale", "failures": [str(error)], "last_good_preserved": last_path(directory).exists(), "next_action": "repair external validator, then refresh"}
     changed_inputs, input_error = final_refresh_check(config_path, inputs)
@@ -972,11 +986,17 @@ def _refresh_locked(config_path: Path, explicit: str | None, directory: Path, ch
         try: check_publication(repo, directory, understand_proof)
         except (OSError, ValueError, KeyError, TypeError) as error:
             changed_inputs.append("source_analysis"); input_error = str(error)
+    if reused_validation:
+        try: artifact_error = archify_stale_reason(config, repo, directory, old)
+        except (OSError, ValueError) as error: artifact_error = str(error)
+        if artifact_error:
+            changed_inputs.append("accepted_artifacts"); input_error = artifact_error
     if changed_inputs:
-        cleanup_generation(directory, archify.get("generation"))
+        if not reused_validation:
+            cleanup_generation(directory, archify.get("generation"))
         detail = input_error or "source, config, or view changed while refresh validation was running"
         return refresh_retry(directory, old, detail, changed_inputs)
-    decisions = [{key: value[key] for key in ("id", "kind", "rule_id", "decision", "bindings", "source_analysis") if key in value} for value in acknowledged.values()]
+    decisions = [{key: value[key] for key in ("id", "kind", "rule_id", "decision", "bindings", "source_analysis", "content_revision", "evidence_revision") if key in value} for value in acknowledged.values()]
     record = {"record_version": CONFIG_VERSION, "created_at": datetime.now(timezone.utc).isoformat(), "repo": str(repo), "revision": candidate["revision"], "config_hash": semantic(config), "context_hash": semantic(candidate), "context": candidate, "graph": persistent_graph(graph), "gates": persistent_gates(receipts), "archify": archify, "candidate_baseline": observation["current"], "transaction": {"input_hash": semantic(inputs), "generation_limit": GENERATION_LIMIT}}
     previous_snapshot = snapshot_record(directory, record["context_hash"])
     previous_decisions = previous_snapshot.get("candidate_decisions", []) if isinstance(previous_snapshot, dict) and isinstance(previous_snapshot.get("candidate_decisions"), list) else []
@@ -1000,7 +1020,8 @@ def _refresh_locked(config_path: Path, explicit: str | None, directory: Path, ch
         # This replacement is the one current-authority commit. Generated output is only mirrored afterwards.
         atomic(last_path(directory), record)
     except OSError as error:
-        cleanup_generation(directory, archify.get("generation"))
+        if not reused_validation:
+            cleanup_generation(directory, archify.get("generation"))
         return {"protocol_version": PROTOCOL_VERSION, "status": "INVALID", "freshness": "stale", "failures": [str(error)], "last_good_preserved": bool(old), "next_action": "repair local state storage, then refresh"}
     history_state = "synced"
     try:
@@ -1010,7 +1031,7 @@ def _refresh_locked(config_path: Path, explicit: str | None, directory: Path, ch
     except OSError:
         history_state = "deferred"
     output_state = compatibility_output(archify_config(config, repo), archify)
-    return freshness(record, "PASS") | {"context_hash": record["context_hash"], "graph": graph, "gates": receipts, "archify": archify, "changed_files": changed or [], "candidate_baseline_reset": bool(reset_candidate_baseline), "history": history_state, "compatibility_output": output_state}
+    return freshness(record, "PASS") | {"context_hash": record["context_hash"], "graph": graph, "gates": receipts, "archify": archify, "changed_files": changed or [], "candidate_baseline_reset": bool(reset_candidate_baseline), "history": history_state, "compatibility_output": output_state, "validation": "reused_accepted_inputs" if reused_validation else "executed"}
 
 
 def refresh(config_path: Path, explicit: str | None, changed: list[str] | None = None, acknowledged: dict[str, dict[str, Any]] | None = None, expected_context_hash: str | None = None, reset_candidate_baseline: bool = False) -> dict[str, Any]:
@@ -1037,7 +1058,7 @@ def analysis_decisions(directory: Path, record: dict[str, Any]) -> list[dict[str
     try:
         decisions += [d for d in decision_store(directory) if d.get("state") == "final" and d.get("context_hash") == record.get("context_hash")]
     except (OSError, ValueError): pass
-    return [{k: d[k] for k in ("id", "kind", "decision", "bindings", "source_analysis") if k in d}
+    return [{k: d[k] for k in ("id", "kind", "decision", "bindings", "source_analysis", "content_revision", "evidence_revision") if k in d}
             for d in decisions if d.get("decision") == "accepted" and isinstance(d.get("source_analysis"), dict)]
 
 def accepted_analysis(directory: Path, record: dict[str, Any], binding: str) -> list[dict[str, Any]]:
@@ -1105,12 +1126,13 @@ From the repository root, run `{prefix} status`. Keep this exact CLI prefix for 
 When this installed version supports it, `updates` can replace that status read at the next relevant task boundary; reuse the returned cursor with `updates --since <cursor>` (MCP: `architecture_updates` with `since`). Keep the cursor in the caller, not a new event log. Do not invoke it on every tool call.
 Read only returned evidence and the next directly needed source file. Source wins; stale, missing, or irrelevant context means normal targeted discovery. Default `watch` only observes; opt-in `watch --apply` may refresh already-declared evidence after validation, never candidates. Orientation, never a gate.
 When completed work changes architecture semantics, maintain the affected shared config/view from source, whether or not this task queried LAC. Existing candidate review and validation still govern promotion.
+After an explicitly authorized `{prefix} setup`, `{prefix} map` keeps the shared map live. For a real understanding gap during authorized development, use `{prefix} understand "question" --files <small-scope>`; follow its compact `NEEDS_AGENT` contract and resume with the returned analysis ID. LAC performs mechanical steps; this Agent supplies semantics. Reuse existing findings with `understand --show`; ordinary queries never install or invoke a model. Keep the map open during candidate acceptance.
 {CODEX_END}
 '''
 
-def install_codex(config_path: Path, target: Path, check: bool, command: str = "archctx", explicit: str | None = None) -> dict[str, Any]:
+def install_codex(config_path: Path, target: Path, check: bool, command: str = "archctx", explicit: str | None = None, allow_empty: bool = False) -> dict[str, Any]:
     config, repo = load(config_path), repo_for(config_path, load(config_path))
-    components(config)
+    if not (allow_empty and config.get("components") == [] and config.get("relations") == []): components(config)
     try: relative = config_path.relative_to(repo).as_posix()
     except ValueError as error: raise ValueError("Codex config must live inside its repository (normally .archctx/architecture.json)") from error
     relative_state = codex_state(config_path, repo, target, explicit)
@@ -1165,6 +1187,32 @@ def selected_config(repo: Path, explicit: str | None) -> Path:
     if (repo / "architecture" / "architecture.json").exists():
         raise ValueError("shared architecture/architecture.json exists; choose --config explicitly (including when a private .archctx/architecture.json also exists)")
     return repo / ".archctx" / "architecture.json"
+
+def native_config(repo: Path, explicit: str | None) -> Path:
+    if explicit: return Path(explicit).resolve()
+    choices = [repo / folder / "architecture.json" for folder in ("architecture", ".archctx")]
+    existing = [path for path in choices if path.is_file()]
+    if len(existing) > 1: raise ValueError("multiple architecture definitions exist; choose --config explicitly")
+    return existing[0] if existing else choices[0]
+
+def understand(config_path: Path, explicit: str | None, args: dict[str, Any]) -> dict[str, Any]:
+    from archctx_understand import discoveries, native_understand
+    for name in ("show", "details"):
+        if name in args and not isinstance(args[name], bool): raise ValueError(f"{name} must be boolean")
+    for name in ("question", "resume"):
+        if args.get(name) is not None and not isinstance(args[name], str): raise ValueError(f"{name} must be a string")
+    files = args.get("files")
+    if files is not None and (not isinstance(files, list) or not all(isinstance(path, str) for path in files)):
+        raise ValueError("files must be a string array")
+    if args.get("show"):
+        if args.get("question") or files or args.get("resume"): raise ValueError("--show is read-only; do not combine it with question/files/resume")
+        return discoveries(config_path, explicit, details=args.get("details", False))
+    if args.get("details"): raise ValueError("--details requires --show")
+    try:
+        return native_understand(config_path, explicit, args.get("question"), files, args.get("resume"))
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+        return {"status": "INVALID", "reason": str(error)[:1600], "last_good_preserved": last_path(state(config_path, explicit)).exists(),
+                "next_action": "repair the reported local input or component failure, then resume; other queries remain available"}
 
 def init(repo: Path, target: Path, component: str | None, truth_sources: list[str], evidence_values: list[str], check: bool, config_path: Path | None = None, explicit: str | None = None, command: str = "archctx") -> dict[str, Any]:
     if not repo.is_dir(): raise ValueError(f"repo does not exist: {repo}")
@@ -1830,6 +1878,7 @@ def mcp_tools() -> list[dict[str, Any]]:
         {"name": "architecture_reject_candidate", "description": "Record one bounded fixed-code rejection and advance the verified candidate baseline.", "inputSchema": reject_input},
         {"name": "architecture_canonical", "description": "Canonical component and evidence.", "inputSchema": ident},
         {"name": "architecture_search", "description": "Match the current task to compact canonical components; defaults to three results and reports omissions.", "inputSchema": search_input},
+        {"name": "architecture_understand", "description": "Explicit bounded source understanding after setup: run recoverable mechanical stages, then return a compact semantic task for the already-authorized Agent. Never invokes a model. show is strictly read-only and reuses retained findings.", "inputSchema": {"type": "object", "properties": {"question": {"type": "string"}, "files": {"type": "array", "items": {"type": "string"}}, "resume": {"type": "string"}, "show": {"type": "boolean"}, "details": {"type": "boolean"}}}},
         {"name": "architecture_evidence", "description": "Source evidence for one component.", "inputSchema": ident},
         {"name": "architecture_trace", "description": "Authored relations; optional code graph stays separate.", "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}, "direction": {"enum": ["upstream", "downstream"]}, "include_code_edges": {"type": "boolean"}}, "required": ["id"]}},
         {"name": "architecture_impact", "description": "Shared declared change_scope: direct components, dependencies, dependents, typed relation evidence; accepted and unaccepted working definitions stay separate. Not runtime impact. details expands omissions; legacy reachable_components is all-kind outgoing reach.", "inputSchema": {"type": "object", "properties": {"base": {"type": "string"}, "files": {"type": "array", "items": {"type": "string"}}, "details": {"type": "boolean"}}}},
@@ -1861,6 +1910,7 @@ def mcp_value(config_path: Path, explicit: str | None, name: str, args: dict[str
     if name == "architecture_reject_candidate": return reject_candidate(config_path, explicit, str(args.get("id", "")), str(args.get("reason", "")))
     if name == "architecture_canonical": return canonical(config_path, explicit, str(args.get("id", "")))
     if name == "architecture_search": return search(config_path, explicit, str(args.get("query", "")), int(args.get("limit", 3)))
+    if name == "architecture_understand": return understand(config_path, explicit, args)
     if name == "architecture_evidence":
         value = canonical(config_path, explicit, str(args.get("id", ""))); return {k: value[k] for k in value if k != "canonical"} | {"evidence": value.get("canonical", {}).get("evidence", [])}
     if name == "architecture_trace": return trace(config_path, explicit, str(args.get("id", "")), str(args.get("direction", "downstream")), bool(args.get("include_code_edges")))
@@ -1879,7 +1929,7 @@ def serve_mcp(config_path: Path, explicit: str | None) -> int:
                 name, arguments = str(params.get("name", "")), params.get("arguments", {})
                 if not isinstance(arguments, dict): raise ValueError("tool arguments must be an object")
                 started = time.monotonic(); value = mcp_value(config_path, explicit, name, arguments); elapsed = int((time.monotonic() - started) * 1000)
-                if name not in ("architecture_status", "architecture_stale", "architecture_history", "architecture_usage", "architecture_updates"): telemetry(state(config_path, explicit), f"mcp:{name}", value, elapsed)
+                if name not in ("architecture_status", "architecture_stale", "architecture_history", "architecture_usage", "architecture_updates", "architecture_understand"): telemetry(state(config_path, explicit), f"mcp:{name}", value, elapsed)
                 record_usage(state(config_path, explicit), name, value, elapsed, "mcp", arguments.get("id") if isinstance(arguments, dict) else None)
                 result = {"content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False, separators=(",", ":"))}], "isError": value.get("status") in ("ERROR", "INVALID")}
             elif "id" not in request: continue
@@ -1892,6 +1942,12 @@ def serve_mcp(config_path: Path, explicit: str | None) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(); parser.add_argument("--config", help="defaults to .archctx/architecture.json in the current repository"); parser.add_argument("--state-dir"); sub = parser.add_subparsers(dest="command", required=True)
     for name in ("snapshot", "mcp", "telemetry"): sub.add_parser(name)
+    x = sub.add_parser("setup", help="explicitly prepare compatible project-local analysis/render components and Codex guidance; no model or refresh")
+    x.add_argument("--analysis-home", help="reuse an existing compatible source checkout without modifying it"); x.add_argument("--renderer-home", help="reuse an existing compatible renderer checkout without modifying it"); x.add_argument("--command", dest="cli_command", default="archctx")
+    x = sub.add_parser("understand", help="bounded source understanding; mechanical work is recoverable, semantics stay with the authorized Agent")
+    x.add_argument("question", nargs="?"); x.add_argument("--files", nargs="+"); x.add_argument("--resume"); x.add_argument("--show", action="store_true", help="read-only retained discoveries; no analysis"); x.add_argument("--details", action="store_true")
+    x = sub.add_parser("map", help="open the shared map and observe saved development changes")
+    x.add_argument("--port", type=int, default=0); x.add_argument("--no-open", action="store_true"); x.add_argument("--read-only", action="store_true", help="disable automatic maintenance for this viewer")
     x = sub.add_parser("status"); x.add_argument("--diagnose", action="store_true", help="read-only core identity and selected config/state paths; works even without a config")
     x = sub.add_parser("refresh"); x.add_argument("--reset-candidate-baseline", action="store_true")
     x = sub.add_parser("candidates"); x.add_argument("--limit", type=int, default=CANDIDATE_OUTPUT_LIMIT)
@@ -1919,10 +1975,31 @@ def main() -> int:
         if args.command == "init":
             repo = Path(args.repo).resolve(); target = Path(args.target); target = target if target.is_absolute() else repo / target
             dump(init(repo, target, args.component, args.truth_source, args.evidence, args.check, selected_config(repo, args.config), args.state_dir, args.cli_command)); return 0
-        config_path = selected_config(Path.cwd(), args.config)
+        config_path = native_config(Path.cwd(), args.config) if args.command in ("setup", "understand", "map") else selected_config(Path.cwd(), args.config)
+        if args.command == "setup":
+            from archctx_runtime import setup
+            from archctx import RefreshBusyError as ComponentBusy
+            try:
+                result = setup(config_path, args.state_dir, args.analysis_home, args.renderer_home)
+            except ComponentBusy:
+                result = {"status": "RETRY", "next_action": "another setup or publication owns this project state; retry after it finishes"}
+            if result.get("status") == "READY":
+                repo = repo_for(config_path, load(config_path)); target = repo / "AGENTS.md"
+                result["codex"] = install_codex(config_path, target, False, args.cli_command, args.state_dir, allow_empty=True)
+            dump(result); return 0 if result.get("status") == "READY" else 2
         if args.command == "status" and args.diagnose:
             dump(diagnose_status(config_path, args.state_dir)); return 0
         if not config_path.is_file(): raise ValueError("--config is required except for init (or run from a repository with .archctx/architecture.json)")
+        if args.command == "understand":
+            value = understand(config_path, args.state_dir, {key: getattr(args, key) for key in ("question", "files", "resume", "show", "details")})
+            dump(value); return 2 if value.get("status") in ("ERROR", "INVALID") else 0
+        if args.command == "map":
+            from archctx_blueprint import main as map_main
+            options = ["--config", str(config_path), "--port", str(args.port)]
+            if args.state_dir: options.extend(["--state-dir", args.state_dir])
+            if args.no_open: options.append("--no-open")
+            if not args.read_only: options.append("--live")
+            return map_main(options)
         if args.command == "mcp": return serve_mcp(config_path, args.state_dir)
         if args.command == "telemetry": dump(telemetry_summary(state(config_path, args.state_dir))); return 0
         if args.command == "history": dump(history(state(config_path, args.state_dir), args.context_hash, args.limit)); return 0
@@ -1944,5 +2021,5 @@ def main() -> int:
         if args.command not in ("status", "install-codex", "uninstall-codex"): telemetry(state(config_path, args.state_dir), args.command, value, elapsed)
         record_usage(state(config_path, args.state_dir), args.command, value, elapsed, subject_id=args.id if args.command in ("canonical", "evidence", "trace", "accept", "reject") else None)
         dump(value); return 0
-    except (ValueError, OSError) as e: dump({"protocol_version": PROTOCOL_VERSION, "status": "ERROR", "error": str(e)}); return 2
+    except (ValueError, OSError, subprocess.SubprocessError) as e: dump({"protocol_version": PROTOCOL_VERSION, "status": "ERROR", "error": str(e)}); return 2
 if __name__ == "__main__": raise SystemExit(main())
