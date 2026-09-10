@@ -132,6 +132,108 @@ class DevelopmentTest(unittest.TestCase):
         self.assertEqual(accepted["pending"]["changed_components"], [])
         self.assertEqual(observer.bundle()[1]["context_hash"], accepted["accepted_context_hash"])
 
+    def test_writer_lock_release_retries_without_new_inputs(self):
+        observer = self.observer(live=True, settle_seconds=0)
+        now = [100.]
+        with patch("archctx_development.time.monotonic", side_effect=lambda: now[0]):
+            first = observer.poll_once()
+            self.definition["components"][0]["purpose"] = "Revised ownership"
+            self.save()
+            accepted = (self.state / "last-good.json").read_bytes()
+            with patch.object(archctx, "refresh", wraps=archctx.refresh) as refresh:
+                with archctx.refresh_lock(self.state):  # Real OS lock, not a stubbed RETRY.
+                    blocked = observer.poll_once()
+                    inputs = observer._quick_inputs()
+                self.assertEqual(blocked["refresh"]["status"], "RETRY")
+                self.assertTrue(blocked["refresh"]["last_good_preserved"])
+                self.assertEqual(blocked["accepted_context_hash"], first["accepted_context_hash"])
+                self.assertEqual((self.state / "last-good.json").read_bytes(), accepted)
+                observer.poll_once()  # Existing post-attempt observation.
+                now[0] += .5
+                with patch.object(archctx, "manifest", side_effect=AssertionError("backoff hash")):
+                    observer.poll_once()
+                self.assertEqual(refresh.call_count, 1)
+                self.assertEqual(observer._quick_inputs(), inputs)  # Lock release changed no source/config/LKG.
+                now[0] += .5
+                recovered = observer.poll_once()
+                self.assertEqual(recovered["refresh"]["status"], "PASS")
+                self.assertEqual(refresh.call_count, 2)
+                self.assertEqual(refresh.call_args.kwargs["expected_context_hash"], first["accepted_context_hash"])
+        self.assertEqual(recovered["status"], "FRESH")
+        self.assertNotEqual(recovered["accepted_context_hash"], first["accepted_context_hash"])
+        self.assertEqual(observer.bundle()[1]["context_hash"], recovered["accepted_context_hash"])
+
+    def test_retry_backoff_is_capped_and_stops_on_deterministic_failure(self):
+        observer = self.observer(live=True, settle_seconds=0)
+        now = [100.]
+        refresh_impl = archctx.refresh
+        def slow_refresh(*args, **kwargs):
+            now[0] += 5  # Backoff starts after validation, not at poll start.
+            return refresh_impl(*args, **kwargs)
+        with patch("archctx_development.time.monotonic", side_effect=lambda: now[0]):
+            observer.poll_once()
+            self.definition["components"][0]["purpose"] = "Revised ownership"
+            self.save()
+            accepted = (self.state / "last-good.json").read_bytes()
+            with patch.object(archctx, "refresh", side_effect=slow_refresh) as refresh:
+                with archctx.refresh_lock(self.state):
+                    for attempt, delay in enumerate((1, 2, 4, 8, 16, 30, 30), 1):
+                        self.assertEqual(observer.poll_once()["refresh"]["status"], "RETRY")
+                        self.assertEqual(refresh.call_count, attempt)
+                        # Even an external receipt must not reset or accelerate backoff.
+                        archctx.record_usage(self.state, "refresh", {"status": "RETRY"}, 1)
+                        now[0] += delay - .25
+                        observer.poll_once()
+                        self.assertEqual(refresh.call_count, attempt)
+                        now[0] += .25
+                with patch.object(archctx, "archify_projection", side_effect=ValueError("synthetic renderer failure")) as render:
+                    failed = observer.poll_once()
+                    self.assertEqual(failed["refresh"]["status"], "INVALID")
+                    now[0] += 60
+                    observer.poll_once()
+                    now[0] += 60
+                    observer.poll_once()
+                    self.assertEqual(render.call_count, 1)
+                self.assertEqual(refresh.call_count, 8)
+            (self.repo / "owner.py").write_text("ANCHOR_REMOVED = 1\n")
+            self.assertEqual(observer.poll_once()["refresh"]["status"], "INVALID")
+            with patch.object(archctx, "refresh", side_effect=AssertionError("invalid anchor must not retry")):
+                now[0] += 60
+                observer.poll_once()
+                now[0] += 60
+                observer.poll_once()
+            self.assertEqual((self.state / "last-good.json").read_bytes(), accepted)
+
+    def test_retry_reconciles_another_writer_and_settles_new_inputs(self):
+        observer = self.observer(live=True, settle_seconds=10)
+        now = [100.]
+        with patch("archctx_development.time.monotonic", side_effect=lambda: now[0]):
+            observer.poll_once()
+            self.definition["components"][0]["purpose"] = "Other writer's declaration"
+            self.save()
+            observer.poll_once()
+            now[0] += 10
+            with archctx.refresh_lock(self.state):
+                self.assertEqual(observer.poll_once()["refresh"]["status"], "RETRY")
+            self.assertEqual(archctx.refresh(self.config, str(self.state))["status"], "PASS")
+            predecessor = archctx.load(self.state / "last-good.json")["context_hash"]
+            with patch.object(archctx, "refresh", wraps=archctx.refresh) as refresh:
+                now[0] += 30
+                adopted = observer.poll_once()
+                self.assertEqual(adopted["status"], "FRESH")
+                self.assertEqual(adopted["accepted_context_hash"], predecessor)
+                self.assertEqual(refresh.call_count, 0)  # No duplicate publication of the other writer's result.
+                self.definition["components"][0]["purpose"] = "New settled declaration"
+                self.save()
+                observer.poll_once()
+                now[0] += 9
+                observer.poll_once()
+                self.assertEqual(refresh.call_count, 0)
+                now[0] += 1
+                self.assertEqual(observer.poll_once()["refresh"]["status"], "PASS")
+                self.assertEqual(refresh.call_count, 1)
+                self.assertEqual(refresh.call_args.kwargs["expected_context_hash"], predecessor)
+
     def test_invalid_intermediate_and_repo_redirect_keep_previous_authority(self):
         observer = self.observer(live=True, settle_seconds=0)
         first = observer.poll_once()
@@ -166,6 +268,9 @@ class DevelopmentTest(unittest.TestCase):
         result = observer.poll_once()
         self.assertEqual(result["refresh"]["status"], "CANDIDATE_REVIEW_REQUIRED")
         self.assertEqual((self.state / "last-good.json").read_bytes(), accepted)
+        with patch.object(archctx, "refresh", side_effect=AssertionError("candidate must not retry")), patch("archctx_development.time.monotonic", return_value=10**12):
+            observer.poll_once()
+            observer.poll_once()
         (self.repo / "provider.py").unlink()
         (self.repo / "owner.py").write_text("ANCHOR_REMOVED = 1\n")
         self.assertEqual(observer.poll_once()["refresh"]["status"], "INVALID")

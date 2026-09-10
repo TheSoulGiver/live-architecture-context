@@ -96,6 +96,7 @@ class DevelopmentObserver:
         if isinstance(initial_view, str):
             self._paths.add(initial_view)
         self._signature = self._attempted = self._cursor = None
+        self._retry_at = self._retry_delay = 0.
         self._input_signature = None
         self._external_stamps, self._external = None, {}
         self._updates: dict[str, Any] = {}
@@ -317,10 +318,14 @@ class DevelopmentObserver:
                 input_signature = archctx.semantic({"source": source, "controls": controls, "accepted": accepted, "dirty": dirty, "git_error": git_error})
                 signature = archctx.semantic({"inputs": input_signature, "external": external})
                 changed = signature != self._signature
-                if changed:
-                    inputs_changed = input_signature != self._input_signature
+                inputs_changed = input_signature != self._input_signature
+                if inputs_changed:
+                    self._retry_at = self._retry_delay = 0.
+                retry_due = bool(self._retry_at and started >= self._retry_at)
+                if changed or retry_due:
                     if inputs_changed:
                         self._settled_at = started
+                    # A due retry must observe current inputs/LKG, never reuse an old predecessor.
                     record, payload = self._observe(dirty, git_error, external)
                     if self.live and inputs_changed:
                         archctx.watch_once(self.config_path, self.explicit, apply=False)
@@ -329,8 +334,11 @@ class DevelopmentObserver:
                     self._metrics["observations"] += 1
                 else:
                     payload, record = self.bundle()
-                if self.live and self._pending_controls and started - self._settled_at >= self.settle_seconds and self._attempted != input_signature:
+                if not self._pending_controls:
+                    self._retry_at = self._retry_delay = 0.
+                if self.live and self._pending_controls and started - self._settled_at >= self.settle_seconds and (self._attempted != input_signature or retry_due):
                     self._attempted = input_signature
+                    self._retry_at = 0.  # Exceptions and deterministic failures stay suppressed.
                     self._metrics["refreshes"] += 1
                     self._refresh = {"status": "REFRESHING", "reasons": ["Validating settled shared config/view; accepted blueprint retained" if record else "Building first accepted blueprint from configured inputs"],
                                      "at": datetime.now(timezone.utc).isoformat(), "last_good_preserved": bool(record)}
@@ -341,6 +349,9 @@ class DevelopmentObserver:
                                          "observed_at": self._refresh["at"]}
                     result = archctx.refresh(self.config_path, self.explicit, expected_context_hash=record.get("context_hash"),
                                              changed=self._refresh_paths)
+                    if result.get("status") == "RETRY":
+                        self._retry_delay = min(30., max(1., self._retry_delay * 2))
+                        self._retry_at = time.monotonic() + self._retry_delay
                     reasons = result.get("failures") or result.get("reason") or ([result["next_action"]] if result.get("status") != "PASS" and result.get("next_action") else [])
                     self._refresh = {"status": result.get("status"), "reasons": archctx.bounded_strings(reasons),
                                      "at": datetime.now(timezone.utc).isoformat(), "last_good_preserved": result.get("last_good_preserved", result.get("status") != "PASS")}
