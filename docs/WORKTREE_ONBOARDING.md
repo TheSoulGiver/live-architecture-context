@@ -85,6 +85,13 @@ travel through Git. `.archctx/` ignores at every depth cover the local
 environment, retained context, receipts and generated blueprint. Confirm ignore
 rules before committing; existing tracked runtime files are not untracked by init.
 No startup hook, new service, adoption log, or development gate is required.
+This repository's optional `.codex/hooks.json` still needs exact host trust in
+each new environment; without it, use the same `updates` query when relevant.
+Codex CLI 0.153.4 [loads linked-worktree hooks from the primary checkout](https://github.com/openai/codex/blob/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a/codex-rs/config/src/loader/mod.rs#L1127),
+not from that worktree's `.codex/hooks.json`. Trust alone does not fix a missing
+hook source, and an empty local `config.toml` does not change this rule. Use the
+pull path until the actual primary-checkout hook source is reviewed/configured;
+do not relocate a repository or alter another checkout just to enable notices.
 
 ## What remains a human/Agent decision
 

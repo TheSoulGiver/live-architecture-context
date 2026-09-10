@@ -88,7 +88,9 @@ queries and displays stale results with their retained evidence.
 
 The bundled `plugins/live-architecture-context/.codex-plugin/plugin.json`
 points only at three small skills. It has no lifecycle hook and registers no
-always-on MCP tool set:
+always-on MCP tool set. This source checkout separately offers opt-in,
+[trusted Codex hooks](docs/LIVING_BLUEPRINT.md#consume-changes-during-development)
+using the same read-only `updates --since <cursor>` API:
 
 - `architecture-context` for canonical/truth/evidence, unfamiliar cross-module
   systems, recent changes, and legacy ambiguity.
@@ -113,7 +115,8 @@ This is optional guidance, not a dependency, fork, hook, or reciprocal skill
 invocation. Both tools work independently. The referenced upstream manifest
 declares lifecycle hooks; that does not prove any consumer has loaded or run
 them. Check the actual local source rather than identifying a same-named plugin
-from a remote version alone. LAC adds no hook or repeated instruction injection.
+from a remote version alone. The skills add no hook or repeated rule injection;
+the optional checkout hooks offer only changed context, never Ponytail's rules.
 
 One-time readiness and per-task usage are different decisions. Restore a chosen
 project-local tool/config at an authorized normal boundary using the existing

@@ -5,8 +5,8 @@
     {
       "id": "codex-skills",
       "type": "frontend",
-      "label": "Codex skills",
-      "sublabel": "On-demand architecture orientation",
+      "label": "Codex entry",
+      "sublabel": "Skills / trusted advisory hooks",
       "tag": "agent entry",
       "pos": [40, 70],
       "size": [210, 76]
@@ -15,7 +15,7 @@
       "id": "archctx-cli",
       "type": "backend",
       "label": "Archctx CLI / MCP",
-      "sublabel": "Canonical evidence and compact queries",
+      "sublabel": "Canonical evidence and coalesced updates",
       "tag": "canonical",
       "pos": [330, 70],
       "size": [220, 76]
@@ -76,7 +76,7 @@
     }
   ],
   "relations": [
-    {"id": "skills-guide-cli", "label": "guides", "variant": "default"},
+    {"id": "hook-reads-updates", "label": "updates", "variant": "default"},
     {"id": "cli-requests-refresh", "label": "", "variant": "emphasis"},
     {"id": "candidate-blocks-refresh", "label": "review", "variant": "security"},
     {"id": "refresh-promotes-last-good", "label": "", "variant": "emphasis"},
