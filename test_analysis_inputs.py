@@ -1,6 +1,7 @@
 """Bounded capture checks using the real optional pinned provider."""
 import json
 import io
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -17,6 +18,24 @@ PLUGIN = ROOT / "architecture/.archctx/tools/understand/understand-anything-plug
 
 
 class AnalysisInventoryTest(unittest.TestCase):
+    def test_readonly_inventory_keeps_git_ignore_semantics_across_owner_tokens(self):
+        with tempfile.TemporaryDirectory(prefix="analysis-owner-", dir=ROOT.parent) as temporary:
+            repo = Path(temporary).resolve()
+            subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
+            (repo / ".gitignore").write_text("local-note.txt\n")
+            (repo / "source.py").write_text("VALUE = 1\n")
+            (repo / "local-note.txt").write_text("ignored local data\n")
+            config_before = (repo / ".git/config").read_bytes()
+            expected = inputs.inventory(repo)
+            with patch.dict(os.environ, {"GIT_TEST_ASSUME_DIFFERENT_OWNER": "1"}):
+                blocked = subprocess.run(["git", "-C", str(repo), "ls-files"], capture_output=True)
+                self.assertNotEqual(blocked.returncode, 0)
+                self.assertIn(b"dubious ownership", blocked.stderr)
+                actual = inputs.inventory(repo)
+            self.assertEqual(actual, expected)
+            self.assertNotIn("local-note.txt", actual["paths"])
+            self.assertEqual((repo / ".git/config").read_bytes(), config_before)
+
     @staticmethod
     def git_process(raw):
         process = Mock(stdout=io.BytesIO(raw), returncode=None)
@@ -58,8 +77,12 @@ class AnalysisInventoryTest(unittest.TestCase):
 
     def test_git_inventory_timeout_and_success_release_only_owned_process(self):
         successful = self.git_process(b"a.py\0b.py\0")
-        with patch.object(inputs.subprocess, "Popen", return_value=successful), patch.object(inputs.threading, "Timer"):
+        with patch.object(inputs.subprocess, "Popen", return_value=successful) as spawn, patch.object(inputs.threading, "Timer"):
             self.assertEqual(inputs._git_inventory(ROOT), (["a.py", "b.py"], True))
+        command = spawn.call_args.args[0]
+        self.assertEqual(command[:5], ["git", "-c", "safe.directory=" + str(ROOT.resolve()), "-c", "core.fsmonitor=false"])
+        self.assertEqual(spawn.call_args.kwargs["env"]["GIT_NO_LAZY_FETCH"], "1")
+        self.assertEqual(spawn.call_args.kwargs["env"]["GIT_OPTIONAL_LOCKS"], "0")
         successful.kill.assert_not_called()
         stalled = self.git_process(b"")
         timer = Mock()

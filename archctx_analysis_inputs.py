@@ -41,8 +41,12 @@ def _read(repo: Path, name: str, budget: int) -> bytes:
 
 
 def _git_inventory(repo: Path) -> tuple[list[str], bool] | None:
-    command = ["git", "-C", str(repo), "ls-files", "-z", "--cached", "--others", "--exclude-standard"]
-    process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    # Trust only the explicitly selected project for this fixed read: Windows
+    # sandbox tokens can differ from its owner. No hooks, lazy fetch or config writes.
+    command = ["git", "-c", "safe.directory=" + str(repo.resolve()), "-c", "core.fsmonitor=false",
+               "-C", str(repo), "ls-files", "-z", "--cached", "--others", "--exclude-standard"]
+    process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        env={**os.environ, "GIT_NO_LAZY_FETCH": "1", "GIT_OPTIONAL_LOCKS": "0"})
     expired = False
 
     def stop():
