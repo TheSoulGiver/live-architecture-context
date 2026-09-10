@@ -286,6 +286,9 @@ const read=s=>vm.runInContext(s,context);
  const body=text(get('analysis'));for(const expected of ['已发现 · 待复审','尚未确认归属','不是 canonical 组件','<img src=x onerror=bad()>','<script>bad()</script>','owner','imports','direction=backward'])assert.ok(body.includes(expected),expected);
  const links=e=>e.children.flatMap(v=>[...(v.tag==='a'?[v]:[]),...links(v)]);assert.ok(links(get('analysis'))[0].href.includes('/analysis-source?analysis='+'a'.repeat(64)));
  assert.deepEqual(Array.from(frame.contentWindow.messages.at(-1).direct),[]);
+ assert.equal(context.findingState({status:'STALE',files:['scope.py']},{status:'STALE',changed_files:['dependency.py']})[0],'源码已变化 · 待重新理解');
+ next.development.updates.source_analysis.candidates[0].previous_review={decision:'accepted',at:'historical-input'};await context.poll();
+ assert.ok(text(get('analysis')).includes('历史复审：accepted · historical-input；不代表当前确认。'));assert.ok(text(get('analysis')).includes('尚未确认归属'));
  assert.equal(read('data.relations.length'),0);get('flow-view').onclick();assert.equal(get('flows').hidden,false);assert.equal(get('analysis').hidden,true);
  for(const expected of ['已发现的源码导览 · 待核对流程','step-6'])assert.ok(text(get('flows')).includes(expected),expected);get('now').onclick();assert.equal(read('picture'),frame);
  next.development.updates.source_analysis.scopes=[

@@ -890,6 +890,14 @@ def discoveries(config_path: Path, explicit: str | None, limit: int = 8, details
             finding["status"] = "STALE" if finding["affected_files"] else "FRESH"
             if "@dependency-resolution" in changed:
                 finding.update(status="STALE", dependency_status="UNKNOWN", affected_files=finding["affected_files"] + ["@dependency-resolution"])
+            if not decision:
+                previous = max((d for d in completed + committed
+                    if d.get("state") == "final" and d.get("id") == candidate["id"]
+                    and d.get("source_analysis") == publication_proof(receipt)), key=lambda d: d.get("at", ""), default=None)
+                if previous:
+                    finding["previous_review"] = {key: previous.get(key) for key in
+                        ("decision", "at", "bindings", "content_revision", "evidence_revision")}
+                    finding["previous_review"].update(analysis_id=receipt["analysis_id"], meaning="history_only_not_current_confirmation")
             if not details:
                 edges = candidate.get("raw_relations", [])
                 finding["raw_relations"] = edges[:2]

@@ -126,6 +126,29 @@ class ProjectUnderstandingTest(unittest.TestCase):
             self.assertEqual(self.show(analysis=finding["scope_id"])["analysis_id"], finding["analysis_id"])
         self.assert_accepted_unchanged()
 
+    def test_unknown_dependencies_keep_exact_review_visible_without_inheriting_confirmation(self):
+        input_path = self.capture("a.py", "unknown")
+        receipt = archctx.load(input_path)
+        receipt["dependencies"]["a.py"].update(coverage="unknown", unknown=["dynamic import"])
+        archctx.atomic(input_path, receipt)
+        a = self.publish(input_path)
+        candidate = a["candidates"][0]
+        self.assertEqual(understand.review(self.config, str(self.state), candidate["id"],
+            bindings=["component:a-owner"], analysis=a["analysis_id"])["status"], "PASS")
+        finding = self.show(analysis=a["scope_id"])["candidates"][0]
+        self.assertEqual((finding["review_state"], finding["bindings"], finding["dependency_status"]),
+                         ("unreviewed", [], "UNKNOWN"))
+        history = finding["previous_review"]
+        self.assertEqual((history["decision"], history["bindings"], history["analysis_id"]),
+                         ("accepted", ["component:a-owner"], a["analysis_id"]))
+        self.assertEqual(history["meaning"], "history_only_not_current_confirmation")
+        self.assertEqual(understand.review(self.config, str(self.state), candidate["id"],
+            reason="existing_canonical", analysis=a["analysis_id"])["status"], "PASS")
+        self.assertEqual(self.show(analysis=a["scope_id"])["candidates"][0]["previous_review"]["decision"], "rejected")
+        # A different analysis with the same candidate identity cannot borrow it.
+        other = self.publish(self.capture("a.py", "different-interpretation", title="Changed interpretation"))
+        self.assertNotIn("previous_review", other["candidates"][0])
+
     def test_same_scope_late_result_cannot_replace_a_newer_publication_with_identical_source(self):
         baseline = self.publish(self.capture("a.py", "baseline"))
         baseline_path, baseline_receipt = understand.analysis_receipt(self.state, baseline["analysis_id"])
