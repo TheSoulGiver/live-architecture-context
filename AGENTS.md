@@ -44,6 +44,11 @@ definition travels with source; the local index and optional renderer do not.
 Raw config/view are editing inputs, not the default query response.
 
 The working human map and reproduction commands are in `docs/LIVING_BLUEPRINT.md`.
+When `updates.source_analysis` contains relevant findings, treat them as
+provider-labelled investigation leads, not accepted ownership. For an initial
+understanding gap or meaningful source change, use `docs/UNDERSTAND.md` with an
+explicit small scope and the existing authorized Codex session. Reuse available
+CALM/analysis facts when sufficient; never analyze on every save or query.
 For a new checkout, rebuild local context with `refresh` when the task includes
 context restoration. Review candidates against source, maintain the shared
 config/view yourself, and use `accept` / `reject` for the observed semantic

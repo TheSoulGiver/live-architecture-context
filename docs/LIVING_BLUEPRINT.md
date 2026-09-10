@@ -79,7 +79,11 @@ python archctx.py --config architecture/architecture.json reject <id> --reason n
 ```
 
 Codex supplies the semantic judgment and edits the tracked declarations.
-Every candidate must be decided before promotion. The watcher only promotes
+Deterministic drift candidates must be decided before promotion. Optional
+[source-analysis findings](UNDERSTAND.md) are separate, non-blocking leads:
+the sidebar shows their captured version, pending/accepted review state and
+historical source links without inserting them into the accepted diagram.
+The watcher only promotes
 already-declared, validated changes; it does not invoke a model or silently
 invent canonical structure. Fresh sessions read `AGENTS.md` and the tracked
 config, then rebuild their own local index. No previous chat is required.

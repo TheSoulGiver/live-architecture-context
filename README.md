@@ -81,6 +81,16 @@ deployed revision is running.
 
 ## On-demand Codex skills
 
+An optional [Understand Anything source-analysis path](docs/UNDERSTAND.md)
+adds real upstream structure and Codex-derived responsibilities for a selected
+saved-source scope. It captures actual worktree bytes, keeps raw edge meaning
+and provider provenance, and presents unaccepted findings in the existing Live
+Development Map. Codex reconciles useful findings with existing IDs through
+`accept` / shared config / Archify; a file or upstream layer is not automatically
+a canonical component. Saved changes make the relevant analysis stale. Queries
+never start a model, and unchanged files can reuse their prior analysis at the
+next meaningful task boundary. This is optional analysis, not another Gate.
+
 For this repository's [Live Development Map](docs/LIVING_BLUEPRINT.md), run
 `python archctx_blueprint.py --live` after the one-time Archify setup. The page
 shows the accepted system plus saved worktree changes, without rendering on
