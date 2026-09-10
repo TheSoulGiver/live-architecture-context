@@ -7,6 +7,7 @@
       "Relations are authored, source-evidence-backed architecture claims; this view is not a complete call graph.",
       "CALM is packaged as an optional loopback adapter but is not configured for this repository, so no CALM code facts are shown.",
       "The diagram is a focused human view. Source, accepted context, and retained local receipts remain the authority for details and history.",
+      "Saved-worktree activity is a separate local observation, not canonical architecture or runtime. Codex maintains semantic declarations; the live page never invokes a model.",
       "Native hook configuration does not prove host trust or delivery; offered cursors are not consumption receipts.",
       "Rendered IR, HTML, comparisons, snapshots, watcher state, and pinned renderer checkout stay in local .archctx state and are not GitHub facts."
     ]
@@ -77,7 +78,7 @@
     {
       "id": "blueprint-viewer",
       "name": "Local Living Blueprint viewer",
-      "purpose": "Serves only receipt-bound accepted Archify artifacts and hash-verified source evidence on a loopback, read-only local UI.",
+      "purpose": "Displays the accepted Archify map and a separate saved-worktree overlay; node details, source evidence and retained deltas share accepted context identity. The local HTTP UI remains read-only; --live owns only its observer.",
       "truth_sources": ["archctx_blueprint.py"],
       "code_symbol": "render_bundle",
       "tags": ["human-view", "local-only", "source-evidence"],
@@ -85,6 +86,19 @@
         {"path": "archctx_blueprint.py", "contains": "def render_bundle("},
         {"path": "archctx_blueprint.py", "contains": "if url.path == \"/source\":"},
         {"path": "archctx_blueprint.py", "contains": "ThreadingHTTPServer((\"127.0.0.1\", args.port)"}
+      ]
+    },
+    {
+      "id": "development-observer",
+      "name": "Development observation",
+      "purpose": "Caches bounded observations from the selected worktree and caller-cursor updates. Ordinary saves change the overlay; settled shared definitions can request existing validation/publication. It owns no canonical architecture or event ledger.",
+      "truth_sources": ["archctx_development.py"],
+      "code_symbol": "DevelopmentObserver",
+      "tags": ["development-overlay", "bounded", "local-only"],
+      "evidence": [
+        {"path": "archctx_development.py", "contains": "class DevelopmentObserver:"},
+        {"path": "archctx_development.py", "contains": "def git_changes(repo: Path)"},
+        {"path": "archctx_development.py", "contains": "def bundle(self):"}
       ]
     },
     {
@@ -114,6 +128,34 @@
     }
   ],
   "relations": [
+    {
+      "id": "viewer-starts-observer",
+      "from": "blueprint-viewer",
+      "to": "development-observer",
+      "kind": "owns-local-observation-lifecycle",
+      "evidence": [
+        {"path": "archctx_blueprint.py", "contains": "observer = DevelopmentObserver(path, args.state_dir, live=args.live).start()"},
+        {"path": "archctx_blueprint.py", "contains": "development, record = observer.bundle()"}
+      ]
+    },
+    {
+      "id": "observer-reads-updates",
+      "from": "development-observer",
+      "to": "archctx-cli",
+      "kind": "reads-caller-cursor-updates",
+      "evidence": [
+        {"path": "archctx_development.py", "contains": "packet = archctx.updates(self.config_path, self.explicit, self._cursor)"}
+      ]
+    },
+    {
+      "id": "observer-requests-refresh",
+      "from": "development-observer",
+      "to": "refresh-transaction",
+      "kind": "requests-existing-publication-after-definition-settles",
+      "evidence": [
+        {"path": "archctx_development.py", "contains": "result = archctx.refresh(self.config_path, self.explicit, expected_context_hash=record.get(\"context_hash\")"}
+      ]
+    },
     {
       "id": "hook-reads-updates",
       "from": "codex-skills",
@@ -223,6 +265,7 @@
       "archctx_to_archify.py",
       "calm_query.py",
       "archctx_blueprint.py",
+      "archctx_development.py",
       "tools/archify.py",
       "pyproject.toml",
       "plugins/live-architecture-context/.codex-plugin/plugin.json",

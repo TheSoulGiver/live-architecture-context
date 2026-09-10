@@ -4,8 +4,7 @@ From this checkout, with Python 3.10+, Git and Node.js 18+:
 
 ```sh
 python tools/archify.py setup
-python archctx.py --config architecture/architecture.json refresh
-python archctx_blueprint.py
+python archctx_blueprint.py --live
 ```
 
 The first command installs the reviewed Archify commit
@@ -14,19 +13,35 @@ state. An existing clean checkout at that revision can be reused with
 `ARCHIFY_HOME`. Nothing is downloaded by refresh or the viewer. `setup`
 does not overwrite an existing installation.
 
-The viewer opens an unused loopback port. It shows the accepted architecture,
-source evidence, coverage, current freshness, and Archify's actual
-Before / Delta / After artifact. Keep this in another terminal while developing:
+Run `setup` once; thereafter `python archctx_blueprint.py --live` is the single
+development entrypoint. It opens an unused loopback port and starts its own
+project-local observer. If no last-good exists, it requests the existing
+refresh transaction to build the first accepted blueprint. Failed validation
+does not create a pretend baseline. An existing last-good remains readable.
 
-```sh
-python archctx.py --config architecture/architecture.json watch --apply --poll-ms 1000
-```
+The page's **Current system / 当前系统** view shows the accepted Archify diagram
+with a separate saved-worktree overlay. Select a component for responsibilities,
+upstream/downstream relations and evidence; **Focus neighbors / 聚焦邻居** reduces
+clutter. **Recent changes / 最近变化** shows the latest retained accepted delta;
+**Before / After** opens Archify's real comparison. Selection, expanded evidence
+and camera position are retained where their identities still exist.
+
+Saved implementation changes highlight affected components without rendering or
+inventing architecture nodes. Unmapped files remain explicitly uncovered.
+After Codex maintains the shared config/view, settled definition changes request
+existing validation and publication; the page switches to the accepted bundle
+automatically. Invalid intermediate saves and failed refreshes retain the old
+map with specific reasons. The development observation has its own identity;
+its file activity is neither accepted architecture, task progress nor runtime.
 
 `archctx-blueprint` is also installed by `python -m pip install .`.
-Use `--no-open --port 0` for an unattended local viewer. Stop each process with
-Ctrl+C. They are developer tools, not system services. The viewer has no write
-API, no access logs, and only serves accepted artifacts and matching source
-evidence. When a file no longer matches its accepted hash, its evidence link
+Use `--no-open --port 0` for an unattended local viewer, or omit `--live` for
+observation without automatic publication. Ctrl+C stops this viewer and its own
+observer, not other sessions or services. No second watch terminal is needed;
+the standalone `archctx.py ... watch` remains available for CLI-only use.
+The HTTP page has no write API or access logs. Accepted evidence and explicitly
+observed working-source links have separate identity checks. When a file no
+longer matches its accepted hash, its accepted evidence link
 asks the reader to verify the worktree. GitHub source links appear in the
 Archify artifact only when those evidence bytes match the stated commit.
 
@@ -57,6 +72,9 @@ Every candidate must be decided before promotion. The watcher only promotes
 already-declared, validated changes; it does not invoke a model or silently
 invent canonical structure. Fresh sessions read `AGENTS.md` and the tracked
 config, then rebuild their own local index. No previous chat is required.
+The live observer reuses `watch_once`, `updates` and the existing refresh
+transaction. Idle polls use bounded metadata checks; continuous saves coalesce.
+There is no new event ledger, model-per-save analysis or render-per-save loop.
 
 ## Consume changes during development
 
@@ -85,6 +103,8 @@ reads (five-second host timeout), not background hooks; they never reject a
 tool call or extend a turn. Global settings are untouched.
 Agents maintain semantic changes at completion even if they did not need a
 lookup before editing. The packaged skills remain usable without these hooks.
+Starting the live page does not enable or fix native hook delivery; next-read
+`updates` remains the independent, portable Agent path.
 
 ## One accepted version
 
@@ -112,7 +132,27 @@ still recover from source.
 Old visual bundles can expire while their compact historical context remains
 queryable. Generations, renderer installation, usage and watcher state stay
 under ignored `architecture/.archctx/`. Git stores source, config/view and
-their semantic diff.
+their semantic diff. Keep local browser screenshots/recordings there too;
+they are observation evidence, not committed architecture or consumer results.
+
+## What we borrowed from Understand Anything
+
+Design only, from MIT-licensed version `5feed1f2ce4f9c368d860f4c0ebc36d98a4693fc`:
+[layer/focus views and cheap overlays on positioned nodes](https://github.com/Egonex-AI/Understand-Anything/blob/5feed1f2ce4f9c368d860f4c0ebc36d98a4693fc/understand-anything-plugin/packages/dashboard/src/components/GraphView.tsx#L970).
+We retain Archify rendering and LAC's existing state; no code or mandatory
+dependency was copied. Its [incremental preparation](https://github.com/Egonex-AI/Understand-Anything/blob/5feed1f2ce4f9c368d860f4c0ebc36d98a4693fc/understand-anything-plugin/skills/understand/prepare-incremental.mjs#L476)
+requires committed source, so it cannot replace saved-worktree observation.
+
+A bounded comparison used only `archctx_blueprint.py` at `a8923bb` and two
+in-memory fixtures. Python stdlib AST supplied structural shapes to the actual
+upstream [fingerprint comparison](https://github.com/Egonex-AI/Understand-Anything/blob/5feed1f2ce4f9c368d860f4c0ebc36d98a4693fc/understand-anything-plugin/packages/core/src/fingerprint.ts#L142)
+and update classifier, not its Tree-sitter end-to-end pipeline. An error-message
+edit became `COSMETIC / SKIP`; an optional parameter became
+`STRUCTURAL / FULL_UPDATE` because one file exceeded 50% of the one-file scope.
+Existing LAC ownership/candidate logic mapped both edits to `blueprint-viewer`
+without inventing candidates. Thus file activity stays visible even when no
+architecture declaration changes. These fixtures demonstrate classification,
+not natural consumer adoption or measured token savings.
 
 ## Code graph availability
 

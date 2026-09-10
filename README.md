@@ -81,10 +81,12 @@ deployed revision is running.
 
 ## On-demand Codex skills
 
-For this repository's working map, follow [Open the Living Blueprint](docs/LIVING_BLUEPRINT.md).
-The tracked config/view reproduce a local, source-linked Archify diagram and
-Before / Delta / After. The viewer follows the same accepted version as Agent
-queries and displays stale results with their retained evidence.
+For this repository's [Live Development Map](docs/LIVING_BLUEPRINT.md), run
+`python archctx_blueprint.py --live` after the one-time Archify setup. The page
+shows the accepted system plus saved worktree changes, without rendering on
+each source save. Codex maintains changed architecture declarations; validation
+then publishes one shared version for the map and Agent queries. Before / Delta
+/ After and retained evidence remain available when a new update fails.
 
 The bundled `plugins/live-architecture-context/.codex-plugin/plugin.json`
 points only at three small skills. It has no lifecycle hook and registers no

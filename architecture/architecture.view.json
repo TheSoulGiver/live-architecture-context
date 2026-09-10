@@ -1,6 +1,6 @@
 {
   "title": "Live Architecture Context",
-  "subtitle": "Accepted source-backed blueprint · focused product view, not a full call graph",
+  "subtitle": "Agent context → validated architecture → human map · saved changes remain a separate observation",
   "nodes": [
     {
       "id": "codex-skills",
@@ -32,10 +32,19 @@
     {
       "id": "blueprint-viewer",
       "type": "frontend",
-      "label": "Living Blueprint",
-      "sublabel": "Loopback-only accepted view and evidence",
+      "label": "Live Development Map",
+      "sublabel": "Accepted map + working changes",
       "tag": "human view",
       "pos": [950, 300],
+      "size": [220, 76]
+    },
+    {
+      "id": "development-observer",
+      "type": "messagebus",
+      "label": "Development observation",
+      "sublabel": "Saved files / coalesced deltas",
+      "tag": "not canonical",
+      "pos": [950, 530],
       "size": [220, 76]
     },
     {
@@ -76,6 +85,7 @@
     }
   ],
   "relations": [
+    {"id": "viewer-starts-observer", "label": "", "variant": "dashed"},
     {"id": "hook-reads-updates", "label": "updates", "variant": "default"},
     {"id": "cli-requests-refresh", "label": "", "variant": "emphasis"},
     {"id": "candidate-blocks-refresh", "label": "review", "variant": "security"},
