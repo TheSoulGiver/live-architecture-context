@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import archctx
+import archctx_understand as understand
 
 CHANGE_LIMIT, PAYLOAD_BYTES, GIT_BYTES = 128, 64 * 1024, 256 * 1024
 
@@ -99,6 +100,7 @@ class DevelopmentObserver:
         self._retry_at = self._retry_delay = 0.
         self._input_signature = None
         self._external_stamps, self._external = None, {}
+        self._analysis_stamp, self._analysis_paths, self._analysis_metadata = None, set(), {}
         self._updates: dict[str, Any] = {}
         self._settled_at = time.monotonic()
         self._pending_controls = False
@@ -167,6 +169,18 @@ class DevelopmentObserver:
             path = (self.repo / relative).resolve()
             path.relative_to(self.repo)
             source[relative] = stamp(path)
+        self._analysis_metadata.pop("path_error", None)
+        for relative in self._analysis_paths - paths:
+            try:
+                path, normalized = archctx.repo_file(self.repo, relative, "analysis source")
+                segments = {p.casefold() for p in Path(relative).parts + path.relative_to(self.repo).parts}
+                if normalized != relative or segments.intersection({".git", ".archctx", ".ua"}) or path.is_relative_to(self.directory):
+                    raise ValueError("analysis source moved into local state")
+                source[relative] = stamp(path)
+            except (OSError, ValueError) as error:
+                # Optional source aliases can change without a receipt write.
+                # Keep checking the name for recovery; never taint canonical paths.
+                self._analysis_metadata["path_error"] = str(error)[:500]
         controls = {str(self.config_path): stamp(self.config_path)}
         settings = self._config.get("archify", {})
         if isinstance(settings, dict) and isinstance(settings.get("view"), str):
@@ -188,6 +202,26 @@ class DevelopmentObserver:
         return config, record
 
     def _external_state(self):
+        analysis_path = understand.current_path(self.directory)
+        analysis_stamp = stamp(analysis_path)
+        if analysis_stamp != self._analysis_stamp:
+            self._analysis_paths = set()
+            self._analysis_metadata = {"stamp": analysis_stamp}
+            try:
+                if analysis_stamp is not None:
+                    receipt = understand.local_json(analysis_path, understand.SUMMARY_BYTES)
+                    hashes = receipt["source_hashes"]
+                    if Path(receipt["worktree"]).resolve() != self.repo or not isinstance(hashes, dict) or not 0 < len(hashes) <= understand.SOURCE_LIMIT:
+                        raise ValueError("analysis scope does not belong to this viewer")
+                    for relative in hashes:
+                        path, normalized = archctx.repo_file(self.repo, relative, "analysis source")
+                        if normalized != relative or {p.casefold() for p in Path(relative).parts}.intersection({".git", ".archctx"}) or path.is_relative_to(self.directory):
+                            raise ValueError("analysis scope contains a non-product path")
+                    self._analysis_paths = set(hashes)
+                    self._analysis_metadata["analysis_id"] = receipt["analysis_id"]
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                self._analysis_metadata["error"] = str(error)[:500]  # Optional analysis never invalidates the accepted map.
+            self._analysis_stamp = analysis_stamp
         decision_path, usage_path = archctx.candidate_decision_path(self.directory), archctx.usage_path(self.directory)
         stamps = stamp(decision_path), stamp(usage_path)
         if stamps != self._external_stamps:
@@ -202,7 +236,7 @@ class DevelopmentObserver:
             operation["status"] = latest.get("result", {}).get("status")
             self._external = {"decisions": decisions, "operation": operation}
             self._external_stamps = stamps
-        return self._external
+        return {**self._external, "analysis_receipt": self._analysis_metadata}
 
     def _observe(self, dirty, git_error, external):
         config, record = self._load()
@@ -228,6 +262,9 @@ class DevelopmentObserver:
                 if archctx.sha((self.repo / path).read_text(encoding="utf-8", errors="replace").encode()) != expected:
                     changed_evidence.add(path)
         observed = {item["path"]: dict(item, dirty_git=True) for item in dirty}
+        changed_analysis = set(packet.get("source_analysis", {}).get("changed_files", [])) & self._analysis_paths
+        for path in changed_analysis:
+            observed.setdefault(path, {"path": path, "kind": "delete" if stamp(self.repo / path) is None else "modify", "dirty_git": False})
         rename_origins = {item["old_path"] for item in dirty if item.get("kind") == "rename"}
         for path in changed_evidence:
             if path in rename_origins:
@@ -249,6 +286,7 @@ class DevelopmentObserver:
             impacted = set().union(*(set(archctx.authored(old_context, owner, "upstream")) for owner in direct)) if direct else set()
             changes.append({**item, "components": sorted(direct), "impacted_components": sorted(impacted - direct),
                             "sha256": current.get(path), "observation": "manifested_content" if path in current else "metadata_only",
+                            "analysis_changed": bool(changed_analysis.intersection(paths)),
                             "evidence_changed": bool(changed_evidence.intersection(paths)), "covered": bool(direct)})
         changes.sort(key=lambda item: (not item["covered"], item["path"]))
         for item in changes[:CHANGE_LIMIT]:
@@ -293,6 +331,7 @@ class DevelopmentObserver:
                         "worktree": str(self.repo), "worktree_revision": archctx.revision(self.repo), "changes": changes, "pending": pending, "updates": packet,
                         "counts": {"changed": len(changes), "unmapped": sum(not c["covered"] for c in changes), "omitted": 0},
                         "limitations": [git_error] if git_error else [], "watched_files": len(current),
+                        "analysis_stat_files": len(self._analysis_paths),
                         "live": self.live, "metadata_stat_limit": CHANGE_LIMIT,
                         "legacy_semantics": {"components": "union of working/accepted evidence owners", "impacted_components": "all-kind incoming authored reach in accepted graph, minus legacy direct IDs; use change_scope instead"},
                         "omitted_dirty_metadata_stats": max(0, len(dirty) - CHANGE_LIMIT),
@@ -313,13 +352,15 @@ class DevelopmentObserver:
                         self._invalid_config_stamp = stamp(self.config_path)
                         raise
                     self._invalid_config_stamp = False
+                external = self._external_state()
                 source, controls, accepted = self._quick_inputs()
                 dirty, git_error = git_changes(self.repo) if self._git_root and Path(self._git_root).resolve() == self.repo else ([], "Git root is not this selected repository; dirty-file coverage is unknown")
                 for item in dirty[:CHANGE_LIMIT]:
+                    if item["path"] in self._analysis_paths and item["path"] not in source:
+                        continue  # Already isolated as an invalid optional source alias.
                     path = (self.repo / item["path"]).resolve()
                     path.relative_to(self.repo)
                     source.setdefault(item["path"], stamp(path))
-                external = self._external_state()
                 input_signature = archctx.semantic({"source": source, "controls": controls, "accepted": accepted, "dirty": dirty, "git_error": git_error})
                 signature = archctx.semantic({"inputs": input_signature, "external": external})
                 changed = signature != self._signature
@@ -380,6 +421,7 @@ class DevelopmentObserver:
 
     def _failure(self, error):
         with self._lock:
+            analysis = self._payload.get("updates", {}).get("source_analysis")
             for change in self._payload.get("changes", []):
                 if scope := change.get("change_scope"):
                     scope.update(freshness="stale", observation_state="retained_previous_observation", working_config_hash=None,
@@ -393,6 +435,9 @@ class DevelopmentObserver:
                              "updates": {"status": "INVALID", "freshness": "stale", "cursor": self._cursor, "reason": [str(error)[:500]]},
                              "error": str(error)[:500], "refresh": self._refresh, "metrics": dict(self._metrics),
                              "last_good_preserved": bool(self._record)}
+            if analysis:
+                self._payload["updates"]["source_analysis"] = {**analysis, "status": "STALE", "retained_previous_observation": True,
+                    "reason": "Current observation unavailable; retained analysis is not current source evidence"}
             self._bound(self._payload)
 
     @staticmethod
@@ -416,3 +461,6 @@ class DevelopmentObserver:
             payload.update(preserved, changes=[], pending={"unavailable": "observation exceeded 64 KiB; use focused architecture queries"},
                            updates={"status": packet.get("status"), "freshness": packet.get("freshness"), "cursor": packet.get("cursor")},
                            details_omitted=True)
+            if analysis := packet.get("source_analysis"):
+                payload["updates"]["source_analysis"] = {key: analysis.get(key) for key in ("configured", "status", "analysis_id", "candidate_count", "blocking")}
+                payload["updates"]["source_analysis"].update(details_omitted=True, next_action="use the source analysis query for bounded details")
