@@ -20,9 +20,11 @@ class NativeCliTest(unittest.TestCase):
             with patch("archctx_understand.native_understand") as work, patch("archctx_understand.discoveries", return_value={"status": "MISSING"}) as query:
                 self.assertEqual(archctx.mcp_value(config, None, "architecture_understand", {"show": True})["status"], "MISSING")
                 work.assert_not_called()
-                query.assert_called_once_with(config, None, details=False)
+                query.assert_called_once_with(config, None, details=False, analysis=None, files=None)
+                archctx.understand(config, None, {"show": True, "files": ["a.py"]})
+                query.assert_called_with(config, None, details=False, analysis=None, files=["a.py"])
                 with self.assertRaisesRegex(ValueError, "read-only"):
-                    archctx.understand(config, None, {"show": True, "files": ["a.py"]})
+                    archctx.understand(config, None, {"show": True, "question": "must not start work"})
             self.assertFalse((config.parent / ".archctx").exists())
             archctx.atomic(repo / ".archctx/architecture.json", {})
             with self.assertRaisesRegex(ValueError, "multiple"):

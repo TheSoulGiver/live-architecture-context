@@ -85,7 +85,7 @@
     {
       "id": "blueprint-viewer",
       "name": "Local system map",
-      "purpose": "Organizes the accepted Archify map around project, components, declared flows and changes. Related understanding findings, source evidence and exact Agent queries use the same component IDs with distinct accepted/analysis freshness. The local HTTP UI remains read-only and owns only its observer.",
+      "purpose": "Organizes the accepted Archify map around project, components, declared flows and changes. Read-only scope selection shows retained findings and their captured source with independent scope freshness, preserving accepted component IDs and diagram identity. The local HTTP UI owns only its observer.",
       "truth_sources": ["archctx_blueprint.py"],
       "code_symbol": "render_bundle",
       "tags": ["human-view", "local-only", "source-evidence"],
@@ -98,7 +98,7 @@
     {
       "id": "development-observer",
       "name": "Development observation",
-      "purpose": "Caches bounded worktree observations and caller-cursor updates, reusing the core declared change scope and source-understanding metadata. Ordinary saves update the overlay; settled definitions request the existing serialized validation/publication without model execution.",
+      "purpose": "Caches bounded worktree observations and caller-cursor updates, reusing the core declared change scope and metadata from independently retained source scopes. Idle polls stat known source/receipt paths; ordinary saves update the overlay. Settled definitions request the existing serialized validation/publication without model execution.",
       "truth_sources": ["archctx_development.py"],
       "code_symbol": "DevelopmentObserver",
       "tags": ["development-overlay", "bounded", "local-only"],
@@ -111,17 +111,26 @@
     {
       "id": "source-analysis",
       "name": "Source understanding",
-      "purpose": "Captures bounded saved source and advances pinned mechanics around the current Agent's semantic contract. Reuses unchanged results and stable findings with independent content/evidence revisions; first and subsequent explicit reviews bind canonical IDs through the same refresh and LKG transaction.",
-      "truth_sources": ["archctx_understand.py", "archctx_runtime.py"],
+      "purpose": "Captures bounded saved source, static dependency evidence and resolution inventory around the current Agent's semantic contract. Retains independent project scopes and reuses verified results; unknown dependency coverage cannot inherit review. Explicit reviews bind canonical IDs through existing refresh/LKG publication. Capacity checks preserve original evidence and reclaim only eligible mechanical caches.",
+      "truth_sources": ["archctx_understand.py", "archctx_analysis_inputs.py", "archctx_assets/analysis_dependencies.mjs", "archctx_analysis_storage.py", "archctx_runtime.py"],
       "code_symbol": "native_understand",
       "tags": ["optional", "source-analysis", "non-blocking", "local-only"],
       "evidence": [
         {"path": "archctx_understand.py", "contains": "def prepare(config_path: Path"},
+        {"path": "archctx_understand.py", "contains": "with capture(repo, directory, plugin, files) as captured:"},
+        {"path": "archctx_analysis_inputs.py", "contains": "def capture(repo: Path, directory: Path, plugin: Path, files: list[str])"},
+        {"path": "archctx_analysis_inputs.py", "contains": "steps.append(_run(\"analysis_dependencies.mjs\", [node, str(helper)"},
+        {"path": "archctx_assets/analysis_dependencies.mjs", "contains": "const { analyzeFileWithOutcomes } = await import"},
         {"path": "archctx_understand.py", "contains": "def native_understand(config_path: Path"},
+        {"path": "archctx_understand.py", "contains": "def analysis_catalog(directory: Path)"},
+        {"path": "archctx_understand.py", "contains": "catalog[\"scopes\"][selected_scope] = retain_analysis(directory, receipt, raw)"},
         {"path": "archctx_understand.py", "contains": "def review_revisions(candidate: dict"},
         {"path": "archctx_understand.py", "contains": "def import_graph(config_path: Path"},
         {"path": "archctx_understand.py", "contains": "def check_publication(repo: Path"},
         {"path": "archctx_understand.py", "contains": "def _review_transaction(config_path: Path"},
+        {"path": "archctx_understand.py", "contains": "return ensure_capacity(directory, reserve_bytes=reserve, protected_ids=protected)"},
+        {"path": "archctx_analysis_storage.py", "contains": "def ensure_capacity(directory: Path, reserve_bytes: int = 0,"},
+        {"path": "archctx_analysis_storage.py", "contains": "CAPACITY_BYTES = 256 * 1024 * 1024"},
         {"path": "archctx_understand.py", "contains": "PROVIDER_REVISION = \"5feed1f2ce4f9c368d860f4c0ebc36d98a4693fc\""},
         {"path": "archctx_runtime.py", "contains": "def setup(config_path: Path"}
       ]
@@ -156,12 +165,12 @@
     {
       "id": "cli-reads-source-analysis", "from": "archctx-cli", "to": "source-analysis",
       "kind": "reads-nonblocking-investigation", "dependency": "from_to",
-      "evidence": [{"path": "archctx.py", "contains": "analysis = discoveries(config_path, explicit)"}]
+      "evidence": [{"path": "archctx.py", "contains": "analysis = discoveries(config_path, explicit, analysis=analysis, files=files)"}]
     },
     {
       "id": "candidate-reviews-source-analysis", "from": "candidate-review", "to": "source-analysis",
       "kind": "dispatches-explicit-source-review", "dependency": "from_to",
-      "evidence": [{"path": "archctx.py", "contains": "return review(config_path, explicit, ident, bindings=bindings)"}]
+      "evidence": [{"path": "archctx.py", "contains": "return review(config_path, explicit, ident, bindings=bindings, analysis=analysis)"}]
     },
     {
       "id": "analysis-requests-refresh", "from": "source-analysis", "to": "refresh-transaction",
@@ -171,13 +180,14 @@
     {
       "id": "viewer-reads-analysis-source", "from": "blueprint-viewer", "to": "source-analysis",
       "kind": "reads-content-bound-captured-source", "dependency": "from_to",
-      "evidence": [{"path": "archctx_blueprint.py", "contains": "receipt_path = understand.current_path(directory)"},
+      "evidence": [{"path": "archctx_blueprint.py", "contains": "receipt_path, receipt = understand.analysis_receipt(directory, ident)"},
+                   {"path": "archctx_blueprint.py", "contains": "selected_analysis = understand.discoveries(config_path, explicit,"},
                    {"path": "archctx_blueprint.py", "contains": "self.reply(200, analysis_source(repo, directory, parse_qs(url.query)))"}]
     },
     {
       "id": "observer-stats-analysis-scope", "from": "development-observer", "to": "source-analysis",
       "kind": "observes-receipt-and-saved-source-metadata", "dependency": "from_to",
-      "evidence": [{"path": "archctx_development.py", "contains": "analysis_path = understand.current_path(self.directory)"}]
+      "evidence": [{"path": "archctx_development.py", "contains": "manifest = understand.source_manifest(self.directory, self.repo)"}]
     },
     {
       "id": "viewer-starts-observer",
@@ -329,6 +339,9 @@
       "archctx_blueprint.py",
       "archctx_development.py",
       "archctx_understand.py",
+      "archctx_analysis_inputs.py",
+      "archctx_assets/analysis_dependencies.mjs",
+      "archctx_analysis_storage.py",
       "archctx_runtime.py",
       "tools/archify.py",
       "pyproject.toml",

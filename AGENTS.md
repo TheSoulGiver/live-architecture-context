@@ -57,7 +57,7 @@ results and continue with `understand --resume <analysis_id>`. LAC owns mechanic
 extraction, merge, validation and import; the existing authorized Agent owns
 semantic judgment. No upstream script choreography is needed. Reuse sufficient
 CALM/understanding facts; never analyze on every save or ordinary query.
-`understand --show --details` reads existing findings. Their stable IDs and
+`understand --show --files <task-files>` or `--show --analysis <scope-id>` reads the relevant retained scope; add `--details` only when needed. Their stable IDs and
 content/evidence revisions are separate from canonical component identity.
 Treat `updates.source_analysis` as source-grounded investigation leads; only
 current explicit review bindings establish a reviewed relationship to the same

@@ -23,12 +23,12 @@ MAX_ARTIFACT_BYTES = 8 * 1024 * 1024
 
 
 def analysis_source(repo: Path, directory: Path, args: dict[str, list[str]]) -> str:
-    """Read only a current receipt's captured source, never arbitrary worktree files."""
-    receipt_path = understand.current_path(directory)
-    receipt = understand.local_json(receipt_path, understand.SUMMARY_BYTES)
+    """Read only a retained analysis's captured source, never arbitrary worktree files."""
+    ident, relative, digest = (args.get(key, [""])[0] for key in ("analysis", "path", "sha"))
+    receipt_path, receipt = understand.analysis_receipt(directory, ident)
+    receipt_digest = archctx.sha(understand.bounded_raw(receipt_path, understand.SUMMARY_BYTES))
     if not isinstance(receipt.get("source_hashes"), dict):
         raise ValueError("invalid analysis source manifest")
-    ident, relative, digest = (args.get(key, [""])[0] for key in ("analysis", "path", "sha"))
     if not re.fullmatch(r"[0-9a-f]{64}", ident) or ident != receipt["analysis_id"] or Path(receipt["worktree"]).resolve() != repo:
         raise ValueError("analysis version/worktree changed; reopen the source analysis")
     if not re.fullmatch(r"[0-9a-f]{64}", digest) or receipt["source_hashes"].get(relative) != digest:
@@ -43,7 +43,8 @@ def analysis_source(repo: Path, directory: Path, args: dict[str, list[str]]) -> 
     if normalized != relative or {p.casefold() for p in Path(relative).parts + path.relative_to(source).parts}.intersection({".git", ".archctx", ".ua"}):
         raise ValueError("invalid captured source path")
     raw = understand.bounded_raw(path, understand.SOURCE_BYTES)
-    if archctx.sha(raw) != digest or understand.local_json(receipt_path, understand.SUMMARY_BYTES) != receipt:
+    if (archctx.sha(raw) != digest or understand.analysis_receipt(directory, ident) != (receipt_path, receipt)
+            or archctx.sha(understand.bounded_raw(receipt_path, understand.SUMMARY_BYTES)) != receipt_digest):
         raise ValueError("captured source or analysis receipt changed while reading")
     lines = raw.decode("utf-8", errors="replace").splitlines()
     line = int(args.get("line", ["1"])[0])
@@ -163,7 +164,7 @@ PAGE = r"""<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="v
 header{height:102px;display:flex;align-items:center;justify-content:space-between;padding:18px 28px;border-bottom:1px solid var(--line);gap:20px}
 .eyebrow{font:11px Consolas,monospace;letter-spacing:2px;color:var(--green)}h1{font:29px Georgia,"Microsoft YaHei",serif;letter-spacing:-.5px;margin:5px 0}h2{font-size:17px;margin:0 0 12px}h3{font-size:14px;margin:19px 0 8px}
 small,.muted{color:var(--muted)}p{line-height:1.65;margin:8px 0}code{font:12px Consolas,monospace;overflow-wrap:anywhere}a{color:var(--green);text-decoration-thickness:1px;text-underline-offset:3px}
-button,select{font:inherit;color:inherit;background:transparent;border:1px solid var(--line);border-radius:5px;padding:8px 12px;cursor:pointer}button:hover,button[aria-pressed=true]{background:#e2eadd;border-color:#648976}button:focus-visible,a:focus-visible,summary:focus-visible{outline:3px solid #d8942b;outline-offset:3px}button:disabled{cursor:default;opacity:.45}[hidden]{display:none!important}
+button,select{font:inherit;color:inherit;background:transparent;border:1px solid var(--line);border-radius:5px;padding:8px 12px;cursor:pointer}button:hover,button[aria-pressed=true]{background:#e2eadd;border-color:#648976}button:focus-visible,a:focus-visible,summary:focus-visible,select:focus-visible{outline:3px solid #d8942b;outline-offset:3px}button:disabled{cursor:default;opacity:.45}[hidden]{display:none!important}
 .status{font-size:12px;display:flex;align-items:center;gap:8px;justify-content:flex-end}.dot{width:8px;height:8px;border-radius:50%;background:var(--green)}.stale .dot{background:var(--amber)}#identity{display:block;font:11px Consolas,monospace;max-width:360px;margin-top:8px;text-align:right}
 nav{height:54px;display:flex;align-items:center;gap:7px;padding:8px 24px;background:#fffdf7;border-bottom:1px solid var(--line)}nav .spacer{flex:1}nav a{font-size:12px}
 main{display:grid;grid-template-columns:minmax(0,1fr) 370px;height:calc(100vh - 190px);min-height:430px}.canvas{min-width:0;position:relative;display:flex;flex-direction:column;background:#fff;border-right:1px solid var(--line)}
@@ -187,8 +188,9 @@ footer{height:34px;border-top:1px solid var(--line);display:flex;justify-content
 <aside><div class="section-label" id="panel-title">项目概览</div><div id="summary"></div><section id="project" aria-label="项目概览"></section><div id="detail"></div><section id="analysis" aria-label="相关发现"></section><section id="flows" aria-label="声明流程" hidden></section><div id="changes" hidden></div><details id="components-list"><summary>全部组件</summary><div id="sources"></div></details><details id="coverage"><summary>覆盖范围与可信边界</summary><p id="scope"></p><ul id="limits"></ul><p id="graph" class="muted"></p></details></aside></main>
 <footer><span id="observation">OBSERVATION —</span><span>文件活动 ≠ 任务进度 ≠ 线上运行 · 本地只读页面</span></footer>
 <script>
-let data=null,latest=null,mode='now',panel='now',selected=null,selectedChange=null,focused=false,version='',navigation=null,lastObservation='',detailVersion='',etag='',loading=null,loadingKey='',loadTimer;
+let data=null,latest=null,mode='now',panel='now',selected=null,selectedChange=null,focused=false,version='',navigation=null,lastObservation='',detailVersion='',etag='',loading=null,loadingKey='',loadTimer,pollTimer,analysisQuery='';
 const $=id=>document.getElementById(id),enc=encodeURIComponent;
+if(typeof URLSearchParams!=='undefined'){let args=new URLSearchParams(window.location?.search||''),query=[];for(let key of ['analysis','file'])for(let value of args.getAll(key))query.push(key+'='+enc(value));if(query.length)analysisQuery='?'+query.join('&');}
 let picture=$('picture');
 const nodeId=id=>'c-'+Array.from(new TextEncoder().encode(id),b=>b.toString(16).padStart(2,'0')).join('');
 const el=(tag,text,cls)=>{let e=document.createElement(tag);if(text!==undefined)e.textContent=text;if(cls)e.className=cls;return e};
@@ -197,7 +199,7 @@ const changeScope=change=>{let s=change.change_scope;return s?.contract==='decla
 const analysis=()=>data?.development?.updates?.source_analysis;
 const relatedFindings=id=>(analysis()?.candidates||[]).filter(c=>(c.related_components||[]).includes(id));
 const sourceChanged=c=>(data?.development?.changes||[]).some(x=>{let s=changeScope(x);return s&&s.observation_state!=='retained_previous_observation'&&(s.accepted?.direct_components||[]).includes(c.id)});
-function findingState(c,a){if(a.retained_previous_observation||!['FRESH','STALE'].includes(a.status))return ['分析状态未知','changed'];if((a.changed_files||[]).some(path=>(c.related_source_files||c.files||[]).includes(path)||(c.evidence||[]).some(e=>e.path===path)))return ['源码已变化 · 待重新理解','changed'];return c.review_state==='accepted'?['已复审发现','']:c.review_state==='rejected'?['已排除发现','']:['已发现 · 待复审','discovered'];}
+function findingState(c,a){if(a.retained_previous_observation||!['FRESH','STALE'].includes(a.status))return ['分析状态未知','changed'];if(c.status==='STALE'||(a.changed_files||[]).some(path=>(c.related_source_files||c.files||[]).includes(path)||(c.evidence||[]).some(e=>e.path===path)))return ['源码已变化 · 待重新理解','changed'];return c.review_state==='accepted'?['已复审发现','']:c.review_state==='rejected'?['已排除发现','']:['已发现 · 待复审','discovered'];}
 function componentButton(c){let b=el('button',c.name||c.id,'node-button');b.setAttribute('aria-pressed',c.id===selected);b.append(el('small',c.id),el('span','已确认','state-tag'));if(sourceChanged(c))b.append(el('span','源码已变化','state-tag changed'));let count=relatedFindings(c.id).length;if(count)b.append(el('span',count+' 条相关发现','state-tag discovered'));b.onclick=()=>select(c.id);return b;}
 function panels(){for(let id of ['now','component-view','flow-view','recent','delta'])$(id).setAttribute('aria-pressed',id===panel);$('panel-title').textContent=({now:'项目概览','component-view':'组件 / 同一身份','flow-view':'流程 / 声明关系',recent:'变化 / 工作区与已接受版本',delta:'变化 / 版本比较'})[panel];$('project').hidden=panel!=='now';$('detail').hidden=panel!=='component-view';$('flows').hidden=panel!=='flow-view';$('changes').hidden=!['recent','delta'].includes(panel);$('components-list').hidden=!['now','component-view'].includes(panel);if(panel==='component-view')$('components-list').open=true;}
 function drawProject(){let box=$('project'),a=analysis(),components=data.components||[],d=data.development||{};box.replaceChildren();let stats=el('div',undefined,'project-stats');for(let [count,label,target] of [[components.length,'已确认组件','component-view'],[a?.candidate_count||0,'源码发现','component-view'],[d.counts?.changed??(d.changes||[]).length,'已保存变化','recent']]){let b=el('button');b.append(el('strong',String(count)),el('span',label));b.onclick=()=>{if(target==='component-view'){selected=null;detailVersion=''}showPanel(target)};stats.append(b)}box.append(stats,el('p',data.coverage?.scope||'从组件进入系统，沿声明关系找到源码依据。'));let q=data.project?.queries;if(q){let details=el('details');details.append(el('summary','Agent 从同一项目继续'),el('p','在以下项目目录运行：','scope-note'),el('code',data.project.root,'query'),el('code',q.updates,'query'));box.append(details)}}
@@ -232,15 +234,22 @@ function scopeGroup(parent,label,scope,working=false){let box=el('div',undefined
 }
 function drawAnalysis(){let a=analysis(),box=$('analysis');box.replaceChildren();box.hidden=!['now','component-view'].includes(panel);if(box.hidden)return;
  box.append(el('h2',selected&&panel==='component-view'?'这个组件的相关发现':'源码理解'));
- if(!a?.configured){box.append(el('p','尚未进行源码理解。让 Agent 选择文件与问题后运行 understand；页面读取不会启动分析。','scope-note'));return;}
- box.append(el('p',a.status==='FRESH'?'分析 FRESH · 捕获源码仍一致':(a.status||'UNKNOWN')+' · 分析源码需要复查','scope-note'));
+ if(a?.scopes?.length){let label=el('label','理解范围 '),choice=el('select'),option=el('option','跟随当前聚焦范围');option.value='';choice.append(option);choice.setAttribute('aria-label','源码理解范围');choice.style.maxWidth='100%';
+ for(let scope of a.scopes){let state=scope.status==='FRESH'?'源码一致':scope.status==='STALE'?'源码已变化':'状态未知',name=(scope.source_files||[]).join('、'),option=el('option',name+' · '+state);option.value=scope.scope_id||scope.analysis_id;choice.append(option);box.append(el('p',(scope.selected?'当前查看 · ':'')+name+' · '+state+' · '+(scope.candidate_count||0)+' 条发现','scope-note'));}
+ let requested=analysisQuery.startsWith('?analysis=')?decodeURIComponent(analysisQuery.slice(10)):'',chosen=a.scopes.find(scope=>[scope.scope_id,scope.analysis_id].includes(requested));choice.value=chosen?(chosen.scope_id||chosen.analysis_id):'';choice.onchange=()=>{analysisQuery=choice.value?'?analysis='+enc(choice.value):'';etag='';window.history?.replaceState(null,'',analysisQuery||window.location?.pathname||'/');poll()};label.append(choice);box.append(label,el('p','各范围独立核对源码；发现的复审状态见下方。未列出的文件不代表已理解。','scope-note'));}
+ if(a?.omitted_scope_count)box.append(el('p','另有 '+a.omitted_scope_count+' 个范围未展开。','scope-note'));
+ if(a?.uncovered_files?.length)box.append(el('p','请求未覆盖：'+a.uncovered_files.join('、')+'；需要 Agent 为这些文件选择理解范围。','scope-note'));
+ if(a?.status==='UNKNOWN')box.append(el('p','当前请求没有可复用的理解范围。','scope-note'));
+ if(!a?.configured){if(!a?.status)box.append(el('p','尚未进行源码理解。让 Agent 选择文件与问题后运行 understand；页面读取不会启动分析。','scope-note'));return;}
+ box.append(el('p',a.status==='FRESH'?'所选范围 FRESH · 捕获源码仍一致':(a.status||'UNKNOWN')+' · 所选范围的分析源码需要复查','scope-note'));
  if(a.reason)box.append(el('p',a.reason,'scope-note'));if(a.changed_files?.length)box.append(el('p','分析后已变化：'+a.changed_files.join('、'),'scope-note'));if(a.retained_previous_observation)box.append(el('p','保留上次观察；当前分析状态未知。','scope-note'));
  let findings=selected&&panel==='component-view'?relatedFindings(selected):(a.candidates||[]);
  if(!findings.length)box.append(el('p',selected?'当前有界结果没有关联到此组件的发现。':'当前没有待展示的源码发现。','scope-note'));
  for(let c of findings){let d=el('details',undefined,'finding'),state=findingState(c,a),summary=el('summary',c.title||c.id);summary.append(el('span',state[0],'state-tag '+state[1]));d.dataset.finding=c.id;d.append(summary,el('p',c.summary||''),el('code',c.id,'source'));
  let bindings=c.review_state==='accepted'?(c.bindings||[]):[];d.append(el('p',bindings.length?'已复审绑定：'+bindings.join('、'):'源码交集只定位调查范围；尚未确认归属。','scope-note'));
+ if(c.previous_review)d.append(el('p','历史复审：'+c.previous_review.decision+' · '+(c.previous_review.at||'')+'；不代表当前确认。','scope-note'));
  for(let id of c.related_components||[]){let component=data.components?.find(x=>x.id===id);if(component){let b=el('button',component.name||id);b.onclick=()=>select(id);d.append(b)}}
- for(let e of c.evidence||[]){let link=el('a',e.path+':'+e.line+' · 捕获时的源码','source');link.target='_blank';link.rel='noopener';link.href='/analysis-source?analysis='+enc(a.analysis_id)+'&path='+enc(e.path)+'&sha='+enc(e.sha256)+'&line='+enc(e.line);d.append(link)}
+ for(let e of c.evidence||[]){let link=el('a',e.path+':'+e.line+' · 捕获时的源码','source');link.target='_blank';link.rel='noopener';link.href='/analysis-source?analysis='+enc(c.analysis_id||a.analysis_id)+'&path='+enc(e.path)+'&sha='+enc(e.sha256)+'&line='+enc(e.line);d.append(link)}
  for(let r of c.raw_relations||[])d.append(el('p',r.source+' → '+r.target+' · '+r.type+' · direction='+r.direction,'scope-note'));
  if(c.omitted_raw_relations||c.omitted_evidence)d.append(el('p','省略关系 '+(c.omitted_raw_relations||0)+' / 锚点 '+(c.omitted_evidence||0)+'；使用分析查询查看范围。','scope-note'));
  d.append(el('p','内容 '+(c.content_revision||'unknown')+' · 证据 '+(c.evidence_revision||'unknown'),'scope-note'));box.append(d);}
@@ -300,10 +309,10 @@ function paint(next){if(!next)return;data=next;let d=data.development||{},fresh=
  $('scope').textContent=data.coverage?.scope||'仅覆盖配置声明的组件与证据。';$('limits').replaceChildren(...[...(data.coverage?.limitations||[]),...(d.limitations||[])].map(s=>el('li',s)));
  $('graph').textContent=data.graph?.configured?'代码图：'+(data.graph.provider||'external')+' / '+(data.graph.freshness||'unverified'):'CALM 未接入；图中是架构声明，不是完整调用图。';
  $('observation').textContent='OBS '+(d.observation_id||'—').slice(0,12)+' · '+(d.observed_at||'').replace('T',' ').slice(0,19)+' UTC · '+(d.counts?.unmapped||0)+' 项未覆盖';
- let observation=data.context_hash+':'+d.observation_id;if(observation!==lastObservation){lastObservation=observation;$('sources').replaceChildren(...(data.components||[]).map(componentButton));send();}detail();drawProject();drawChanges();drawAnalysis();drawFlows();panels();}
-async function poll(){try{let r=await fetch('/api/current',{cache:'no-store',headers:etag?{'If-None-Match':etag}:{}});if(r.status===304)return;if(!r.ok)throw Error(await r.text());let next=await r.json();etag=r.headers.get('ETag')||'';
+ let observation=data.context_hash+':'+d.observation_id+':'+(analysis()?.analysis_id||'');if(observation!==lastObservation){lastObservation=observation;$('sources').replaceChildren(...(data.components||[]).map(componentButton));send();}detail();drawProject();drawChanges();drawAnalysis();drawFlows();panels();}
+async function poll(){clearTimeout(pollTimer);let requested=analysisQuery;try{let r=await fetch('/api/current'+requested,{cache:'no-store',headers:etag?{'If-None-Match':etag}:{}});if(r.status===304)return;if(!r.ok)throw Error(await r.text());let next=await r.json();if(requested!==analysisQuery)return;etag=r.headers.get('ETag')||'';
  if(next.status==='RETRY')throw Error('观察期间状态已变化，保留当前画面，下一次读取重试。');latest=next;view();
-}catch(e){etag='';$('state').textContent='暂不可更新 · 保留当前画面';$('reason').textContent=String(e)}finally{setTimeout(poll,1500)}}poll();
+}catch(e){if(requested===analysisQuery){etag='';$('state').textContent='暂不可更新 · 保留当前画面';$('reason').textContent=String(e)}}finally{if(requested===analysisQuery){clearTimeout(pollTimer);pollTimer=setTimeout(poll,1500)}}}poll();
 </script></html>"""
 
 # The original receipt-bound Archify artifact stays untouched. This local-only
@@ -390,6 +399,19 @@ def handler(config_path: Path, explicit: str | None, observer: DevelopmentObserv
                     value = archctx.snapshot(config_path, explicit)
                 receipt = value.get("archify", {})
                 if url.path == "/api/current":
+                    args = parse_qs(url.query, keep_blank_values=True, max_num_fields=understand.SOURCE_LIMIT + 1)
+                    selection = {key: args[key] for key in ("analysis", "file") if key in args}
+                    if "analysis" in args and (len(args["analysis"]) != 1 or not args["analysis"][0]):
+                        raise ValueError("select one analysis identity")
+                    selected_analysis = None
+                    if selection:
+                        selected_analysis = understand.discoveries(config_path, explicit,
+                            analysis=args.get("analysis", [None])[0], files=args.get("file"))
+                        if ("accepted_context_hash" in selected_analysis
+                                and selected_analysis["accepted_context_hash"] != value.get("last_good_context_hash")):
+                            raise ValueError("selected analysis accepted context changed; retry after the next observation")
+                        development = {**(development or {}), "updates": {**(development or {}).get("updates", {}),
+                                                                          "source_analysis": selected_analysis}}
                     result = {key: value.get(key) for key in ("status", "revision", "reason", "graph")}
                     result.update(context_hash=value.get("last_good_context_hash"), generation=Path(receipt.get("generation", "")).name,
                                   artifacts=list(receipt.get("artifacts", {})), delta_kind=receipt.get("delta_kind"),
@@ -403,7 +425,8 @@ def handler(config_path: Path, explicit: str | None, observer: DevelopmentObserv
                                             for command in ("canonical", "evidence", "trace")} for c in result["components"]}}
                     etag = '"' + archctx.semantic({key: result.get(key) for key in ("context_hash", "generation", "status", "reason")} |
                         {"observation": (development or {}).get("observation_id"), "refresh": (development or {}).get("refresh"),
-                         "observer_running": (development or {}).get("observer_running")}) + '"'
+                         "observer_running": (development or {}).get("observer_running"),
+                         "selection": selection, "selected_analysis": selected_analysis}) + '"'
                     if self.headers.get("If-None-Match") == etag:
                         self.reply(304, b"", etag=etag)
                     else:

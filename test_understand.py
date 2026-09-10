@@ -1,11 +1,42 @@
 """Focused checks for optional source analysis; provider fixtures are not dogfood."""
+from contextlib import contextmanager
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 import archctx
+import archctx_analysis_inputs as inputs
 import archctx_understand as ua
+
+
+@contextmanager
+def fixture_capture(repo, directory, plugin, files, upstream=None):
+    """Mechanical fixture for these independent assignment-only source files."""
+    contents = ua.source_bytes(repo, files)
+    listing = inputs.inventory(repo, files)
+    parent = directory / "understand"
+    parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="fixture-capture-", dir=parent) as temporary:
+        source = Path(temporary) / "source"
+        source.mkdir()
+        for relative, raw in contents.items():
+            archctx.atomic_bytes(source / relative, raw)
+        if upstream:
+            scan_path = Path(temporary) / "scan.json"
+            step = upstream(plugin, "scan-project.mjs", [source, scan_path], source)
+            scan = archctx.load(scan_path)
+        else:
+            scan = {"scriptCompleted": True, "files": [{"path": p, "language": "python"} for p in sorted(contents)],
+                "totalFiles": len(contents), "filteredByIgnore": 0, "estimatedComplexity": "small",
+                "stats": {"byLanguage": {"python": len(contents)}}}
+            step = {"script": "fixture-scan", "exit_code": 0}
+        yield {"source": source, "source_hashes": ua.content_hashes(contents),
+            "source_bytes": sum(map(len, contents.values())), "dependency_hashes": {}, "dependency_contents": {},
+            "dependencies": {p: {"dependencies": [], "unresolvedLocal": [], "unknown": [], "external": [],
+                                    "coverage": "resolved"} for p in contents},
+            "resolver_hashes": {}, "resolver_contents": {}, "inventory_hash": listing["hash"],
+            "inventory_coverage": listing["coverage"], "scan": scan, "steps": [step]}
 
 
 class UnderstandTest(unittest.TestCase):
@@ -16,21 +47,14 @@ class UnderstandTest(unittest.TestCase):
             config = repo / "architecture.json"
             archctx.atomic(config, {"repo": "."})
             state = archctx.state(config, None).resolve()
-            def upstream(plugin, script, args, cwd):
-                if script == "scan-project.mjs":
-                    archctx.atomic(args[1], {"scriptCompleted": True, "files": [{"path": "source.py", "language": "python"}],
-                        "totalFiles": 1, "filteredByIgnore": 0, "estimatedComplexity": "small", "stats": {"byLanguage": {"python": 1}}})
-                else:
-                    archctx.atomic(args[1], {"scriptCompleted": True, "importMap": {"source.py": []}})
-                return {"script": script, "exit_code": 0}
-            with patch.object(ua, "provider_root", return_value=repo), patch.object(archctx, "revision", return_value="synthetic"):
-                with patch.object(ua, "run_upstream", side_effect=ValueError("interrupted")):
-                    with self.assertRaisesRegex(ValueError, "interrupted"):
-                        ua.prepare(config, None, repo, ["source.py"])
-                run = next((state / "understand/runs").iterdir())
+            with patch.object(ua, "provider_root", return_value=repo), patch.object(archctx, "revision", return_value="synthetic"), \
+                 patch.object(inputs, "capture", side_effect=fixture_capture):
+                prepared = ua.prepare(config, None, repo, ["source.py"])
+                run = Path(prepared["input"]).parent
+                # Saved incomplete state is recoverable even if its source mirror was interrupted.
+                archctx.atomic(run / "input.json", {**ua.local_json(run / "input.json"), "prepared": False})
                 (run / "source/source.py").unlink()  # Synthetic interrupted capture, not product worktree.
-                with patch.object(ua, "run_upstream", side_effect=upstream):
-                    self.assertEqual(ua.prepare(config, None, repo, ["source.py"])["status"], "NEEDS_SEMANTIC_ANALYSIS")
+                self.assertEqual(ua.prepare(config, None, repo, ["source.py"])["status"], "NEEDS_SEMANTIC_ANALYSIS")
                 with patch.object(ua, "run_upstream", side_effect=AssertionError("complete capture was re-run")):
                     self.assertEqual(ua.prepare(config, None, repo, ["source.py"])["status"], "REUSED_INPUT")
                 (run / "source/source.py").write_bytes(b"do not overwrite")
@@ -123,6 +147,9 @@ class UnderstandTest(unittest.TestCase):
             (source / "source.py").write_bytes(b"value = 1\n")
             receipt = {"analysis_id": "a" * 64, "worktree": str(root), "source_revision": "fixture",
                 "source_root": str(source), "source_hashes": ua.content_hashes(ua.source_bytes(root, ["source.py"])),
+                "dependency_hashes": {}, "resolver_hashes": {},
+                "dependencies": {"source.py": {"dependencies": [], "unresolvedLocal": [], "unknown": [],
+                                                 "external": [], "coverage": "resolved"}},
                 "provider": {"name": "understand-anything", "root": str(root / "provider/plugin"),
                              "revision": ua.PROVIDER_REVISION, "url": ua.PROVIDER_URL}}
             archctx.atomic(run / "input.json", receipt)
