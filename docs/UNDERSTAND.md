@@ -75,6 +75,10 @@ has its own source freshness and current analysis identity. Imports update the
 project catalog under the existing writer lock; independently prepared scopes
 can both publish, while a late result cannot overwrite a newer result for the
 same scope. Retained graphs are not combined into canonical architecture.
+The preparation's predecessor remains fixed across `NEEDS_AGENT` and resume,
+including recovery of mechanical inputs. A superseded result requires reading
+and re-reviewing the current findings; resume never silently rebases it. An
+identical already-published result remains an idempotent read.
 
 Completed work is reused by content and captured dependency identity. Unchanged
 saved bytes and resolved imports retain file results; changed files receive
@@ -82,6 +86,10 @@ previous symbol identities.
 Retained incoming relations must survive the merge. A complete matching result
 returns `REUSED` without new semantic work. A source change during a run returns
 `STALE`; repeat understanding for the relevant current scope.
+Automatic system reuse reads the complete hash-verified retained graph, not the
+eight-item `previous_system` preview. Layers and ordered tour steps remain whole
+in storage. If that full evidence is missing or changed, `NEEDS_AGENT` requests
+complete groups and tour; the preview cannot stand in for omitted content.
 
 ## Review into the same system map
 

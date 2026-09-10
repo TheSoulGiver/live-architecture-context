@@ -293,6 +293,7 @@ def prepare_captured(config_path: Path, directory: Path, plugin: Path, files: li
                                  "provider_revision": PROVIDER_REVISION})
     run = directory / "understand" / "runs" / source_id
     manifest_path = run / "input.json"
+    existing = {}
     if manifest_path.exists():
         existing = local_json(manifest_path)
         if existing.get("source_hashes") != hashes or existing.get("worktree") != str(repo):
@@ -308,6 +309,16 @@ def prepare_captured(config_path: Path, directory: Path, plugin: Path, files: li
             return {"status": "REUSED_INPUT", "analysis_id": source_id,
                     "input": str(manifest_path), "source_root": str(run / "source"),
                     "next_action": "reuse completed semantic results or continue the existing upstream agents"}
+        if entry_token(analysis_catalog(directory)["scopes"].get(scope_id(existing))) != existing.get("scope_base"):
+            raise ValueError("analysis scope advanced since preparation; read retained findings and re-review before recovering this run")
+    recovered = None
+    if existing.get("incremental"):
+        recovered = reusable_analysis(directory, existing, {p: row["dependencies"] for p, row in existing["dependencies"].items()})
+        old, _, reused = recovered
+        plan = existing["incremental"]
+        if (old.get("analysis_id") != plan.get("base_analysis_id")
+                or old.get("graph_sha256") != plan.get("base_graph_sha256") or reused != plan["reused_files"]):
+            raise ValueError("recovery would change the issued semantic reuse plan; retained original inputs and results, re-review current findings")
     source = run / "source"
     ua = source / ".ua"
     (ua / "tmp").mkdir(parents=True, exist_ok=True)
@@ -321,8 +332,8 @@ def prepare_captured(config_path: Path, directory: Path, plugin: Path, files: li
         archctx.atomic_bytes(run / "dependencies" / relative, raw)
     subprocess.run(["git", "init", "--quiet", str(source)], check=True, capture_output=True)
     receipt = {"version": 1, "analysis_id": source_id, "worktree": str(repo),
-               "captured_at": archctx.datetime.now(archctx.timezone.utc).isoformat(),
-               "source_revision": archctx.revision(repo), "source_hashes": hashes,
+               "captured_at": existing.get("captured_at", archctx.datetime.now(archctx.timezone.utc).isoformat()),
+               "source_revision": existing.get("source_revision", archctx.revision(repo)), "source_hashes": hashes,
                "dependency_hashes": captured["dependency_hashes"], "dependencies": captured["dependencies"],
                "resolver_hashes": captured["resolver_hashes"], "inventory_hash": captured["inventory_hash"],
                "inventory_coverage": captured.get("inventory_coverage", "unknown"),
@@ -332,7 +343,9 @@ def prepare_captured(config_path: Path, directory: Path, plugin: Path, files: li
                             "revision": PROVIDER_REVISION, "root": str(plugin)},
                "scope": "explicit files only; absence is not deletion evidence",
                "semantic_executor": "existing authorized Codex session; not run by this command"}
-    receipt["scope_base"] = entry_token(analysis_catalog(directory)["scopes"].get(scope_id(receipt)))
+    # Recovering mechanical inputs must not rebase already-issued Agent work.
+    receipt["scope_base"] = (existing.get("scope_base") if existing else
+                             entry_token(analysis_catalog(directory)["scopes"].get(scope_id(receipt))))
     if archctx.last_path(directory).exists():
         accepted = archctx.load(archctx.last_path(directory))
         receipt["accepted_object_ids"] = {"context_hash": accepted.get("context_hash"),
@@ -352,7 +365,7 @@ def prepare_captured(config_path: Path, directory: Path, plugin: Path, files: li
                        languages=sorted(scan.get("stats", {}).get("byLanguage", {})), frameworks=[],
                        importMap=imports["importMap"])
     archctx.atomic(ua / "intermediate/scan-result.json", scan_result)
-    old, previous, reused = reusable_analysis(directory, receipt, imports["importMap"])
+    old, previous, reused = recovered or reusable_analysis(directory, receipt, imports["importMap"])
     previous_nodes = {node["id"]: node for node in previous["nodes"]}
     retained = {node["id"] for node in previous["nodes"] if node.get("filePath") in reused}
     in_scope = {node["id"] for node in previous["nodes"] if node.get("filePath") in hashes}
@@ -699,17 +712,15 @@ def graph_candidates(graph: dict[str, Any], receipt: dict[str, Any], contents: d
     return result
 
 
-def import_graph(config_path: Path, explicit: str | None, input_path: Path, _locked: bool = False,
-                 _expected_scope: Any = False) -> dict[str, Any]:
+def import_graph(config_path: Path, explicit: str | None, input_path: Path, _locked: bool = False) -> dict[str, Any]:
     if not _locked:
         with archctx.refresh_lock(archctx.state(config_path, explicit).resolve() / "understand"):
-            return import_graph(config_path, explicit, input_path, _locked=True, _expected_scope=_expected_scope)
+            return import_graph(config_path, explicit, input_path, _locked=True)
     directory = archctx.state(config_path, explicit).resolve()
     input_path = input_path.resolve()
     input_path.relative_to(directory / "understand/runs")
     receipt = local_json(input_path, SUMMARY_BYTES)
     selected_scope = scope_id(receipt)
-    started_from = entry_token(analysis_catalog(directory)["scopes"].get(selected_scope))
     config = archctx.load(config_path)
     repo = archctx.repo_for(config_path, config).resolve()
     source = input_path.parent / "source"
@@ -766,9 +777,8 @@ def import_graph(config_path: Path, explicit: str | None, input_path: Path, _loc
         present = entry_token(catalog["scopes"].get(selected_scope))
         if present == entry_token(receipt):
             return discoveries(config_path, explicit, analysis=selected_scope)
-        expected_scope = receipt.get("scope_base", started_from) if _expected_scope is False else _expected_scope
-        if present != expected_scope:
-            raise ValueError("analysis scope advanced since preparation; retained newer scope and history, repeat understand for current inputs")
+        if present != receipt.get("scope_base"):
+            raise ValueError("analysis scope advanced since preparation; retained newer scope and history. Read current findings and re-review before replacing this scope; resume cannot rebase old semantic work")
         capacity(directory, len(raw) * 2 + SUMMARY_BYTES * 3 + CATALOG_BYTES, receipt["analysis_id"])
         # Migrate the single legacy entry without changing its source/graph identity.
         for key, entry in list(catalog["scopes"].items()):
@@ -1160,7 +1170,6 @@ def native_advance(config_path: Path, explicit: str | None, directory: Path,
                    input_path: Path, receipt: dict[str, Any]) -> dict[str, Any]:
     """The caller holds only the local mechanical lock, never an Agent turn."""
     import sys
-    expected_scope = entry_token(analysis_catalog(directory)["scopes"].get(scope_id(receipt)))
     source, run = Path(receipt["source_root"]), input_path.parent
     if source.resolve() != (run / "source").resolve():
         raise ValueError("analysis source identity changed")
@@ -1272,8 +1281,23 @@ def native_advance(config_path: Path, explicit: str | None, directory: Path,
     except (OSError, ValueError):
         system = {}
     if not system and receipt.get("previous_graph_content") == graph_content(assembled):
-        system = {"graph_sha256": assembled_hash, **receipt["previous_system"]}
-        archctx.atomic(system_path, system)
+        try:
+            base_analysis = receipt["incremental"]
+            previous_path = (directory / "understand/runs" / base_analysis["base_analysis_id"] /
+                             "imports" / (base_analysis["base_graph_sha256"] + ".graph.json"))
+            previous_path.resolve().relative_to((directory / "understand/runs").resolve())
+            raw = bounded_raw(previous_path, GRAPH_BYTES)
+            previous = json.loads(raw)
+            if (archctx.sha(raw) != base_analysis["base_graph_sha256"]
+                    or graph_content(previous) != graph_content(assembled)
+                    or not isinstance(previous.get("layers"), list) or not isinstance(previous.get("tour"), list)):
+                raise ValueError("complete previous system does not match its retained graph")
+            system = {"graph_sha256": assembled_hash, "layers": previous["layers"], "tour": previous["tour"]}
+        except (OSError, ValueError, KeyError, TypeError):
+            # The bounded previous_system is only a hint, never complete input.
+            base["reuse_unavailable"] = "complete retained system unavailable or changed; supply full groups and ordered tour"
+        else:
+            archctx.atomic(system_path, system)
     if (system.get("graph_sha256") != assembled_hash or not isinstance(system.get("layers"), list)
             or not isinstance(system.get("tour"), list)):
         previous = receipt.get("previous_system")
@@ -1300,7 +1324,7 @@ def native_advance(config_path: Path, explicit: str | None, directory: Path,
         if current.get("analysis_id") == receipt["analysis_id"] and current.get("graph_sha256") == archctx.sha(bounded_raw(ua / "knowledge-graph.json", GRAPH_BYTES)):
             check_publication(archctx.repo_for(config_path, archctx.load(config_path)).resolve(), directory, publication_proof(current))
             return native_findings(discoveries(config_path, explicit, analysis=scope_id(receipt)), reused=True)
-    return native_findings(import_graph(config_path, explicit, input_path, _locked=True, _expected_scope=expected_scope))
+    return native_findings(import_graph(config_path, explicit, input_path, _locked=True))
 
 
 def main():
