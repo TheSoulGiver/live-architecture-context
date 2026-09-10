@@ -481,6 +481,14 @@ def import_graph(config_path: Path, explicit: str | None, input_path: Path) -> d
     return discoveries(config_path, explicit)
 
 
+def empty_draft(config: dict[str, Any]) -> bool:
+    """Setup's read-only bootstrap state, never a valid canonical publication."""
+    if config.get("version") == archctx.CONFIG_VERSION and config.get("components") == [] and config.get("relations", []) == []:
+        archctx.coverage(config)
+        return True
+    return False
+
+
 def discoveries(config_path: Path, explicit: str | None, limit: int = 8, details: bool = False) -> dict[str, Any]:
     directory = archctx.state(config_path, explicit)
     path = current_path(directory)
@@ -489,22 +497,24 @@ def discoveries(config_path: Path, explicit: str | None, limit: int = 8, details
     try:
         receipt = local_json(path, SUMMARY_BYTES)
         config = archctx.load(config_path)
+        has_last_good = archctx.last_path(directory).exists()
+        declared = [] if not has_last_good and empty_draft(config) else archctx.components(config)
         repo = archctx.repo_for(config_path, config).resolve()
         changed = verify_sources(repo, receipt)
         completed = archctx.decision_store(directory)
-        last_good = archctx.load(archctx.last_path(directory)) if archctx.last_path(directory).exists() else {}
+        last_good = archctx.load(archctx.last_path(directory)) if has_last_good else {}
         committed = [{**decision, "state": "final"} for decision in last_good.get("candidate_decisions", [])]
         findings = []
         for candidate in receipt["candidates"]:
-            matches = archctx.owners(config, candidate["files"])
+            matches = archctx.owners(config, candidate["files"]) if declared else []
             decision = (reviewed_decision(candidate, receipt, completed, changed)
-                        or reviewed_decision(candidate, receipt, committed, changed))
+                        or reviewed_decision(candidate, receipt, committed, changed)) if declared else None
             bindings = decision.get("bindings", []) if decision and decision.get("decision") == "accepted" else []
             bound = {binding.split(":", 1)[1] for binding in bindings if binding.startswith("component:")}
             for relation in config.get("relations", []):
                 if "relation:" + archctx.relation_id(relation) in bindings:
                     bound.update((relation["from"], relation["to"]))
-            bound.intersection_update(c["id"] for c in archctx.components(config))
+            bound.intersection_update(c["id"] for c in declared)
             finding = {**candidate, **review_revisions(candidate, receipt),
                              "related_components": sorted(set(matches) | bound), "bindings": bindings,
                              "match": "review_binding" if bound else "evidence_overlap" if matches else "unmapped",
@@ -516,6 +526,7 @@ def discoveries(config_path: Path, explicit: str | None, limit: int = 8, details
             findings.append(finding)
         limit = len(findings) if limit == 0 else max(0, min(limit, 64))
         return {"configured": True, "status": "STALE" if changed else "FRESH",
+                "accepted_context_hash": last_good.get("context_hash"),
                 "analysis_id": receipt["analysis_id"], "graph_sha256": receipt["graph_sha256"],
                 "source_revision": receipt["source_revision"], "source_set_hash": archctx.semantic(receipt["source_hashes"]),
                 "provider": {key: receipt["provider"][key] for key in ("name", "url", "revision")},
@@ -674,6 +685,14 @@ def native_batch(value: dict[str, Any], files: set[str]) -> None:
         raise ValueError("semantic result must cover every scoped file exactly once with stable file IDs")
 
 
+def native_findings(analysis: dict[str, Any], reused: bool = False) -> dict[str, Any]:
+    fresh = analysis.get("status") == "FRESH"
+    return {"status": ("REUSED" if reused else "FINDINGS_READY") if fresh else analysis.get("status", "INVALID"),
+            "analysis": analysis, "automatic_model_invocations": 0,
+            "next_action": ("Agent: reconcile findings with shared component/relation definitions and source evidence, then accept; keep map running"
+                            if fresh else analysis.get("next_action", "read and repair the reported analysis result"))}
+
+
 def native_understand(config_path: Path, explicit: str | None, question: str | None = None,
                       files: list[str] | None = None, resume: str | None = None) -> dict[str, Any]:
     """Advance mechanical work to the next Agent boundary; no model runs here."""
@@ -711,10 +730,7 @@ def native_understand(config_path: Path, explicit: str | None, question: str | N
                     if (old.get("provider", {}).get("revision") == PROVIDER_REVISION
                             and set(files) <= set(old.get("source_hashes", {})) and not verify_sources(repo, old)):
                         check_publication(repo, directory, publication_proof(old))
-                        analysis = discoveries(config_path, explicit)
-                        return {"status": "REUSED" if analysis.get("status") == "FRESH" else analysis.get("status", "INVALID"),
-                                "analysis": analysis, "automatic_model_invocations": 0,
-                                "next_action": "use findings and canonical evidence; no parsing or semantic work needed"}
+                        return native_findings(discoveries(config_path, explicit), reused=True)
                 prepared = prepare(config_path, explicit, roots(directory)["analysis"], files)
                 input_path = Path(prepared["input"])
             receipt = local_json(input_path, SUMMARY_BYTES)
@@ -869,9 +885,8 @@ def native_advance(config_path: Path, explicit: str | None, directory: Path,
         current = local_json(current_path(directory), SUMMARY_BYTES)
         if current.get("analysis_id") == receipt["analysis_id"] and current.get("graph_sha256") == archctx.sha(bounded_raw(ua / "knowledge-graph.json", GRAPH_BYTES)):
             check_publication(archctx.repo_for(config_path, archctx.load(config_path)).resolve(), directory, publication_proof(current))
-            return {"status": "REUSED", "analysis": discoveries(config_path, explicit), "automatic_model_invocations": 0}
-    return {"status": "FINDINGS_READY", "analysis": import_graph(config_path, explicit, input_path),
-            "automatic_model_invocations": 0, "next_action": "Agent: reconcile findings with the same component/relation IDs, update affected shared definitions/view, then accept; keep map running"}
+            return native_findings(discoveries(config_path, explicit), reused=True)
+    return native_findings(import_graph(config_path, explicit, input_path))
 
 
 def main():

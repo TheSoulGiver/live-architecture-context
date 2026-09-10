@@ -266,9 +266,9 @@ function drawChanges(){let d=data.development||{},p=d.pending||{},box=$('changes
 }
 const desiredKey=()=>latest?.generation+':'+(mode==='delta'?'comparison.html':'current.html');
 function cancelLoad(){clearTimeout(loadTimer);loading?.remove();loading=null;loadingKey='';}
-function waiting(message){$('state').textContent='图待更新 · 保留已展示版本';$('status').className='status stale';$('reason').textContent=message+' 最新接受状态 '+(latest?.context_hash||'none').slice(0,12)+'。';}
+function waiting(message){$('state').textContent=version?'图待更新 · 保留已展示版本':'尚无已展示的已接受图';$('status').className='status stale';$('reason').textContent=message+' 最新接受状态 '+(latest?.context_hash||'none').slice(0,12)+'。';}
 function view(){let key=desiredKey();if(loading&&loadingKey!==key)cancelLoad();
- if(!latest?.artifacts?.length){if(!data)paint(latest);waiting('没有可用的已接受图。');return;}
+ if(!latest?.artifacts?.length){if(!version)paint(latest);waiting('没有可用的已接受图。');return;}
  if(key===version){paint(latest);return;}if(data?.generation===latest.generation)paint(latest);
  waiting('新图正在加载；图、组件详情和源码入口将一起切换。');if(key===loadingKey)return;
  loading=picture.cloneNode(false);loading.removeAttribute('src');loading.id='loading-picture';loading.style.cssText='position:absolute;inset:0;visibility:hidden;pointer-events:none';loadingKey=key;$('stage').append(loading);loading.src='/map/'+latest.generation+'/'+(mode==='delta'?'comparison.html':'current.html');

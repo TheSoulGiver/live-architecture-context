@@ -179,11 +179,22 @@ class Element{constructor(tag='div'){this.tag=tag;this.children=[];this.dataset=
  append(...v){this.children.push(...v)} replaceChildren(...v){this.children=v} insertBefore(v,b){let i=this.children.indexOf(b);this.children.splice(i<0?this.children.length:i,0,v)}
  setAttribute(k,v){this[k]=v} removeAttribute(k){delete this[k]} querySelector(tag){return this.children.find(v=>v.tag===tag)} cloneNode(){return new Element(this.tag)} remove(){} set innerHTML(v){throw Error('untrusted HTML sink')}}
 const elements={},get=id=>elements[id]??=new Element(),text=e=>[e.textContent,...e.children.map(text)].join('\n');let message;
-let next={status:'FRESH',context_hash:'accepted',generation:'accepted',revision:'product',artifacts:['current.html'],components:[{id:'owner',evidence:[]}],relations:[],development:{observation_id:'one',changes:[],updates:{}}};
+const accepted={status:'FRESH',context_hash:'accepted',generation:'accepted',revision:'product',artifacts:['current.html'],components:[{id:'owner',evidence:[]}],relations:[],development:{observation_id:'one',changes:[],updates:{}}};
+let next={status:'MISSING',context_hash:null,generation:'',artifacts:[],components:[],relations:[],development:{observation_id:'setup',changes:[],updates:{}}};
 const context=vm.createContext({TextEncoder,document:{getElementById:get,createElement:tag=>new Element(tag)},window:{addEventListener:(_,f)=>message=f},setTimeout(){},clearTimeout(){},
  fetch:async()=>({status:200,ok:true,json:async()=>next,headers:{get:()=>next.development.observation_id}})});
 const read=s=>vm.runInContext(s,context);
-(async()=>{vm.runInContext(require('node:fs').readFileSync(0,'utf8'),context);await new Promise(setImmediate);message({source:read('loading').contentWindow,data:{kind:'lac-ready'}});
+(async()=>{vm.runInContext(require('node:fs').readFileSync(0,'utf8'),context);await new Promise(setImmediate);
+ assert.equal(read('loading'),null);assert.ok(text(get('analysis')).includes('尚未进行源码理解'));assert.ok(text(get('reason')).includes('没有可用的已接受图'));assert.equal(get('state').textContent,'尚无已展示的已接受图');
+ next=JSON.parse(JSON.stringify(next));next.development.observation_id='first-analysis';next.development.updates.source_analysis={configured:true,status:'FRESH',accepted_context_hash:null,candidate_count:1,
+ candidates:[{id:'ua:first',title:'First setup discovery',review_state:'unreviewed',related_components:[],evidence:[]}]};
+ await context.poll();assert.ok(text(get('analysis')).includes('First setup discovery'));assert.ok(text(get('analysis')).includes('已发现 · 待复审'));assert.ok(text(get('analysis')).includes('尚未确认归属'));
+ assert.equal(read('data.context_hash'),null);assert.equal(read('data.components.length'),0);assert.equal(read('data.relations.length'),0);assert.equal(read('loading'),null);assert.ok(text(get('reason')).includes('没有可用的已接受图'));
+ next.development.observation_id='first-analysis-stale';next.development.updates.source_analysis.status='STALE';next.development.updates.source_analysis.changed_files=['scope.py'];await context.poll();
+ assert.ok(text(get('analysis')).includes('STALE'));assert.ok(text(get('analysis')).includes('分析后已变化：scope.py'));
+ next.development.observation_id='first-analysis-invalid';next.development.updates.source_analysis={configured:true,status:'INVALID',reason:'bad first receipt',candidates:[]};await context.poll();
+ assert.ok(text(get('analysis')).includes('bad first receipt'));assert.equal(text(get('analysis')).includes('First setup discovery'),false);assert.equal(read('loading'),null);assert.equal(read('data.context_hash'),null);
+ next=accepted;await context.poll();message({source:read('loading').contentWindow,data:{kind:'lac-ready'}});
  assert.equal(get('analysis').hidden,false);assert.ok(text(get('analysis')).includes('尚未进行源码理解'));const frame=read('picture');
  next=JSON.parse(JSON.stringify(next));next.development.observation_id='two';next.development.updates.source_analysis={configured:true,status:'FRESH',analysis_id:'a'.repeat(64),provider:{name:'understand-anything',revision:'pin'},source_files:['scope.py'],
  candidates:[{id:'ua:fixture',content_revision:'content-1',evidence_revision:'evidence-1',title:'<img src=x onerror=bad()>',summary:'<script>bad()</script>',review_state:'unreviewed',related_components:['owner'],evidence:[{path:'scope.py',line:2,sha256:'b'.repeat(64)}],raw_relations:[{source:'file:a',target:'file:b',type:'imports',direction:'backward'}]}],
