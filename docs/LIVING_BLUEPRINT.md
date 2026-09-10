@@ -53,7 +53,18 @@ their canonical ownership and relation meanings are design declarations.
 They do not prove runtime reachability. Coverage and missing capabilities are
 shown in both compact context and the viewer.
 
-For a relevant edit, use `impact --files <paths>` to find the affected owners.
+For a relevant edit, use `impact --files <paths>` to find the direct owners,
+declared dependencies and dependents in `change_scope`, shared with the page.
+The map overlays only the accepted scope; unaccepted working definitions stay
+separate. Raw relation direction/kind is not necessarily a call or dependency.
+Unknown kinds do not propagate; stale evidence and uncovered files remain
+explicit limitations. Expand the per-file relationship details or repeat the
+same CLI query with `--details` (MCP `details: true`) when witnesses are omitted.
+The existing `trace` command still exposes raw incoming/outgoing relations.
+This repository explicitly declares call/read/write dependency directions where
+source supports them, leaves the projection-to-viewer delivery relation
+unclassified, and marks skill guidance as non-propagating. These declarations
+are review scope, not a complete execution graph.
 The bounded watcher discovers changed evidence, config/view, and configured
 boundary signals. An implementation-only edit can refresh evidence without
 adding components or relations. A high-value match produces a candidate; it

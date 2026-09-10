@@ -245,6 +245,7 @@ archctx --config architecture.json canonical service
 archctx --config architecture.json evidence service
 archctx --config architecture.json trace service --code
 archctx --config architecture.json impact --files src/service.py
+archctx --config architecture.json impact --files src/service.py --details
 archctx --config architecture.json changed-since --revision <git-sha>
 archctx --config architecture.json drift --base <git-sha>
 archctx --config architecture.json candidates
@@ -309,6 +310,35 @@ An MCP client configuration is simply:
 `trace` without `--code` and `impact` are deliberately authored/evidence
 results. With a configured `code_graph.query`, code edges appear in a separate
 `code_graph` field with `confidence: provider_reported`.
+
+`impact.change_scope` is the same contract used by the Live Development Map:
+direct evidence owners, their declared `dependencies`, and their `dependents`
+(objects to check, not a prediction of runtime breakage). For A calls B and B
+calls C, editing B gives direct B, dependent A and dependency C. Cycles may put
+an indirect component in both lists. Unknown files remain `uncovered_files`.
+Each scope keeps raw relation IDs/direction/kinds and source evidence witnesses.
+Only exact `calls`, `uses`, and `depends-on` default to a from-to dependency;
+other kinds do not propagate unless a reviewed relation explicitly supplies
+`"dependency": "from_to"` or `"to_from"`. `"none"` overrides even a default kind.
+This is an authored interpretation, never a runtime or provider inference.
+
+Accepted and working definitions are computed separately, bound to the accepted
+context/revision and working config hash. `working: null` means unchanged
+declarations, not fresh source; invalid working definitions have an explicit
+error. Selecting the config path seeds changed components and the old/new
+endpoints of changed relations in their respective graphs. For file renames,
+pass both names; `--base` uses Git's no-renames file list. `--base` selects files,
+not an otherwise unavailable historical graph.
+
+Default scopes cap component/file lists at 12, relation witnesses at 8, evidence
+at one anchor per relation, and the scope envelope at 8 KiB; `omitted` and
+`omitted_evidence` make missing detail explicit. Use the same `impact --details`
+(MCP `architecture_impact` with `details: true`) for full scope/evidence and
+compare its context/config hashes. `trace` remains an explicit raw-direction
+relation query. Compatibility fields retain their old meaning: CLI
+`reachable_components` is all-kind outgoing reach, while the observer's
+`impacted_components` is all-kind incoming reach. Neither is the new dependency
+answer; both are labelled `legacy_semantics` and the page uses `change_scope`.
 
 `archctx-calm-query` is the supplied thin adapter for CALM's read-only
 `callers`/`callees` tools. It attaches to an explicitly managed loopback
