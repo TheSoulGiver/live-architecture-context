@@ -24,23 +24,40 @@ checked in: [benchmark data](benchmarks/observed-context-ab.json) ·
 [claim evidence](docs/public-face/claim-evidence.md) ·
 `python tools/render_benchmark.py --check`.
 
-## Install in 30 seconds
+## Start with the system map
 
 ```sh
-# Released package
-python -m pip install "git+https://github.com/TheSoulGiver/live-architecture-context.git@v0.1.6"
-
-# Or, from the current checkout (including unreleased changes)
+# From this checkout, including the native commands below
 python -m pip install .
 cd your-repository
-archctx init --component service --evidence 'src/service.py::def serve'
+archctx setup
+archctx understand "How does this request reach storage?" --files src/service.py src/storage.py
+archctx map
 ```
 
-`init` creates private `.archctx/architecture.json`, records a passing
-last-known-good snapshot, and adds a small managed instruction block to the
-existing `AGENTS.md`. A fresh Codex session learns Archctx exists, but calls it
-only when a system-level question can shrink the next source read. It never
-invents a canonical system from filenames.
+Use Python 3.10+, Git and Node.js 20+. `setup` is the explicit one-time network
+operation: LAC installs its compatible source-understanding and Archify
+components in project-local ignored state. It preserves reviewed declarations;
+on a new project it prepares an empty definition and view, without inferring
+canonical components. No API key or separate model service is configured.
+
+`understand` captures the selected saved source and performs mechanical
+extraction. When it returns `NEEDS_AGENT`, the current authorized Agent reads
+the returned compact contract and writes results to the returned paths, then
+runs `archctx understand --resume <analysis_id>`. LAC handles merge, validation
+and import. The Agent reviews useful findings and updates the shared definition
+through existing acceptance. [Source understanding](docs/UNDERSTAND.md) explains
+this boundary. Ordinary queries and map polling never invoke a model.
+
+`map` opens the local live system map. People and Agents use the same component
+IDs, accepted source evidence and declared change scope. Project, component,
+flow and change views distinguish confirmed architecture, discovered findings
+and changed source. The map keeps working during development and explicit
+acceptance. [Map guide](docs/LIVING_BLUEPRINT.md).
+
+These commands describe the current checkout, not the earlier `v0.1.6` release.
+The previous `init --component ... --evidence ...` onboarding and expert
+entrypoints remain available for existing integrations.
 
 ## Shared GitHub mode
 
@@ -50,7 +67,8 @@ config/view. `init` intentionally keeps its default `.archctx/` configuration
 private. When a team needs shared architecture context, keep the reviewed
 config and optional Archify view in a dedicated tracked directory (for example
 `architecture/architecture.json` and `architecture/architecture.view.json`)
-and use `archctx --config architecture/architecture.json ...`. The
+and use `archctx --config architecture/architecture.json ...` when an explicit
+selection is useful. The
 rebuildable state remains in that directory's adjacent `.archctx/` directory
 and stays local: last-good, snapshots, watcher state, usage, and candidate
 decisions are not GitHub facts. This repository follows that pattern in its
@@ -61,10 +79,13 @@ For a fresh worktree, follow [Project-local onboarding](docs/WORKTREE_ONBOARDING
 reviewed definition is preserved, not replaced with a private one. `init` is
 an explicit setup operation: it updates the managed instruction block and
 ignore rule, then runs refresh (including trusted configured commands).
-Use `init --check` to preview without writes or command execution. If the
-conventional shared config exists, omission of `--config` is an error, not
-a silent choice between shared and private definitions. Legacy private-only
-repositories retain their default.
+Use `init --check` to preview without writes or command execution. The native
+`setup`, `understand` and `map` commands can select the sole conventional
+definition at `architecture/architecture.json` or `.archctx/architecture.json`.
+If both exist, select one explicitly; they do not guess or scan other locations.
+Existing query/onboarding commands preserve their selection contract: a shared
+config requires explicit `--config`, and private-only repositories retain their
+default. Keep one explicit prefix when moving between these operations.
 
 `init` and `install-codex` accept `--command "python archctx.py"` (or your
 project-local CLI prefix). This is instruction text only: the installer does
@@ -81,18 +102,16 @@ deployed revision is running.
 
 ## On-demand Codex skills
 
-An optional [Understand Anything source-analysis path](docs/UNDERSTAND.md)
-adds real upstream structure and Codex-derived responsibilities for a selected
-saved-source scope. It captures actual worktree bytes, keeps raw edge meaning
-and provider provenance, and presents unaccepted findings in the existing Live
-Development Map. Codex reconciles useful findings with existing IDs through
-`accept` / shared config / Archify; a file or upstream layer is not automatically
-a canonical component. Saved changes make the relevant analysis stale. Queries
-never start a model, and unchanged files can reuse their prior analysis at the
-next meaningful task boundary. This is optional analysis, not another Gate.
+Native [source understanding](docs/UNDERSTAND.md) keeps raw edge meaning and
+provider provenance while the existing Agent supplies source-grounded semantic
+judgment. Findings have stable IDs plus separate content and evidence revisions;
+review bindings connect them to canonical component IDs. A file or understanding
+group is never automatically a canonical component. Changed source invalidates
+relevant review bindings, while unchanged results can be reused at the next
+meaningful task boundary. This is optional understanding, not another Gate.
 
-For this repository's [Live Development Map](docs/LIVING_BLUEPRINT.md), run
-`python archctx_blueprint.py --live` after the one-time Archify setup. The page
+For this repository's [system map](docs/LIVING_BLUEPRINT.md), run
+`python archctx.py --config architecture/architecture.json map` after `setup`. The page
 shows the accepted system plus saved worktree changes, without rendering on
 each source save. Codex maintains changed architecture declarations; validation
 then publishes one shared version for the map and Agent queries. Before / Delta
@@ -167,6 +186,7 @@ small, source-evidence-bound answer to all of these at once:
 
 | Primitive | Agent outcome |
 | --- | --- |
+| `setup` / `understand` / `map` | Project-local readiness, bounded source understanding with the current Agent, and the shared human map. |
 | `status` / `stale` | A tiny freshness result, not a hidden full snapshot. |
 | `canonical` / `evidence` | One declared implementation and its exact source proof. |
 | `search` | At most three candidates by default, plus explicit omitted counts. |
@@ -302,11 +322,11 @@ delivery mechanism, when available. A saved message is not proof it was read;
 a published fix is not proof the consumer adopted it. Do not poll by repeatedly
 starting models, or copy private diagnostics/evidence into a public issue.
 
-In a repository initialized with the standard `.archctx/architecture.json`, the
-CLI accepts `archctx status` (and the other non-`init` commands) without
-`--config` when no conventional shared config is present; it never searches
-elsewhere for a config. Explicit `--config`
-remains the portable form for a nonstandard location.
+For existing query commands, `archctx status` without `--config` selects the
+standard `.archctx/architecture.json` only when no conventional shared config
+exists. Use an explicit config for shared definitions or a nonstandard location.
+The native `setup` / `understand` / `map` entrypoints additionally discover a
+sole conventional shared config; ambiguity still requires explicit selection.
 
 MCP tools: `status`, `refresh`, `snapshot`, `history`, `usage`, `candidates`,
 `accept_candidate`, `reject_candidate`, `canonical`, `evidence`, `trace`,
@@ -415,6 +435,7 @@ fills in omitted nodes or invents a relation.
 Supported command substitutions are `{repo}`, `{state}`, `{changed_files}`;
 code-graph queries also receive `{symbol}` and `{direction}`. Treat project
 config as trusted code: it intentionally authorizes its argv programs.
+Native renderer commands use `{python} {lac_runtime}` to select the current core's adjacent runtime and preserve an isolated caller's `-I` mode.
 
 `archctx --config .archctx/architecture.json uninstall-codex` removes only the
 managed `AGENTS.md` block. Config, last-good history, and `.gitignore` stay in

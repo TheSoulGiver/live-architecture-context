@@ -195,8 +195,9 @@ class DevelopmentObserver:
         config = archctx.load(self.config_path)
         if archctx.repo_for(self.config_path, config) != self.repo:
             raise ValueError("selected repository changed; restart the viewer")
-        archctx.components(config)
         record = archctx.load(archctx.last_path(self.directory)) if archctx.last_path(self.directory).exists() else {}
+        if archctx.last_path(self.directory).exists() or not understand.empty_draft(config):
+            archctx.components(config)
         if record and Path(record["repo"]).resolve() != self.repo:
             raise ValueError("accepted context belongs to another repository; restart with matching state")
         return config, record
@@ -240,17 +241,31 @@ class DevelopmentObserver:
 
     def _observe(self, dirty, git_error, external):
         config, record = self._load()
-        current = archctx.manifest(self.config_path, self.repo, config)
-        self._metrics["full_reads"] += 1
+        draft = not record and understand.empty_draft(config)
+        current = {} if draft else archctx.manifest(self.config_path, self.repo, config)
+        self._metrics["full_reads"] += not draft
         packet = archctx.updates(self.config_path, self.explicit, self._cursor)
         if packet.get("status") == "RETRY":
             raise ValueError("architecture inputs moved during observation; waiting for a settled read")
         if packet.get("changed") is False:
             packet = {**self._updates, **packet}  # A cursor acknowledgement is not an empty architecture observation.
         # A publication between updates and this read must not pair two authorities.
-        after = archctx.load(archctx.last_path(self.directory)) if record else {}
+        after = archctx.load(archctx.last_path(self.directory)) if archctx.last_path(self.directory).exists() else {}
         if record != after or archctx.semantic(archctx.load(self.config_path)) != archctx.semantic(config):
             raise ValueError("accepted context/config changed during observation; waiting for a settled read")
+        if draft:
+            # No canonical scope exists yet. Keep the same bounded receipt/source
+            # observation and cursor, without entering watch/refresh/publication.
+            self._config = config
+            self._pending_controls, self._refresh_paths = False, []
+            self._cursor, self._updates = packet.get("cursor"), copy.deepcopy(packet)
+            return {}, {"kind": "development_observation", "status": "MISSING", "stale": True,
+                        "accepted_context_hash": None, "worktree": str(self.repo),
+                        "changes": [], "pending": {}, "updates": packet,
+                        "counts": {"changed": 0, "unmapped": 0, "omitted": 0},
+                        "limitations": ["Architecture ownership is not declared yet; inspect source analysis independently."] + ([git_error] if git_error else []),
+                        "watched_files": 0, "analysis_stat_files": len(self._analysis_paths), "live": self.live,
+                        "auto_publish": "waiting for source-grounded shared definitions"}
         self._config, self._paths = config, set(current) | set(evidence_hashes(record))
         before = evidence_hashes(record)
         changed_evidence = set()
@@ -373,7 +388,7 @@ class DevelopmentObserver:
                         self._settled_at = started
                     # A due retry must observe current inputs/LKG, never reuse an old predecessor.
                     record, payload = self._observe(dirty, git_error, external)
-                    if self.live and inputs_changed:
+                    if self.live and inputs_changed and self._config.get("components"):
                         archctx.watch_once(self.config_path, self.explicit, apply=False)
                     self._signature, self._config_stamp = signature, stamp(self.config_path)
                     self._input_signature = input_signature

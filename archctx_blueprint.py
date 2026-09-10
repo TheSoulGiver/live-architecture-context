@@ -6,7 +6,9 @@ import argparse
 import html
 import json
 import mimetypes
+import os
 import re
+import shlex
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -155,54 +157,64 @@ def render_bundle(config: dict[str, Any], repo: Path, directory: Path, generatio
 
 
 PAGE = r"""<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
-<title>Live Development Map · LAC</title><style>
+<title>系统地图 · LAC</title><style>
 :root{--ink:#203a37;--muted:#637773;--line:#d6dfd6;--paper:#f5f5ed;--green:#176958;--amber:#a95412;--red:#ae3e38}
 *{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:14px "Segoe UI","Microsoft YaHei",sans-serif}
 header{height:102px;display:flex;align-items:center;justify-content:space-between;padding:18px 28px;border-bottom:1px solid var(--line);gap:20px}
 .eyebrow{font:11px Consolas,monospace;letter-spacing:2px;color:var(--green)}h1{font:29px Georgia,"Microsoft YaHei",serif;letter-spacing:-.5px;margin:5px 0}h2{font-size:17px;margin:0 0 12px}h3{font-size:14px;margin:19px 0 8px}
 small,.muted{color:var(--muted)}p{line-height:1.65;margin:8px 0}code{font:12px Consolas,monospace;overflow-wrap:anywhere}a{color:var(--green);text-decoration-thickness:1px;text-underline-offset:3px}
-button,select{font:inherit;color:inherit;background:transparent;border:1px solid var(--line);border-radius:5px;padding:8px 12px;cursor:pointer}button:hover,button[aria-pressed=true]{background:#e2eadd;border-color:#648976}button:focus-visible,a:focus-visible,summary:focus-visible{outline:3px solid #d8942b;outline-offset:3px}
+button,select{font:inherit;color:inherit;background:transparent;border:1px solid var(--line);border-radius:5px;padding:8px 12px;cursor:pointer}button:hover,button[aria-pressed=true]{background:#e2eadd;border-color:#648976}button:focus-visible,a:focus-visible,summary:focus-visible{outline:3px solid #d8942b;outline-offset:3px}button:disabled{cursor:default;opacity:.45}[hidden]{display:none!important}
 .status{font-size:12px;display:flex;align-items:center;gap:8px;justify-content:flex-end}.dot{width:8px;height:8px;border-radius:50%;background:var(--green)}.stale .dot{background:var(--amber)}#identity{display:block;font:11px Consolas,monospace;max-width:360px;margin-top:8px;text-align:right}
 nav{height:54px;display:flex;align-items:center;gap:7px;padding:8px 24px;background:#fffdf7;border-bottom:1px solid var(--line)}nav .spacer{flex:1}nav a{font-size:12px}
-main{display:grid;grid-template-columns:minmax(0,1fr) 330px;height:calc(100vh - 190px);min-height:430px}.canvas{min-width:0;position:relative;display:flex;flex-direction:column;background:#fff;border-right:1px solid var(--line)}
+main{display:grid;grid-template-columns:minmax(0,1fr) 370px;height:calc(100vh - 190px);min-height:430px}.canvas{min-width:0;position:relative;display:flex;flex-direction:column;background:#fff;border-right:1px solid var(--line)}
 .canvas-head{padding:16px 24px 10px;display:flex;justify-content:space-between;gap:12px}.canvas-head h2{margin:0 0 5px}.legend{font-size:11px;display:flex;gap:12px;flex-wrap:wrap;margin-top:8px}.legend span:before{content:'';display:inline-block;border:2px solid #6b8f80;width:10px;height:10px;margin-right:5px}.legend .direct:before{border-color:#b66a13}.legend .dependency:before{border-style:dashed;border-color:#526fac}.legend .dependent:before{border-style:dotted;border-color:#267b79}.legend .both:before{border-style:dashed;border-color:#75578e}
 #stage{position:relative;flex:1;min-height:0}iframe{width:100%;height:100%;border:0;background:#fff}.map-controls{display:flex;gap:5px;align-items:center;align-self:flex-start}.map-controls button{padding:5px 10px;font-size:12px}
 #empty{position:absolute;inset:25% 15%;text-align:center;color:var(--muted);pointer-events:none}#empty[hidden]{display:none}#reason{padding:9px 24px;background:#fff3dd;color:#794917;font-size:12px;line-height:1.5;border-top:1px solid #ecd4aa;max-height:86px;overflow:auto}#reason:empty{display:none}
-aside{padding:20px;overflow:auto;background:#fafbf6}#summary{font-size:12px;line-height:1.65;color:var(--muted);border-bottom:1px solid var(--line);padding-bottom:15px;margin-bottom:18px}.section-label{font-size:11px;letter-spacing:1px;color:var(--muted);margin-bottom:8px}
+aside{padding:20px;overflow:auto;min-width:0;overflow-wrap:anywhere;background:#fafbf6}#summary{font-size:12px;line-height:1.65;color:var(--muted);border-bottom:1px solid var(--line);padding-bottom:15px;margin-bottom:18px}.section-label{font-size:11px;letter-spacing:1px;color:var(--muted);margin-bottom:8px}
 .change{border-left:3px solid #c27c27;padding:9px 10px;background:#fff8e9;margin:8px 0;font-size:12px}.change.unmapped{border-left-style:dashed;border-color:#99a4a1;background:#eff1ec}.change.pending{border-color:#ad5575;background:#f8edf2}.change.accepted{border-color:var(--green);background:#eaf3ea}.change button{padding:3px 6px;font-size:11px;margin:6px 4px 0 0}.change code{display:block}
 .scope-group{border-top:1px solid var(--line);padding-top:8px;margin-top:9px}.scope-group.pending{border-left:2px dashed #ad5575;padding-left:8px}.scope-row{margin:6px 0;line-height:1.6}.scope-group details{margin:8px 0}.witness{padding:7px 0;border-bottom:1px solid var(--line);overflow-wrap:anywhere}.scope-note{font-size:11px;color:var(--muted);overflow-wrap:anywhere}
 .tag{display:inline-block;font-size:10px;color:var(--muted);border:1px solid var(--line);padding:2px 5px;border-radius:3px;margin:3px 4px 3px 0}.node-button{display:block;width:100%;text-align:left;padding:10px 8px;border-width:0 0 1px;border-radius:0}.node-button small{display:block;margin-top:4px;font-size:11px}
+.state-tag{display:inline-block;padding:3px 6px;margin:4px 5px 3px 0;font-size:11px;background:#e5eee3;color:var(--green);border-radius:3px}.state-tag.discovered{background:#f4e8ed;color:#914562}.state-tag.changed{background:#fff0d6;color:#87520e}.project-stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:12px 0 18px}.project-stats button{padding:10px 5px;text-align:left;font-size:11px}.project-stats strong{display:block;font:27px Georgia,serif;margin-bottom:5px}.query{display:block;white-space:pre-wrap;background:#edf1e8;padding:9px;margin:7px 0;border-left:2px solid #8ca58f;user-select:all}.finding{border-top:1px solid var(--line);padding:8px 0}.finding summary{line-height:1.6}.flow-row{border-left:2px solid #a3b8a9;padding:0 0 10px 12px;margin:12px 0}.flow-row button{padding:4px 6px;font-size:12px}.flow-row code{display:block;margin-top:7px}
 #detail{margin-top:12px;padding-top:16px;border-top:1px solid var(--line)}#detail:empty{display:none}#detail .name{font-size:16px;font-weight:600}details{margin:12px 0}summary{cursor:pointer;font-size:12px;font-weight:600}details li{margin:7px 0;font-size:12px;line-height:1.55}ul{padding-left:18px}.source{display:block;margin:8px 0;font:11px Consolas,monospace;overflow-wrap:anywhere}
 footer{height:34px;border-top:1px solid var(--line);display:flex;justify-content:space-between;gap:12px;padding:9px 24px;font-size:10px;color:var(--muted)}#observation{font-family:Consolas,monospace}
 @media(max-width:950px){header{padding:14px 16px}h1{font-size:24px}main{grid-template-columns:minmax(0,1fr) 280px}.canvas-head{padding:12px}aside{padding:14px}.canvas-head small{display:none}}
-@media(max-width:680px){header{height:auto;min-height:110px;align-items:flex-start}header small{display:none}#identity{max-width:150px}h1{font-size:21px}nav{padding:7px;gap:3px}nav button{padding:7px;font-size:12px}nav a{display:none}main{height:auto;display:flex;flex-direction:column}.canvas{height:62vh;min-height:400px}aside{max-height:none}footer{height:auto;padding:10px;flex-wrap:wrap}.canvas-head{gap:5px}.map-controls{flex-wrap:wrap}}
+@media(max-width:680px){header{height:auto;min-height:110px;align-items:flex-start;flex-wrap:wrap;gap:9px}header small{display:none}#identity{max-width:none;text-align:left}.status{justify-content:flex-start}h1{font-size:21px}nav{height:auto;min-height:54px;padding:7px;gap:3px;flex-wrap:wrap}nav button{padding:7px;font-size:12px}nav a,nav .spacer{display:none}main{height:auto;display:flex;flex-direction:column}.canvas{height:62vh;min-height:360px}aside{max-height:none}footer{height:auto;padding:10px;flex-wrap:wrap}.canvas-head{gap:5px;flex-wrap:wrap}.map-controls{flex-wrap:wrap}}
 </style>
-<header><div><div class="eyebrow">LAC / LIVING BLUEPRINT</div><h1>系统在这里，变化也在这里。</h1><small>已接受架构 + 当前开发变化 · 源码始终是最终依据</small></div><div><div class="status" id="status"><i class="dot"></i><span id="state">正在读取已接受蓝图</span></div><code id="identity"></code></div></header>
-<nav aria-label="地图视图"><button id="now" aria-pressed="true">当前系统</button><button id="recent" aria-pressed="false">最近变化</button><button id="delta" aria-pressed="false">Before / After</button><button id="all-changes" aria-pressed="true">全部修改</button><span class="spacer"></span><a id="raw" target="_blank" rel="noopener">打开原始 Archify 图 ↗</a></nav>
+<header><div><div class="eyebrow">LAC / SYSTEM MAP</div><h1 id="project-name">系统地图</h1><small>人与 Agent 共用组件身份、源码证据和变化范围</small></div><div><div class="status" id="status"><i class="dot"></i><span id="state">正在读取已接受蓝图</span></div><code id="identity"></code></div></header>
+<nav aria-label="地图视图"><button id="now" aria-pressed="true">项目</button><button id="component-view" aria-pressed="false">组件</button><button id="flow-view" aria-pressed="false">流程</button><button id="recent" aria-pressed="false">变化</button><button id="delta" aria-pressed="false">Before / After</button><button id="all-changes" aria-pressed="true">全部修改</button><span class="spacer"></span><a id="raw" target="_blank" rel="noopener">打开原始图 ↗</a></nav>
 <main><section class="canvas"><div class="canvas-head"><div><h2 id="map-title">已接受的系统蓝图</h2><small id="map-caption">点击组件，查看职责、原始关系和源码。</small><div class="legend"><span>已接受</span><span class="direct">直接涉及</span><span class="dependency">依赖对象</span><span class="dependent">依赖者</span><span class="both">两者重合</span></div></div><div class="map-controls"><button id="zoom-out" aria-label="缩小">−</button><button id="zoom-in" aria-label="放大">＋</button><button id="fit">全景</button><button id="focus" aria-pressed="false">聚焦邻居</button></div></div>
 <div id="stage"><iframe id="picture" title="Archify 系统图与开发变化" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"></iframe><div id="empty">等待可用的已接受 Archify 图。<p>局部变化不会被猜成正式架构。</p></div></div><div id="reason" role="status"></div></section>
-<aside><div class="section-label" id="panel-title">开发观察 / 非运行状态</div><div id="summary"></div><div id="detail"></div><section id="analysis" aria-label="源码分析调查"></section><div id="changes"></div><details id="components-list"><summary>全部组件</summary><div id="sources"></div></details><details id="coverage"><summary>覆盖范围与可信边界</summary><p id="scope"></p><ul id="limits"></ul><p id="graph" class="muted"></p></details></aside></main>
+<aside><div class="section-label" id="panel-title">项目概览</div><div id="summary"></div><section id="project" aria-label="项目概览"></section><div id="detail"></div><section id="analysis" aria-label="相关发现"></section><section id="flows" aria-label="声明流程" hidden></section><div id="changes" hidden></div><details id="components-list"><summary>全部组件</summary><div id="sources"></div></details><details id="coverage"><summary>覆盖范围与可信边界</summary><p id="scope"></p><ul id="limits"></ul><p id="graph" class="muted"></p></details></aside></main>
 <footer><span id="observation">OBSERVATION —</span><span>文件活动 ≠ 任务进度 ≠ 线上运行 · 本地只读页面</span></footer>
 <script>
-let data=null,latest=null,mode='now',selected=null,selectedChange=null,focused=false,version='',navigation=null,lastObservation='',detailVersion='',etag='',loading=null,loadingKey='',loadTimer;
+let data=null,latest=null,mode='now',panel='now',selected=null,selectedChange=null,focused=false,version='',navigation=null,lastObservation='',detailVersion='',etag='',loading=null,loadingKey='',loadTimer;
 const $=id=>document.getElementById(id),enc=encodeURIComponent;
 let picture=$('picture');
 const nodeId=id=>'c-'+Array.from(new TextEncoder().encode(id),b=>b.toString(16).padStart(2,'0')).join('');
 const el=(tag,text,cls)=>{let e=document.createElement(tag);if(text!==undefined)e.textContent=text;if(cls)e.className=cls;return e};
 const unique=items=>[...new Set(items)];
 const changeScope=change=>{let s=change.change_scope;return s?.contract==='declared_change_scope/v1'&&s.accepted_context_hash===data?.context_hash?s:null};
+const analysis=()=>data?.development?.updates?.source_analysis;
+const relatedFindings=id=>(analysis()?.candidates||[]).filter(c=>(c.related_components||[]).includes(id));
+const sourceChanged=c=>(data?.development?.changes||[]).some(x=>{let s=changeScope(x);return s&&s.observation_state!=='retained_previous_observation'&&(s.accepted?.direct_components||[]).includes(c.id)});
+function findingState(c,a){if(a.retained_previous_observation||!['FRESH','STALE'].includes(a.status))return ['分析状态未知','changed'];if((a.changed_files||[]).some(path=>(c.related_source_files||c.files||[]).includes(path)||(c.evidence||[]).some(e=>e.path===path)))return ['源码已变化 · 待重新理解','changed'];return c.review_state==='accepted'?['已复审发现','']:c.review_state==='rejected'?['已排除发现','']:['已发现 · 待复审','discovered'];}
+function componentButton(c){let b=el('button',c.name||c.id,'node-button');b.setAttribute('aria-pressed',c.id===selected);b.append(el('small',c.id),el('span','已确认','state-tag'));if(sourceChanged(c))b.append(el('span','源码已变化','state-tag changed'));let count=relatedFindings(c.id).length;if(count)b.append(el('span',count+' 条相关发现','state-tag discovered'));b.onclick=()=>select(c.id);return b;}
+function panels(){for(let id of ['now','component-view','flow-view','recent','delta'])$(id).setAttribute('aria-pressed',id===panel);$('panel-title').textContent=({now:'项目概览','component-view':'组件 / 同一身份','flow-view':'流程 / 声明关系',recent:'变化 / 工作区与已接受版本',delta:'变化 / 版本比较'})[panel];$('project').hidden=panel!=='now';$('detail').hidden=panel!=='component-view';$('flows').hidden=panel!=='flow-view';$('changes').hidden=!['recent','delta'].includes(panel);$('components-list').hidden=!['now','component-view'].includes(panel);if(panel==='component-view')$('components-list').open=true;}
+function drawProject(){let box=$('project'),a=analysis(),components=data.components||[],d=data.development||{};box.replaceChildren();let stats=el('div',undefined,'project-stats');for(let [count,label,target] of [[components.length,'已确认组件','component-view'],[a?.candidate_count||0,'源码发现','component-view'],[d.counts?.changed??(d.changes||[]).length,'已保存变化','recent']]){let b=el('button');b.append(el('strong',String(count)),el('span',label));b.onclick=()=>{if(target==='component-view'){selected=null;detailVersion=''}showPanel(target)};stats.append(b)}box.append(stats,el('p',data.coverage?.scope||'从组件进入系统，沿声明关系找到源码依据。'));let q=data.project?.queries;if(q){let details=el('details');details.append(el('summary','Agent 从同一项目继续'),el('p','在以下项目目录运行：','scope-note'),el('code',data.project.root,'query'),el('code',q.updates,'query'));box.append(details)}}
+function drawFlows(){let box=$('flows');box.replaceChildren(el('h2','组件之间如何连接'),el('p','箭头保留声明方向；依赖语义单独标明。这里不是完整运行调用链。','scope-note'));for(let r of data.relations||[]){let row=el('div',undefined,'flow-row');for(let [i,id] of [r.from,r.to].entries()){if(i)row.append(el('span',' → '));let c=data.components?.find(c=>c.id===id),b=el('button',c?.name||id);b.onclick=()=>select(id);row.append(b)}row.append(el('code',(r.id||r.from+' → '+r.to)+' · '+r.kind),el('p',r.dependency==='from_to'?r.from+' 依赖 '+r.to:r.dependency==='to_from'?r.to+' 依赖 '+r.from:r.dependency==='none'?'已声明为非依赖关系':'依赖语义尚未分类','scope-note'));for(let e of r.evidence||[])row.append(el('code',e.path+(e.line?':'+e.line:''),'source'));box.append(row)}if(!data.relations?.length)box.append(el('p','尚无已确认的关系声明。'));let tour=analysis()?.tour;if(tour?.length){let d=el('details');d.append(el('summary','已发现的源码导览 · 待核对流程'));for(let step of tour)d.append(el('h3',step.order+'. '+step.title),el('p',step.description));box.append(d)}}
 function send(extra={}){if(!data)return;let scopes=(data.development?.changes||[]).filter(x=>selectedChange===null||x.path===selectedChange).map(changeScope).filter(s=>s&&s.observation_state!=='retained_previous_observation').map(s=>s.accepted).filter(s=>s&&!s.error);
  const ids=key=>unique(scopes.flatMap(s=>s[key]||[])).filter(id=>data.components?.some(c=>c.id===id)).map(nodeId);
  picture.contentWindow.postMessage({kind:'lac-map',context:data.context_hash,selected:selected?nodeId(selected):null,focused,
  direct:ids('direct_components'),dependencies:ids('dependencies'),dependents:ids('dependents'),...extra},'*');}
-function select(id){if(!(data?.components||[]).some(c=>c.id===id))return;selected=id;detailVersion='';detail();send();}
+function select(id){if(!(data?.components||[]).some(c=>c.id===id))return;selected=id;panel='component-view';detailVersion='';detail();drawAnalysis();panels();$('sources').replaceChildren(...(data.components||[]).map(componentButton));send();}
 function focusChange(path){selectedChange=path;paint(data);send();}
-function detail(){let key=data?.context_hash+':'+selected;if(key===detailVersion)return;detailVersion=key;let expanded=$('detail').dataset.component===selected?($('detail').querySelector('details')?.open??true):true;$('detail').replaceChildren();$('detail').dataset.component=selected||'';let c=data?.components?.find(c=>c.id===selected);if(!c)return;
- let out=$('detail');out.append(el('div',c.name||c.id,'name'),el('code',c.id),el('p',c.purpose||''));
+function detail(){let key=data?.context_hash+':'+data?.development?.observation_id+':'+selected;if(key===detailVersion)return;detailVersion=key;let expanded=$('detail').dataset.component===selected?($('detail').querySelector('details')?.open??true):true;$('detail').replaceChildren();$('detail').dataset.component=selected||'';let c=data?.components?.find(c=>c.id===selected);if(!c){$('detail').append(el('p','选择图中组件，或从下方列表进入。','muted'));return;}
+ let out=$('detail');out.append(el('div',c.name||c.id,'name'),el('code',c.id),el('span','已确认组件','state-tag'));if(sourceChanged(c))out.append(el('span','源码已变化','state-tag changed'));out.append(el('p',c.purpose||''));
  for(let t of c.tags||[])out.append(el('span',t,'tag'));
  for(let [title,key,other] of [['原始入向关系 · 不等于依赖者','to','from'],['原始出向关系 · 不等于依赖对象','from','to']]){let relations=(data.relations||[]).filter(r=>r[key]===c.id);out.append(el('h3',title));if(!relations.length)out.append(el('small','当前声明未覆盖此关系'));for(let r of relations){let b=el('button',r[other]+' · '+r.kind,'node-button');b.onclick=()=>select(r[other]);out.append(b);}}
  let d=el('details');d.open=expanded;d.append(el('summary','源码证据 · '+(c.evidence||[]).length+' 个锚点'));
  for(let [i,e] of (c.evidence||[]).entries()){let a=el('a',e.path+':'+e.line,'source');a.target='_blank';a.rel='noopener';a.href='/source?component='+enc(c.id)+'&item='+i+'&context='+enc(data.context_hash);d.append(a)}out.append(d);
+ let q=data.project?.component_queries?.[c.id];if(q){let queries=el('details');queries.append(el('summary','Agent 查询 · 同一个组件 ID'),el('p','在 '+data.project.root+' 运行；查询不触发模型。','scope-note'));for(let command of [data.project.queries?.updates,q.canonical,q.evidence,q.trace])if(command)queries.append(el('code',command,'query'));queries.append(el('p','接受版本 '+data.context_hash+'；先用 updates 核对接受版本，再读取源码。','scope-note'));out.append(queries)}
 }
 function card(title,path,owners,cls=''){let c=el('div',undefined,'change '+cls);c.append(el('div',title));if(path)c.append(el('code',path));for(let id of owners||[]){let owner=data.components?.find(x=>x.id===id);if(!owner){c.append(el('span','待确认 · '+id,'tag'));continue}let b=el('button',owner.name||id);b.onclick=()=>select(id);c.append(b)}return c;}
 function scopeGroup(parent,label,scope,working=false){let box=el('div',undefined,'scope-group'+(working?' pending':''));box.append(el('div',label));parent.append(box);
@@ -218,20 +230,27 @@ function scopeGroup(parent,label,scope,working=false){let box=el('div',undefined
  for(let a of scope.associations||[])details.append(el('p',a.component+' ← '+(a.paths||[]).join('、'),'scope-note'));
  if(scope.config_seeds?.length)details.append(el('p','配置变更涉及：'+scope.config_seeds.join('、'),'scope-note'));box.append(details);
 }
-function drawAnalysis(){let a=data?.development?.updates?.source_analysis,box=$('analysis');box.replaceChildren();box.hidden=!a?.configured;if(box.hidden)return;
- box.append(el('h2','源码分析 / 未接受调查'),el('p',a.status==='FRESH'?'FRESH · 源内容一致；分析认识不是正式架构':(a.status||'UNKNOWN')+' · 源码分析不可当作当前接受事实','change pending'));
- box.append(el('code',(a.provider?.name||'Understand Anything')+' @ '+(a.provider?.revision||'unknown').slice(0,12)),el('p','分析 '+(a.analysis_id||'unknown').slice(0,12)+' · '+(a.source_files||[]).length+' 个选定文件','scope-note'));
+function drawAnalysis(){let a=analysis(),box=$('analysis');box.replaceChildren();box.hidden=!['now','component-view'].includes(panel);if(box.hidden)return;
+ box.append(el('h2',selected&&panel==='component-view'?'这个组件的相关发现':'源码理解'));
+ if(!a?.configured){box.append(el('p','尚未进行源码理解。让 Agent 选择文件与问题后运行 understand；页面读取不会启动分析。','scope-note'));return;}
+ box.append(el('p',a.status==='FRESH'?'分析 FRESH · 捕获源码仍一致':(a.status||'UNKNOWN')+' · 分析源码需要复查','scope-note'));
  if(a.reason)box.append(el('p',a.reason,'scope-note'));if(a.changed_files?.length)box.append(el('p','分析后已变化：'+a.changed_files.join('、'),'scope-note'));if(a.retained_previous_observation)box.append(el('p','保留上次观察；当前分析状态未知。','scope-note'));
- for(let c of a.candidates||[]){let d=el('details');d.append(el('summary',(c.title||c.id)+' · '+(c.review_state||'unreviewed')),el('p',c.summary||''),el('p','已有 owner 的证据交集（不是职责证明）：'+((c.related_components||[]).join('、')||'尚未匹配'),'scope-note'));
- for(let e of c.evidence||[]){let link=el('a',e.path+':'+e.line+' · 历史分析源码','source');link.target='_blank';link.rel='noopener';link.href='/analysis-source?analysis='+enc(a.analysis_id)+'&path='+enc(e.path)+'&sha='+enc(e.sha256)+'&line='+enc(e.line);d.append(link)}
+ let findings=selected&&panel==='component-view'?relatedFindings(selected):(a.candidates||[]);
+ if(!findings.length)box.append(el('p',selected?'当前有界结果没有关联到此组件的发现。':'当前没有待展示的源码发现。','scope-note'));
+ for(let c of findings){let d=el('details',undefined,'finding'),state=findingState(c,a),summary=el('summary',c.title||c.id);summary.append(el('span',state[0],'state-tag '+state[1]));d.dataset.finding=c.id;d.append(summary,el('p',c.summary||''),el('code',c.id,'source'));
+ let bindings=c.review_state==='accepted'?(c.bindings||[]):[];d.append(el('p',bindings.length?'已复审绑定：'+bindings.join('、'):'源码交集只定位调查范围；尚未确认归属。','scope-note'));
+ for(let id of c.related_components||[]){let component=data.components?.find(x=>x.id===id);if(component){let b=el('button',component.name||id);b.onclick=()=>select(id);d.append(b)}}
+ for(let e of c.evidence||[]){let link=el('a',e.path+':'+e.line+' · 捕获时的源码','source');link.target='_blank';link.rel='noopener';link.href='/analysis-source?analysis='+enc(a.analysis_id)+'&path='+enc(e.path)+'&sha='+enc(e.sha256)+'&line='+enc(e.line);d.append(link)}
  for(let r of c.raw_relations||[])d.append(el('p',r.source+' → '+r.target+' · '+r.type+' · direction='+r.direction,'scope-note'));
- if(c.omitted_raw_relations||c.omitted_evidence)d.append(el('p','省略关系 '+(c.omitted_raw_relations||0)+' / 锚点 '+(c.omitted_evidence||0)+'；使用分析查询查看范围。','scope-note'));box.append(d);}
- if(a.tour?.length){let d=el('details');d.append(el('summary','分析导览 · 非 canonical 流程'));for(let step of a.tour)d.append(el('h3',step.order+'. '+step.title),el('p',step.description));box.append(d)}
- if(a.limitations?.length){let d=el('details');d.append(el('summary','分析覆盖边界'));for(let limitation of a.limitations)d.append(el('p',limitation,'scope-note'));box.append(d)}if(a.details_omitted||a.omitted_candidate_count||a.omitted_tour_steps)box.append(el('p','有界页面已省略部分分析；请用现有分析查询。','scope-note'));
+ if(c.omitted_raw_relations||c.omitted_evidence)d.append(el('p','省略关系 '+(c.omitted_raw_relations||0)+' / 锚点 '+(c.omitted_evidence||0)+'；使用分析查询查看范围。','scope-note'));
+ d.append(el('p','内容 '+(c.content_revision||'unknown')+' · 证据 '+(c.evidence_revision||'unknown'),'scope-note'));box.append(d);}
+ let diagnostics=el('details');diagnostics.append(el('summary','分析来源与覆盖边界'),el('code',(a.provider?.name||'unknown')+' @ '+(a.provider?.revision||'unknown')),el('p','分析 '+(a.analysis_id||'unknown')+' · '+(a.source_files||[]).length+' 个选定文件','scope-note'),el('p','源码分组与导览是调查材料，不是 canonical 组件；复审状态不替代已接受架构的源码新鲜度。','scope-note'));
+ for(let limitation of a.limitations||[])diagnostics.append(el('p',limitation,'scope-note'));if(data.project?.queries?.analysis)diagnostics.append(el('code',data.project.queries.analysis,'query'));box.append(diagnostics);
+ if(a.details_omitted||a.omitted_candidate_count||a.omitted_tour_steps)box.append(el('p','有界页面已省略部分分析；完整查询见来源与覆盖边界。','scope-note'));
 }
 function drawChanges(){let d=data.development||{},p=d.pending||{},box=$('changes');box.replaceChildren();
  if(mode==='recent'){let delta=data.recent_delta||{},changed=delta.changed_components||[];box.append(el('h2','最近接受的变化'));if(data.before_available){box.append(card('已接受 · '+(data.delta_kind||'unknown'),'',changed,'accepted'));for(let [key,label] of [['added_relations','新增关系'],['removed_relations','移除关系'],['changed_relations','关系语义变化']])for(let r of delta[key]||[])box.append(card(label,typeof r==='string'?r:(r.id||r.from+' → '+r.to),[],'accepted'));if(delta.evidence_changed_components?.length)box.append(card('源码证据更新（不等于新增架构）','',delta.evidence_changed_components,'accepted'));}else box.append(el('p',data.before_reason||'没有可用的上一接受版本。'));}
- else {box.append(el('h2','工作区的变化'));let labels={add:'新增文件',modify:'已保存修改',delete:'已删除',rename:'已重命名',untracked:'未跟踪文件'};
+ {box.append(el('h2','工作区的变化'));let labels={add:'新增文件',modify:'已保存修改',delete:'已删除',rename:'已重命名',untracked:'未跟踪文件'};
  for(let x of d.changes||[]){let s=changeScope(x),c=card(labels[x.kind]||x.kind,x.old_path?x.old_path+' → '+x.path:x.path,[]),b=el('button','图中查看此修改');b.setAttribute('aria-pressed',selectedChange===x.path);b.disabled=version.endsWith(':comparison.html');b.onclick=()=>focusChange(x.path);c.append(b);
  if(s){c.append(el('small','声明复审范围 · 非运行影响 · '+s.freshness));if(s.observation_state==='retained_previous_observation')c.append(el('p','保留上次观察，当前修改范围未知；不高亮历史范围。','scope-note'));scopeGroup(c,'已接受图 · '+(s.accepted_context_hash||'none').slice(0,12),s.accepted);
  if(s.working!==null&&s.working!==undefined)scopeGroup(c,'工作区声明 · 尚未接受 · '+(s.working_config_hash||'unknown').slice(0,12),s.working,true);
@@ -242,19 +261,20 @@ function drawChanges(){let d=data.development||{},p=d.pending||{},box=$('changes
  let pendingBox=el('div');
  for(let [key,label] of [['added_components','新增组件待确认'],['removed_components','移除组件待确认'],['changed_components','职责 / 入口待确认']])if(p[key]?.length)pendingBox.append(card(label,'',p[key],'pending'));
  for(let [key,label] of [['added_relations','新增关系待确认'],['removed_relations','移除关系待确认'],['changed_relations','关系变化待确认']])for(let r of p[key]||[])pendingBox.append(card(label,typeof r==='string'?r:(r.id||r.from+' → '+r.to),typeof r==='object'?[r.from,r.to]:[],'pending'));
- for(let c of d.updates?.candidates||[])pendingBox.append(card(c.review_decision?'已判断 · '+c.review_decision+' · 待成功发布':'高价值信号 · Codex 待判断',c.path||c.kind,[],'pending'));box.insertBefore(pendingBox,box.children[1]||null);
+ for(let c of d.updates?.candidates||[])pendingBox.append(card(c.review_decision?'已判断 · '+c.review_decision+' · 待成功发布':'高价值信号 · Codex 待判断',c.path||c.kind,[],'pending'));box.append(pendingBox);
  if(d.counts?.omitted)box.append(el('p','另有 '+d.counts.omitted+' 项未展开；观察有界，不代表完整覆盖。','muted'));}
 }
 const desiredKey=()=>latest?.generation+':'+(mode==='delta'?'comparison.html':'current.html');
 function cancelLoad(){clearTimeout(loadTimer);loading?.remove();loading=null;loadingKey='';}
-function waiting(message){$('state').textContent='图待更新 · 保留已展示版本';$('status').className='status stale';$('reason').textContent=message+' 最新接受状态 '+(latest?.context_hash||'none').slice(0,12)+'。';}
+function waiting(message){$('state').textContent=version?'图待更新 · 保留已展示版本':'尚无已展示的已接受图';$('status').className='status stale';$('reason').textContent=message+' 最新接受状态 '+(latest?.context_hash||'none').slice(0,12)+'。';}
 function view(){let key=desiredKey();if(loading&&loadingKey!==key)cancelLoad();
- if(!latest?.artifacts?.length){if(!data)paint(latest);waiting('没有可用的已接受图。');return;}
+ if(!latest?.artifacts?.length){if(!version)paint(latest);waiting('没有可用的已接受图。');return;}
  if(key===version){paint(latest);return;}if(data?.generation===latest.generation)paint(latest);
  waiting('新图正在加载；图、组件详情和源码入口将一起切换。');if(key===loadingKey)return;
  loading=picture.cloneNode(false);loading.removeAttribute('src');loading.id='loading-picture';loading.style.cssText='position:absolute;inset:0;visibility:hidden;pointer-events:none';loadingKey=key;$('stage').append(loading);loading.src='/map/'+latest.generation+'/'+(mode==='delta'?'comparison.html':'current.html');
  loadTimer=setTimeout(()=>{cancelLoad();etag='';waiting('新图加载失败，上一可读图及其架构信息保持不变；自动重试。');},8000);}
-for(let id of ['now','recent','delta'])$(id).onclick=()=>{mode=id;for(let t of ['now','recent','delta'])$(t).setAttribute('aria-pressed',t===id);view();};
+function showPanel(id){panel=id;mode=['recent','delta'].includes(id)?id:'now';panels();view();}
+for(let id of ['now','component-view','flow-view','recent','delta'])$(id).onclick=()=>showPanel(id);
 $('focus').onclick=()=>{focused=!focused;$('focus').setAttribute('aria-pressed',focused);send()};
 $('all-changes').onclick=()=>focusChange(null);
 for(let [id,action] of [['zoom-in','in'],['zoom-out','out'],['fit','fit']])$(id).onclick=()=>{if(action==='fit'){focused=false;navigation=null;$('focus').setAttribute('aria-pressed','false')}send({action})};
@@ -272,14 +292,15 @@ function paint(next){if(!next)return;data=next;let d=data.development||{},fresh=
  if(selected&&!data.components?.some(c=>c.id===selected)){selected=null;focused=false;$('focus').setAttribute('aria-pressed','false');}
  $('map-title').textContent=version.endsWith(':comparison.html')?'已接受版本 · Before / Delta / After':mode==='recent'?'最近变化 · 仍以已接受版本为准':'已接受的系统蓝图';
  if(version)$('raw').href='/artifact/'+version.replace(':','/');
- $('state').textContent=fresh?'已接受 · 源码证据一致':data.status+' · 保留上次蓝图';$('status').className='status'+(fresh?'':' stale');
+ $('project-name').textContent=(data.project?.name||'系统')+' · 系统地图';
+ $('state').textContent=fresh?'已接受架构 FRESH · 源码证据一致':data.status+' · 保留上次已接受架构';$('status').className='status'+(fresh?'':' stale');
  $('identity').textContent='CONTEXT '+(data.context_hash||'none').slice(0,12)+' / '+(data.revision||'unknown').slice(0,8);
  $('summary').textContent=(data.components||[]).length+' 个已接受组件 · '+(data.relations||[]).length+' 条声明关系。'+(d.observer_running?(d.live?'持续观察已启动。':'只读观察；未启用自动发布。'):'观察线程未运行；保留最后观察。')+' 代码变化先显示，架构语义由 Codex 维护。';
  let reasons=[...(data.reason||[]),...(d.refresh?.reasons||[])];$('reason').textContent=unique(reasons).join(' · ');
  $('scope').textContent=data.coverage?.scope||'仅覆盖配置声明的组件与证据。';$('limits').replaceChildren(...[...(data.coverage?.limitations||[]),...(d.limitations||[])].map(s=>el('li',s)));
  $('graph').textContent=data.graph?.configured?'代码图：'+(data.graph.provider||'external')+' / '+(data.graph.freshness||'unverified'):'CALM 未接入；图中是架构声明，不是完整调用图。';
  $('observation').textContent='OBS '+(d.observation_id||'—').slice(0,12)+' · '+(d.observed_at||'').replace('T',' ').slice(0,19)+' UTC · '+(d.counts?.unmapped||0)+' 项未覆盖';
- let observation=data.context_hash+':'+d.observation_id;if(observation!==lastObservation){lastObservation=observation;$('sources').replaceChildren(...(data.components||[]).map(c=>{let b=el('button',c.name||c.id,'node-button');b.append(el('small',c.id));b.onclick=()=>select(c.id);return b}));detail();send();}drawChanges();drawAnalysis();}
+ let observation=data.context_hash+':'+d.observation_id;if(observation!==lastObservation){lastObservation=observation;$('sources').replaceChildren(...(data.components||[]).map(componentButton));send();}detail();drawProject();drawChanges();drawAnalysis();drawFlows();panels();}
 async function poll(){try{let r=await fetch('/api/current',{cache:'no-store',headers:etag?{'If-None-Match':etag}:{}});if(r.status===304)return;if(!r.ok)throw Error(await r.text());let next=await r.json();etag=r.headers.get('ETag')||'';
  if(next.status==='RETRY')throw Error('观察期间状态已变化，保留当前画面，下一次读取重试。');latest=next;view();
 }catch(e){etag='';$('state').textContent='暂不可更新 · 保留当前画面';$('reason').textContent=String(e)}finally{setTimeout(poll,1500)}}poll();
@@ -316,6 +337,13 @@ def handler(config_path: Path, explicit: str | None, observer: DevelopmentObserv
     except (OSError, ValueError):
         # An invalid edit must not prevent opening the retained accepted view.
         repo = Path(archctx.load(archctx.last_path(directory))["repo"]).resolve()
+    quote = (lambda value: "'" + value.replace("'", "''") + "'") if os.name == "nt" else shlex.quote
+    entry = Path(archctx.__file__).resolve()
+    entry_name = entry.relative_to(repo).as_posix() if entry.is_relative_to(repo) else entry.as_posix()
+    config_name = config_path.relative_to(repo).as_posix() if config_path.is_relative_to(repo) else config_path.as_posix()
+    prefix = "python " + quote(entry_name) + " --config " + quote(config_name)
+    if explicit:
+        prefix += " --state-dir " + quote(directory.as_posix())
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_args):
@@ -368,6 +396,11 @@ def handler(config_path: Path, explicit: str | None, observer: DevelopmentObserv
                                   before_reason=receipt.get("before_reason"), before_available=receipt.get("before_available", False),
                                   coverage=value.get("context", {}).get("coverage"), components=value.get("context", {}).get("components", []),
                                   relations=value.get("context", {}).get("relations", []), development=development)
+                    result["project"] = {"name": repo.name, "root": repo.as_posix(), "config": config_name,
+                                         "queries": {"updates": prefix + " updates", "analysis": prefix + " understand --show --details"},
+                                         "component_queries": {c["id"]: {command: prefix + " " + command + " " +
+                                            ("--from=" if command == "trace" else "--component=") + quote(c["id"])
+                                            for command in ("canonical", "evidence", "trace")} for c in result["components"]}}
                     etag = '"' + archctx.semantic({key: result.get(key) for key in ("context_hash", "generation", "status", "reason")} |
                         {"observation": (development or {}).get("observation_id"), "refresh": (development or {}).get("refresh"),
                          "observer_running": (development or {}).get("observer_running")}) + '"'
@@ -451,14 +484,14 @@ def handler(config_path: Path, explicit: str | None, observer: DevelopmentObserv
     return Handler
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="architecture/architecture.json")
     parser.add_argument("--state-dir")
     parser.add_argument("--port", type=int, default=0, help="0 selects an unused local port")
     parser.add_argument("--no-open", action="store_true")
     parser.add_argument("--live", action="store_true", help="observe saved changes; validate/promote settled shared config/view edits using existing refresh")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     path = Path(args.config).resolve()
     observer = DevelopmentObserver(path, args.state_dir, live=args.live).start()
     server = None

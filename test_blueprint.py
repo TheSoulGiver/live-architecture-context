@@ -179,9 +179,11 @@ console.log('PASS: camera restore passes scale in one centerAt call; absent SVG 
                             self.assertIn("unavailable", receipt["before_reason"])
 
     def test_renderer_rejects_unsupported_node_before_setup(self):
-        with patch.object(launcher.shutil, "which", side_effect=["git", "node"]), patch.object(
-                launcher.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "v16.20.2\n", "")):
-            with self.assertRaisesRegex(RuntimeError, "Node.js 18"):
+        import archctx_runtime
+        with patch.object(archctx_runtime, "executable", return_value="node"), \
+             patch.object(archctx_runtime, "execute", return_value="v16.20.2"), \
+             patch.object(archctx_runtime, "checkout", side_effect=AssertionError("unsupported Node reached setup")):
+            with self.assertRaisesRegex(ValueError, "Node.js 18"):
                 launcher.main()
 
     def test_definition_identity_separates_implementation_from_architecture(self):
@@ -246,6 +248,13 @@ console.log('PASS: camera restore passes scale in one centerAt call; absent SVG 
                     current = json.loads(body)
                     self.assertEqual(current["context_hash"], current["development"]["accepted_context_hash"])
                     self.assertEqual(current["components"], record["context"]["components"])
+                    self.assertEqual(current["project"]["root"], repo.as_posix())
+                    self.assertEqual(set(current["project"]["component_queries"]), {"service"})
+                    query = current["project"]["component_queries"]["service"]["canonical"]
+                    self.assertIn("--config", query)
+                    self.assertIn("--component=", query)
+                    self.assertIn("service", query)
+                    self.assertTrue(current["project"]["queries"]["analysis"].endswith(" understand --show --details"))
                     self.assertEqual(snapshot_mock.call_count, 0)  # One paired observer read, not a competing snapshot.
                     etag = response_headers["ETag"]
                     self.assertEqual(get("/api/current", headers={"If-None-Match": etag}), (304, ""))

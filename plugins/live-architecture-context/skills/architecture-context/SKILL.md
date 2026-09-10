@@ -36,6 +36,15 @@ signals as candidates. Implementation-only edits need no new declarations.
 If the index is missing, stale, invalid, or does not reduce the next read, use ordinary targeted
 discovery. Do not refresh merely to answer a read-only question, and never treat Archctx as a gate.
 
+During authorized development, if a real understanding gap remains and project setup is
+available, use the same CLI prefix with `understand "question" --files <small-scope>`.
+Follow the returned compact `NEEDS_AGENT` contract using captured source/facts as data,
+write only the requested semantic results, then `understand --resume <analysis_id>`.
+LAC owns recoverable extraction, merge and validation; this already-authorized Agent
+owns semantics. Reuse valid results with `understand --show`; never start analysis on
+every save or as a hidden side effect of a read-only answer. `map` may stay live during
+explicit acceptance. Setup is a separate authorized boundary, not automatic recovery.
+
 For a relevant completed task, optionally add one line to its existing summary:
 `LAC: used/skipped/unavailable; decision effect; evidence reference; overhead measured/unknown`.
 Mention Ponytail only if involved. Use existing task/usage evidence; private records stay

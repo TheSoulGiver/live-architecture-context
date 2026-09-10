@@ -1,126 +1,129 @@
-# Optional Understand Anything source analysis
+# Source understanding in the development loop
 
-LAC invokes the real, pinned Understand Anything (UA) toolchain and uses its
-agent instructions through the coding agent's existing authorized execution.
-It does not create another model service or replace the accepted architecture.
-No provider runs on a query, viewer poll or ordinary save.
+LAC captures a small saved-source scope, runs its compatible extraction tools
+and asks the current authorized Agent for semantic judgment. The same product
+imports the result, relates it to existing component IDs and displays it in the
+system map. No additional model service, dashboard or upstream manual is part
+of the normal workflow. Ordinary queries, map polls and saves invoke no model.
 
-## One-time optional provider setup
+## Set up this project once
 
-Use a separate development directory, not another consumer's installation:
-
-```sh
-git clone https://github.com/Egonex-AI/Understand-Anything.git <provider>
-git -C <provider> checkout --detach 5feed1f2ce4f9c368d860f4c0ebc36d98a4693fc
-# In <provider>, using Node.js and the pinned pnpm 10.6.2:
-pnpm --filter '@understand-anything/skill...' install --frozen-lockfile --ignore-scripts
-pnpm --filter '@understand-anything/core' build
-```
-
-On Windows use `pnpm.cmd` where PowerShell execution policy requires it.
-The filtered closure builds core and uses its packaged WASM grammars; it does
-not install/run the UA dashboard. LAC checks the exact clean tracked provider
-revision and compiled core. It never installs dependencies implicitly. Keep
-the upstream MIT license and copyright with that checkout (see `NOTICE.md`).
-
-## Analyze saved source, not a fabricated clean commit
-
-From the LAC checkout (or use installed `archctx-understand`), select only files
-needed for a real question. The config selects the actual repository and local
-state; do not feed its component declarations to UA as substitute source.
+With Python 3.10+, Git and Node.js 20+, run from the project root:
 
 ```sh
-python archctx_understand.py --config architecture/architecture.json prepare \
-  --provider <provider> --files archctx.py archctx_development.py archctx_blueprint.py
+archctx setup
 ```
 
-PowerShell can use the same command on one line. The result identifies `input`,
-`source_root` and `incremental.analyze_files`. It captures exact saved bytes,
-product HEAD as provenance, worktree identity and provider revision; initializes
-only the isolated source directory as a Git root, with **no snapshot commit**;
-then runs upstream `scan-project.mjs` and `extract-import-map.mjs`. Dirty product
-files remain untouched. High-level UA worktree redirection and signature-only
-COSMETIC skipping are deliberately not used.
+This is the explicit network operation. LAC provisions fixed compatible
+source-understanding and rendering components in ignored project-local state,
+builds the required analysis package, and preserves reviewed config/view
+definitions. A new project starts with empty component declarations; setup
+does not invent ownership. An incompatible or modified existing installation
+is preserved and reported. Diagnostic overrides can select already-prepared
+external components; LAC does not install into those locations.
 
-The existing authorized Codex session now performs upstream's actual semantic
-stages. Read the pinned `understand-anything-plugin/skills/understand/SKILL.md`,
-`agents/file-analyzer.md`, `agents/architecture-analyzer.md`,
-`agents/assemble-reviewer.md`, `agents/tour-builder.md` and the referenced graph
-guide. Use the supplied isolated source, not the primary checkout:
+The native `setup`, `understand` and `map` commands automatically select the sole
+conventional `architecture/architecture.json` or `.archctx/architecture.json`.
+When both exist, or a different location is needed, use an explicit `--config`.
+Existing query/acceptance commands still require an explicit shared config;
+keep the same prefix consistently when moving between these operations.
+In this source checkout, keep the managed prefix
+`python archctx.py --config architecture/architecture.json` for every command.
 
-1. For each `incremental.analyze_files` entry, use its numbered
-   `.ua/tmp/ua-file-analyzer-input-N.json`; run upstream's real
-   `extract-structure.mjs` to `.ua/tmp/ua-file-extract-results-N.json`, then write
-   the agent's semantic `batch-N*.json`. Preserve surviving `previousSymbols`
-   IDs, raw relation types/directions and uncertainty. Do not copy old semantics
-   for changed source. Unchanged files already have a retained baseline and
-   extraction; do not re-dispatch them.
-2. Run `python <provider>/understand-anything-plugin/skills/understand/merge-batch-graphs.py <source_root>`.
-   Inspect counts and warnings. Complete the upstream architecture and tour
-   stages against the actual assembled graph, producing `layers.json` and
-   `tour.json`. Layers group understanding, not canonical ownership. Never
-   fabricate upstream incremental Git fields for the unborn isolated snapshot.
-3. Finish the upstream graph and import it:
+## Ask about saved source
 
 ```sh
-python archctx_understand.py --config architecture/architecture.json finish --input <input>
-python archctx_understand.py --config architecture/architecture.json import --input <input>
-python archctx.py --config architecture/architecture.json candidates
+archctx understand "How does this request reach storage?" --files src/service.py src/storage.py
 ```
 
-`finish` creates actual `.ua/knowledge-graph.json`, validates it with UA's real
-schema and builds fingerprints. Import requires exact scope coverage, successful
-structural extraction and matching saved source. It does not use UA's lossy
-sanitizer as a correctness oracle. Incomplete/stale results retain previous
-discoveries and LKG; absent symbols/files are not deletion authorization.
+Select the useful files for the current question, including saved uncommitted
+changes. Without `--files`, LAC can use a bounded canonical search to select
+known evidence files; insufficient orientation returns `NEEDS_SCOPE` for the
+Agent to choose a scope. It does not silently claim whole-repository coverage.
 
-## Reconcile, accept and see the same architecture
-
-Existing `candidates` and `updates` return independent `source_analysis`.
-`python archctx_understand.py ... show` returns bounded investigation details.
-Default responses retain two raw edge witnesses per group; use `show --details`
-for all retained witnesses and explicit omission counts. This keeps group
-discovery useful inside the shared 16 KiB update budget.
-An evidence overlap identifies where to look, not who canonically owns it.
-Read actual source, preserve existing component IDs, and edit affected shared
-config/view yourself. Leave uncertainty pending or use the existing rejection
-reasons. The user need not maintain JSON manually.
+LAC captures exact bytes, worktree identity and source revision, then advances
+mechanical work to the next semantic boundary. On `NEEDS_AGENT`, the response
+contains the `lac.source-understanding/v1` contract and exact input/output
+paths. The Agent reads source and extraction as data, preserves surviving
+symbol IDs and raw edge meaning, and writes only the requested semantic results.
+Each file result binds the supplied `input_hash`; a system result binds the
+supplied graph hash. Understanding groups and the ordered tour are investigation
+aids, not canonical components or proven runtime flows.
 
 ```sh
-python archctx.py --config architecture/architecture.json accept ua:<id> --bind component:<existing-or-reviewed-new-id>
-python archctx.py --config architecture/architecture.json canonical <id>
-python archctx_blueprint.py --live
+archctx understand --resume <analysis_id>
 ```
 
-Acceptance reuses the writer lock and validated Archify/LKG publication. An
-explicit UA acceptance checks the same raw graph and saved-source hashes before
-and after rendering. An unchanged canonical match records only historical review
-provenance. That history does not prove current source/runtime freshness.
-The page separates the accepted diagram from analysis findings and captured
-analysis-source links; its existing source navigation and Before/After remain.
-For a proof-bound explicit acceptance, avoid racing a live observer's automatic
-definition promotion: use its non-`--live` mode while editing/accepting, then
-resume your own live viewer. Do not stop another session's observer.
+Resume performs remaining extraction, merges completed file results and, when
+needed, returns the next `NEEDS_AGENT` request for groups and a tour. Repeat
+after writing those results. LAC then validates, finishes and imports the graph,
+returning `FINDINGS_READY`. It checks source and result identities before
+publication; incomplete or changed inputs retain the previous usable analysis
+and accepted architecture. The map can remain open throughout.
 
-Saved source changes make analysis stale through the existing metadata observer.
-At the next relevant task boundary, repeat `prepare` on the useful explicit scope.
-Exact unchanged bytes **and** unchanged resolved imports reuse old file results;
-changed files receive previous symbol identities. Incoming relations from retained
-callers must survive merge, or the update fails for targeted source review.
-Partial scope never automatically removes old canonical components. Domain/flow
-analysis and automatic host scheduling are not wired; Codex owns this boundary.
+Completed work is reused by content identity. Unchanged saved bytes and resolved
+imports retain file results; changed files receive previous symbol identities.
+Retained incoming relations must survive the merge. A complete matching result
+returns `REUSED` without new semantic work. A source change during a run returns
+`STALE`; repeat understanding for the relevant current scope.
 
-## Cost and retention boundaries
+## Review into the same system map
 
-The scope is at most 64 files / 4 MiB saved source; raw imported graph 8 MiB;
-current analysis receipt 64 KiB; existing `updates` remains 16 KiB with omissions.
-Idle observers only stat the receipt and at most 64 selected paths. Queries read
-bounded hashes/summary, not raw graphs and not models. Eight local input runs are
-retained before optional preparation asks the owner to archive obsolete runs;
-there is no automatic history deletion. Upstream dependencies and extraction
-files still have real disk/initial-analysis costs, not a token-saving promise.
+```sh
+archctx understand --show --details
+archctx --config architecture/architecture.json candidates
+archctx --config architecture/architecture.json accept <returned-finding-id> --bind component:<existing-or-reviewed-new-id>
+archctx --config architecture/architecture.json canonical <component-id>
+archctx map
+```
 
-All snapshots, raw graphs, fingerprints and semantic notes stay in ignored
-adjacent `.archctx/understand/`; only reproducible source/config/view/docs enter
-GitHub. Provider coverage can miss lazy imports, embedded languages and some
-cross-batch calls. An absent raw edge is never proof that no dependency exists.
+`understand --show --details`, `candidates` and `updates` read existing
+findings without provider execution. Findings carry a stable `id`, a semantic
+`content_revision` and a source-bound `evidence_revision`. Source overlap
+identifies where to investigate, not canonical ownership. The Agent reviews the
+actual source, updates affected shared config/view declarations and uses existing
+`accept` / `reject` decisions. Preserve component IDs unless ownership changes.
+
+A current explicit decision supplies component/relation `bindings`.
+`related_components` contains the same component IDs used by `canonical` and
+the map; a reviewed relation contributes its declared endpoint IDs. Semantic or
+relevant source changes invalidate the prior review binding. Historical review
+does not prove current source freshness. Partial analysis cannot authorize
+canonical component or relation deletion.
+
+Acceptance shares the existing writer lock, validated refresh and last-good
+publication. It rechecks the captured graph/source proof and the actual
+config/view inputs, including when the live observer has already published the
+same definition. A busy writer returns a retry. There is no need to stop the map
+or another session's observer. Uncertain findings remain non-blocking leads.
+
+The [system map](LIVING_BLUEPRINT.md) separates confirmed components, discovered
+findings and changed source. Selecting a component shows its related findings,
+accepted evidence and exact Agent queries. Source-understanding freshness and
+accepted-architecture freshness remain distinct. Captured source links describe
+historical analysis bytes, not the current worktree.
+
+## Boundaries and compatibility
+
+The scope remains at most 64 files / 4 MiB saved source; imported raw graph 8 MiB;
+current receipt 64 KiB; existing `updates` 16 KiB with explicit omissions.
+Idle observers check bounded metadata. Eight local input runs are retained
+before preparation asks the owner to archive obsolete runs; no automatic
+history deletion is introduced. Raw graphs, snapshots, semantic results and
+tool installations stay in ignored adjacent `.archctx/` state.
+
+Source extraction uses the pinned Understand Anything revision
+`5feed1f2ce4f9c368d860f4c0ebc36d98a4693fc`; rendering uses Archify
+`5de7275fe87a66a19d52a4d9b0b3a4f2a5a90115`.
+Provider identity is diagnostic provenance, not a separate everyday entrypoint.
+Keep upstream licenses with local installations (see [NOTICE.md](../NOTICE.md)).
+Lazy imports, embedded languages and cross-batch calls can be missed; absent
+edges are not proof of no dependency. Dedicated domain/flow analysis, complete
+runtime reachability and automatic host scheduling are not supplied. CALM remains
+a separate optional code-fact provider.
+
+The expert `archctx-understand prepare/finish/import/show`,
+`python archctx_understand.py`, `archctx-blueprint` and
+`python tools/archify.py` entrypoints remain compatible. They are useful for
+existing integrations or diagnosis; normal development uses
+`archctx setup`, `archctx understand` and `archctx map`.
