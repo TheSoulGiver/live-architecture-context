@@ -1199,15 +1199,16 @@ def understand(config_path: Path, explicit: str | None, args: dict[str, Any]) ->
     from archctx_understand import discoveries, native_understand
     for name in ("show", "details"):
         if name in args and not isinstance(args[name], bool): raise ValueError(f"{name} must be boolean")
-    for name in ("question", "resume"):
+    for name in ("question", "resume", "analysis"):
         if args.get(name) is not None and not isinstance(args[name], str): raise ValueError(f"{name} must be a string")
     files = args.get("files")
     if files is not None and (not isinstance(files, list) or not all(isinstance(path, str) for path in files)):
         raise ValueError("files must be a string array")
     if args.get("show"):
-        if args.get("question") or files or args.get("resume"): raise ValueError("--show is read-only; do not combine it with question/files/resume")
-        return discoveries(config_path, explicit, details=args.get("details", False))
+        if args.get("question") or args.get("resume"): raise ValueError("--show is read-only; do not combine it with question/resume")
+        return discoveries(config_path, explicit, details=args.get("details", False), analysis=args.get("analysis"), files=files)
     if args.get("details"): raise ValueError("--details requires --show")
+    if args.get("analysis") is not None: raise ValueError("--analysis requires --show; use --resume to continue analysis")
     try:
         return native_understand(config_path, explicit, args.get("question"), files, args.get("resume"))
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
@@ -1473,21 +1474,28 @@ def bounded_updates(value: dict[str, Any]) -> dict[str, Any]:
 
 
 def analysis_receipt_identity(directory: Path) -> str | None:
-    from archctx_understand import current_path, bounded_raw, SUMMARY_BYTES
-    path = current_path(directory)
+    from archctx_understand import catalog_path, bounded_raw, CATALOG_BYTES
+    path = catalog_path(directory)
     if not path.exists(): return None
     try:
         decisions = candidate_decision_path(directory)
-        return semantic({"receipt": sha(bounded_raw(path, SUMMARY_BYTES)),
+        return semantic({"receipt": sha(bounded_raw(path, CATALOG_BYTES)),
                          "decisions": sha(bounded_raw(decisions, DECISION_BYTES)) if decisions.exists() else None})
     except (OSError, ValueError) as error:
         return semantic({"invalid_analysis": str(error)})
 
 
-def updates(config_path: Path, explicit: str | None, since: str | None = None) -> dict[str, Any]:
+def updates(config_path: Path, explicit: str | None, since: str | None = None,
+            analysis: str | None = None, files: list[str] | None = None) -> dict[str, Any]:
     """Read relevant changes since a caller-held cursor; never advance watcher or accepted state."""
     directory = state(config_path, explicit)
-    selection = semantic({"config": str(config_path.resolve()), "state": str(directory.resolve())})
+    if analysis is not None and not isinstance(analysis, str): raise ValueError("analysis must be a string")
+    if files is not None and (not isinstance(files, list) or not all(isinstance(path, str) for path in files)):
+        raise ValueError("files must be a string array")
+    selected = {"config": str(config_path.resolve()), "state": str(directory.resolve())}
+    if analysis is not None: selected["analysis"] = analysis
+    if files is not None: selected["files"] = sorted(set(files))
+    selection = semantic(selected)
     previous = None
     if since is not None:
         if not isinstance(since, str) or len(since) > 300: raise ValueError("invalid updates cursor")
@@ -1495,12 +1503,12 @@ def updates(config_path: Path, explicit: str | None, since: str | None = None) -
         if len(parts) != 5 or parts[0] != "u1" or any(part != "-" and (len(part) != 64 or any(c not in "0123456789abcdef" for c in part)) for part in parts[1:]):
             raise ValueError("invalid updates cursor")
         previous = dict(zip(("selection", "context", "view", "observation"), parts[1:]))
-        if previous["selection"] != selection: raise ValueError("updates cursor belongs to another config/state selection")
+        if previous["selection"] != selection: raise ValueError("updates cursor belongs to another config/state/analysis/files selection")
     observed: dict[str, Any] = {}
     value = status(config_path, explicit, _observed=observed)
     analysis_identity = analysis_receipt_identity(directory)
     from archctx_understand import discoveries
-    analysis = discoveries(config_path, explicit) if analysis_identity is not None else {"configured": False}
+    analysis = discoveries(config_path, explicit, analysis=analysis, files=files) if analysis_identity is not None else {"configured": False}
     old = observed.get("record")
     config, repo = observed.get("config", {}), observed.get("repo")
     candidate = observed.get("candidates", {"state": "not_checked", "candidates": []})
@@ -1720,12 +1728,15 @@ def submit_candidate_decision(config_path: Path, explicit: str | None, ident: st
     except RefreshBusyError as error:
         return refresh_retry(directory, None, str(error), ["writer_lock"])
 
-def accept_candidate(config_path: Path, explicit: str | None, ident: str, bindings: list[str]) -> dict[str, Any]:
+def accept_candidate(config_path: Path, explicit: str | None, ident: str, bindings: list[str],
+                     analysis: str | None = None) -> dict[str, Any]:
+    if analysis is not None and not isinstance(analysis, str): raise ValueError("analysis must be a string")
+    if analysis is not None and not ident.startswith("ua:"): raise ValueError("analysis selection requires a source-analysis candidate")
     directory = state(config_path, explicit)
     try:
         if ident.startswith("ua:"):
             from archctx_understand import review
-            return review(config_path, explicit, ident, bindings=bindings)
+            return review(config_path, explicit, ident, bindings=bindings, analysis=analysis)
         with refresh_lock(directory):
             config, _, old, _, candidate_value = candidate_for_review(config_path, explicit, ident)
             summary = {"id": ident, "kind": candidate_value["kind"], "rule_id": candidate_value["rule_id"], "decision": "accepted"}
@@ -1734,14 +1745,17 @@ def accept_candidate(config_path: Path, explicit: str | None, ident: str, bindin
     except RefreshBusyError as error:
         return refresh_retry(directory, None, str(error), ["writer_lock"])
 
-def reject_candidate(config_path: Path, explicit: str | None, ident: str, reason: str) -> dict[str, Any]:
+def reject_candidate(config_path: Path, explicit: str | None, ident: str, reason: str,
+                     analysis: str | None = None) -> dict[str, Any]:
+    if analysis is not None and not isinstance(analysis, str): raise ValueError("analysis must be a string")
+    if analysis is not None and not ident.startswith("ua:"): raise ValueError("analysis selection requires a source-analysis candidate")
     allowed = {"not_architecture", "existing_canonical", "test_fixture", "false_match"}
     if reason not in allowed: raise ValueError("reject reason must be one of not_architecture, existing_canonical, test_fixture, false_match")
     directory = state(config_path, explicit)
     try:
         if ident.startswith("ua:"):
             from archctx_understand import review
-            return review(config_path, explicit, ident, reason=reason)
+            return review(config_path, explicit, ident, reason=reason, analysis=analysis)
         with refresh_lock(directory):
             config, _, old, _, candidate_value = candidate_for_review(config_path, explicit, ident)
             if changed_candidate_bindings(config, old, current_context(config_path, config), candidate_value): raise ValueError("candidate has changed canonical evidence; accept it instead of rejecting")
@@ -1863,22 +1877,22 @@ def mcp_tools() -> list[dict[str, Any]]:
     search_input = {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 0, "default": 3}}, "required": ["query"]}
     history_input = {"type": "object", "properties": {"context_hash": {"type": "string"}, "limit": {"type": "integer", "minimum": 0, "default": 10}}}
     usage_input = {"type": "object", "properties": {"operation": {"type": "string"}, "limit": {"type": "integer", "minimum": 0, "default": 10}}}
-    updates_input = {"type": "object", "properties": {"since": {"type": "string"}}}
-    accept_input = {"type": "object", "properties": {"id": {"type": "string"}, "bindings": {"type": "array", "minItems": 1, "items": {"type": "string"}}}, "required": ["id", "bindings"]}
-    reject_input = {"type": "object", "properties": {"id": {"type": "string"}, "reason": {"enum": ["not_architecture", "existing_canonical", "test_fixture", "false_match"]}}, "required": ["id", "reason"]}
+    updates_input = {"type": "object", "properties": {"since": {"type": "string"}, "analysis": {"type": "string"}, "files": {"type": "array", "items": {"type": "string"}}}}
+    accept_input = {"type": "object", "properties": {"id": {"type": "string"}, "analysis": {"type": "string"}, "bindings": {"type": "array", "minItems": 1, "items": {"type": "string"}}}, "required": ["id", "bindings"]}
+    reject_input = {"type": "object", "properties": {"id": {"type": "string"}, "analysis": {"type": "string"}, "reason": {"enum": ["not_architecture", "existing_canonical", "test_fixture", "false_match"]}}, "required": ["id", "reason"]}
     return [
         {"name": "architecture_status", "description": "Freshness and last-known-good metadata; optional diagnose reports local input paths and core tool identity, without writes.", "inputSchema": status_input},
         {"name": "architecture_refresh", "description": "Validate and atomically promote context only when no candidate is pending; reset_candidate_baseline is an explicit audited migration.", "inputSchema": refresh_input},
         {"name": "architecture_snapshot", "description": "Compact last-known-good context.", "inputSchema": empty},
         {"name": "architecture_history", "description": "Bounded source-evidence snapshot history; pass context_hash only for one historical context.", "inputSchema": history_input},
         {"name": "architecture_usage", "description": "Bounded local receipts of meaningful architecture operations, not session logs.", "inputSchema": usage_input},
-        {"name": "architecture_updates", "description": "Read-only bounded changes since a caller-held cursor; no refresh, renderer or delivery state writes.", "inputSchema": updates_input},
+        {"name": "architecture_updates", "description": "Read-only bounded changes since a caller-held cursor, bound to optional analysis/files selection; no refresh, renderer or delivery state writes.", "inputSchema": updates_input},
         {"name": "architecture_candidates", "description": "Pending deterministic high-value source candidates; not canonical facts. Default is compact; limit 0 returns the bounded full set.", "inputSchema": candidates_input},
         {"name": "architecture_accept_candidate", "description": "Promote a manually updated canonical config after one candidate is bound to changed source-evidence-backed architecture.", "inputSchema": accept_input},
         {"name": "architecture_reject_candidate", "description": "Record one bounded fixed-code rejection and advance the verified candidate baseline.", "inputSchema": reject_input},
         {"name": "architecture_canonical", "description": "Canonical component and evidence.", "inputSchema": ident},
         {"name": "architecture_search", "description": "Match the current task to compact canonical components; defaults to three results and reports omissions.", "inputSchema": search_input},
-        {"name": "architecture_understand", "description": "Explicit bounded source understanding after setup: run recoverable mechanical stages, then return a compact semantic task for the already-authorized Agent. Never invokes a model. show is strictly read-only and reuses retained findings.", "inputSchema": {"type": "object", "properties": {"question": {"type": "string"}, "files": {"type": "array", "items": {"type": "string"}}, "resume": {"type": "string"}, "show": {"type": "boolean"}, "details": {"type": "boolean"}}}},
+        {"name": "architecture_understand", "description": "Explicit bounded source understanding after setup: run recoverable mechanical stages, then return a compact semantic task for the already-authorized Agent. Never invokes a model. show is strictly read-only; optional analysis/files select retained project findings.", "inputSchema": {"type": "object", "properties": {"question": {"type": "string"}, "files": {"type": "array", "items": {"type": "string"}}, "analysis": {"type": "string"}, "resume": {"type": "string"}, "show": {"type": "boolean"}, "details": {"type": "boolean"}}}},
         {"name": "architecture_evidence", "description": "Source evidence for one component.", "inputSchema": ident},
         {"name": "architecture_trace", "description": "Authored relations; optional code graph stays separate.", "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}, "direction": {"enum": ["upstream", "downstream"]}, "include_code_edges": {"type": "boolean"}}, "required": ["id"]}},
         {"name": "architecture_impact", "description": "Shared declared change_scope: direct components, dependencies, dependents, typed relation evidence; accepted and unaccepted working definitions stay separate. Not runtime impact. details expands omissions; legacy reachable_components is all-kind outgoing reach.", "inputSchema": {"type": "object", "properties": {"base": {"type": "string"}, "files": {"type": "array", "items": {"type": "string"}}, "details": {"type": "boolean"}}}},
@@ -1898,7 +1912,7 @@ def mcp_value(config_path: Path, explicit: str | None, name: str, args: dict[str
     if name == "architecture_snapshot": return snapshot(config_path, explicit)
     if name == "architecture_history": return history(state(config_path, explicit), args.get("context_hash"), int(args.get("limit", 10)))
     if name == "architecture_usage": return usage(state(config_path, explicit), args.get("operation"), int(args.get("limit", 10)))
-    if name == "architecture_updates": return updates(config_path, explicit, args.get("since"))
+    if name == "architecture_updates": return updates(config_path, explicit, args.get("since"), args.get("analysis"), args.get("files"))
     if name == "architecture_candidates":
         limit = args.get("limit", CANDIDATE_OUTPUT_LIMIT)
         if not isinstance(limit, int) or isinstance(limit, bool): raise ValueError("candidate limit must be an integer")
@@ -1906,8 +1920,8 @@ def mcp_value(config_path: Path, explicit: str | None, name: str, args: dict[str
     if name == "architecture_accept_candidate":
         bindings = args.get("bindings", [])
         if not isinstance(bindings, list) or not all(isinstance(value, str) for value in bindings): raise ValueError("bindings must be a string array")
-        return accept_candidate(config_path, explicit, str(args.get("id", "")), bindings)
-    if name == "architecture_reject_candidate": return reject_candidate(config_path, explicit, str(args.get("id", "")), str(args.get("reason", "")))
+        return accept_candidate(config_path, explicit, str(args.get("id", "")), bindings, args.get("analysis"))
+    if name == "architecture_reject_candidate": return reject_candidate(config_path, explicit, str(args.get("id", "")), str(args.get("reason", "")), args.get("analysis"))
     if name == "architecture_canonical": return canonical(config_path, explicit, str(args.get("id", "")))
     if name == "architecture_search": return search(config_path, explicit, str(args.get("query", "")), int(args.get("limit", 3)))
     if name == "architecture_understand": return understand(config_path, explicit, args)
@@ -1945,7 +1959,7 @@ def main() -> int:
     x = sub.add_parser("setup", help="explicitly prepare compatible project-local analysis/render components and Codex guidance; no model or refresh")
     x.add_argument("--analysis-home", help="reuse an existing compatible source checkout without modifying it"); x.add_argument("--renderer-home", help="reuse an existing compatible renderer checkout without modifying it"); x.add_argument("--command", dest="cli_command", default="archctx")
     x = sub.add_parser("understand", help="bounded source understanding; mechanical work is recoverable, semantics stay with the authorized Agent")
-    x.add_argument("question", nargs="?"); x.add_argument("--files", nargs="+"); x.add_argument("--resume"); x.add_argument("--show", action="store_true", help="read-only retained discoveries; no analysis"); x.add_argument("--details", action="store_true")
+    x.add_argument("question", nargs="?"); x.add_argument("--files", nargs="+"); x.add_argument("--resume"); x.add_argument("--show", action="store_true", help="read-only retained discoveries; no analysis"); x.add_argument("--details", action="store_true"); x.add_argument("--analysis", help="retained analysis or scope ID; requires --show")
     x = sub.add_parser("map", help="open the shared map and observe saved development changes")
     x.add_argument("--port", type=int, default=0); x.add_argument("--no-open", action="store_true"); x.add_argument("--read-only", action="store_true", help="disable automatic maintenance for this viewer")
     x = sub.add_parser("status"); x.add_argument("--diagnose", action="store_true", help="read-only core identity and selected config/state paths; works even without a config")
@@ -1953,13 +1967,13 @@ def main() -> int:
     x = sub.add_parser("candidates"); x.add_argument("--limit", type=int, default=CANDIDATE_OUTPUT_LIMIT)
     x = sub.add_parser("history"); x.add_argument("--context-hash"); x.add_argument("--limit", type=int, default=10)
     x = sub.add_parser("usage"); x.add_argument("--operation"); x.add_argument("--limit", type=int, default=10); x.add_argument("--import-legacy", action="store_true")
-    x = sub.add_parser("updates"); x.add_argument("--since")
+    x = sub.add_parser("updates"); x.add_argument("--since"); x.add_argument("--analysis"); x.add_argument("--files", nargs="+")
     x = sub.add_parser("canonical"); x.add_argument("id", nargs="?"); x.add_argument("--component"); x = sub.add_parser("search"); x.add_argument("query", nargs="?"); x.add_argument("--query", dest="query_flag"); x.add_argument("--limit", type=int, default=3); x = sub.add_parser("evidence"); x.add_argument("id", nargs="?"); x.add_argument("--component")
     x = sub.add_parser("trace"); x.add_argument("id", nargs="?"); x.add_argument("--from", dest="source"); x.add_argument("--to", dest="target"); x.add_argument("--direction", choices=("upstream", "downstream"), default="downstream"); x.add_argument("--code", action="store_true")
     x = sub.add_parser("impact"); x.add_argument("--base"); x.add_argument("--files", nargs="*"); x.add_argument("--details", action="store_true", help="expand declared scope/evidence omissions; not runtime impact")
     x = sub.add_parser("changed-since"); x.add_argument("--revision", required=True); x = sub.add_parser("delta"); x.add_argument("--revision", required=True); x = sub.add_parser("drift"); x.add_argument("--base", required=True)
-    x = sub.add_parser("accept"); x.add_argument("id"); x.add_argument("--bind", action="append", required=True)
-    x = sub.add_parser("reject"); x.add_argument("id"); x.add_argument("--reason", required=True)
+    x = sub.add_parser("accept"); x.add_argument("id"); x.add_argument("--bind", action="append", required=True); x.add_argument("--analysis")
+    x = sub.add_parser("reject"); x.add_argument("id"); x.add_argument("--reason", required=True); x.add_argument("--analysis")
     x = sub.add_parser("watch"); x.add_argument("--once", action="store_true"); x.add_argument("--apply", action="store_true", help="promote only already-declared context after source, graph, gate, and optional Archify validation pass"); x.add_argument("--poll-ms", type=int, default=500); x.add_argument("--max-events", type=int)
     x = sub.add_parser("install-codex"); x.add_argument("--target", default="AGENTS.md"); x.add_argument("--check", action="store_true"); x.add_argument("--command", dest="cli_command", default="archctx", help="CLI prefix written to AGENTS.md only; not executed")
     x = sub.add_parser("uninstall-codex"); x.add_argument("--target", default="AGENTS.md"); x.add_argument("--check", action="store_true")
@@ -1991,7 +2005,7 @@ def main() -> int:
             dump(diagnose_status(config_path, args.state_dir)); return 0
         if not config_path.is_file(): raise ValueError("--config is required except for init (or run from a repository with .archctx/architecture.json)")
         if args.command == "understand":
-            value = understand(config_path, args.state_dir, {key: getattr(args, key) for key in ("question", "files", "resume", "show", "details")})
+            value = understand(config_path, args.state_dir, {key: getattr(args, key) for key in ("question", "files", "resume", "show", "details", "analysis")})
             dump(value); return 2 if value.get("status") in ("ERROR", "INVALID") else 0
         if args.command == "map":
             from archctx_blueprint import main as map_main
@@ -2004,7 +2018,7 @@ def main() -> int:
         if args.command == "telemetry": dump(telemetry_summary(state(config_path, args.state_dir))); return 0
         if args.command == "history": dump(history(state(config_path, args.state_dir), args.context_hash, args.limit)); return 0
         if args.command == "usage": dump(import_legacy_usage(state(config_path, args.state_dir)) if args.import_legacy else usage(state(config_path, args.state_dir), args.operation, args.limit)); return 0
-        if args.command == "updates": dump(updates(config_path, args.state_dir, args.since)); return 0
+        if args.command == "updates": dump(updates(config_path, args.state_dir, args.since, args.analysis, args.files)); return 0
         if args.command == "watch":
             if args.once:
                 started = time.monotonic(); value = watch_once(config_path, args.state_dir, args.apply); elapsed = int((time.monotonic() - started) * 1000)
@@ -2015,7 +2029,7 @@ def main() -> int:
         install_target = target if target and target.is_absolute() else (repo_for(config_path, load(config_path)) / target) if target else None
         if args.command == "install-codex":
             dump(install_codex(config_path, install_target.resolve(), args.check, args.cli_command, args.state_dir)); return 0
-        actions = {"status": lambda: status(config_path, args.state_dir), "refresh": lambda: refresh(config_path, args.state_dir, reset_candidate_baseline=args.reset_candidate_baseline), "snapshot": lambda: snapshot(config_path, args.state_dir), "candidates": lambda: candidates(config_path, args.state_dir, args.limit), "accept": lambda: accept_candidate(config_path, args.state_dir, args.id, args.bind), "reject": lambda: reject_candidate(config_path, args.state_dir, args.id, args.reason), "canonical": lambda: canonical(config_path, args.state_dir, args.component or args.id), "search": lambda: search(config_path, args.state_dir, args.query_flag or args.query, args.limit), "evidence": lambda: mcp_value(config_path, args.state_dir, "architecture_evidence", {"id": args.component or args.id}), "trace": lambda: trace(config_path, args.state_dir, args.source or args.id, args.direction, args.code, args.target), "impact": lambda: impact(config_path, args.state_dir, args.base, args.files, args.details), "changed-since": lambda: changed_since(config_path, args.state_dir, args.revision), "delta": lambda: delta(config_path, args.state_dir, args.revision), "drift": lambda: drift(config_path, args.base), "uninstall-codex": lambda: uninstall_codex(install_target.resolve(), args.check)}
+        actions = {"status": lambda: status(config_path, args.state_dir), "refresh": lambda: refresh(config_path, args.state_dir, reset_candidate_baseline=args.reset_candidate_baseline), "snapshot": lambda: snapshot(config_path, args.state_dir), "candidates": lambda: candidates(config_path, args.state_dir, args.limit), "accept": lambda: accept_candidate(config_path, args.state_dir, args.id, args.bind, args.analysis), "reject": lambda: reject_candidate(config_path, args.state_dir, args.id, args.reason, args.analysis), "canonical": lambda: canonical(config_path, args.state_dir, args.component or args.id), "search": lambda: search(config_path, args.state_dir, args.query_flag or args.query, args.limit), "evidence": lambda: mcp_value(config_path, args.state_dir, "architecture_evidence", {"id": args.component or args.id}), "trace": lambda: trace(config_path, args.state_dir, args.source or args.id, args.direction, args.code, args.target), "impact": lambda: impact(config_path, args.state_dir, args.base, args.files, args.details), "changed-since": lambda: changed_since(config_path, args.state_dir, args.revision), "delta": lambda: delta(config_path, args.state_dir, args.revision), "drift": lambda: drift(config_path, args.base), "uninstall-codex": lambda: uninstall_codex(install_target.resolve(), args.check)}
         started = time.monotonic(); value = actions[args.command]()
         elapsed = int((time.monotonic() - started) * 1000)
         if args.command not in ("status", "install-codex", "uninstall-codex"): telemetry(state(config_path, args.state_dir), args.command, value, elapsed)

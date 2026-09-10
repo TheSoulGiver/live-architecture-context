@@ -101,6 +101,7 @@ class DevelopmentObserver:
         self._input_signature = None
         self._external_stamps, self._external = None, {}
         self._analysis_stamp, self._analysis_paths, self._analysis_metadata = None, set(), {}
+        self._analysis_receipts: list[Path] = []
         self._updates: dict[str, Any] = {}
         self._settled_at = time.monotonic()
         self._pending_controls = False
@@ -203,26 +204,29 @@ class DevelopmentObserver:
         return config, record
 
     def _external_state(self):
-        analysis_path = understand.current_path(self.directory)
-        analysis_stamp = stamp(analysis_path)
+        def analysis_stamps():
+            return (stamp(understand.catalog_path(self.directory)), stamp(understand.current_path(self.directory)),
+                    tuple((str(path), stamp(path)) for path in self._analysis_receipts))
+        analysis_stamp = analysis_stamps()
         if analysis_stamp != self._analysis_stamp:
             self._analysis_paths = set()
             self._analysis_metadata = {"stamp": analysis_stamp}
             try:
-                if analysis_stamp is not None:
-                    receipt = understand.local_json(analysis_path, understand.SUMMARY_BYTES)
-                    hashes = receipt["source_hashes"]
-                    if Path(receipt["worktree"]).resolve() != self.repo or not isinstance(hashes, dict) or not 0 < len(hashes) <= understand.SOURCE_LIMIT:
-                        raise ValueError("analysis scope does not belong to this viewer")
-                    for relative in hashes:
+                if any(item is not None for item in analysis_stamp[:2]):
+                    manifest = understand.source_manifest(self.directory, self.repo)
+                    for relative in manifest["paths"]:
                         path, normalized = archctx.repo_file(self.repo, relative, "analysis source")
                         if normalized != relative or {p.casefold() for p in Path(relative).parts}.intersection({".git", ".archctx"}) or path.is_relative_to(self.directory):
                             raise ValueError("analysis scope contains a non-product path")
-                    self._analysis_paths = set(hashes)
-                    self._analysis_metadata["analysis_id"] = receipt["analysis_id"]
+                    self._analysis_paths = set(manifest["paths"])
+                    self._analysis_metadata.update({key: manifest[key] for key in ("analysis_ids", "omitted_files", "errors", "omitted_errors")})
+                    if manifest["errors"]:
+                        self._analysis_metadata["error"] = "; ".join(item["reason"] for item in manifest["errors"])[:500]
+                    self._analysis_receipts = [Path(path) for path in manifest["receipt_paths"]]
             except (OSError, ValueError, KeyError, TypeError) as error:
                 self._analysis_metadata["error"] = str(error)[:500]  # Optional analysis never invalidates the accepted map.
-            self._analysis_stamp = analysis_stamp
+            self._analysis_stamp = analysis_stamps()
+            self._analysis_metadata["stamp"] = self._analysis_stamp
         decision_path, usage_path = archctx.candidate_decision_path(self.directory), archctx.usage_path(self.directory)
         stamps = stamp(decision_path), stamp(usage_path)
         if stamps != self._external_stamps:
@@ -265,6 +269,7 @@ class DevelopmentObserver:
                         "counts": {"changed": 0, "unmapped": 0, "omitted": 0},
                         "limitations": ["Architecture ownership is not declared yet; inspect source analysis independently."] + ([git_error] if git_error else []),
                         "watched_files": 0, "analysis_stat_files": len(self._analysis_paths), "live": self.live,
+                        "analysis_omitted_files": self._analysis_metadata.get("omitted_files", 0),
                         "auto_publish": "waiting for source-grounded shared definitions"}
         self._config, self._paths = config, set(current) | set(evidence_hashes(record))
         before = evidence_hashes(record)
@@ -277,7 +282,9 @@ class DevelopmentObserver:
                 if archctx.sha((self.repo / path).read_text(encoding="utf-8", errors="replace").encode()) != expected:
                     changed_evidence.add(path)
         observed = {item["path"]: dict(item, dirty_git=True) for item in dirty}
-        changed_analysis = set(packet.get("source_analysis", {}).get("changed_files", [])) & self._analysis_paths
+        analysis = packet.get("source_analysis", {})
+        changed_analysis = {path for scope in [analysis, *analysis.get("scopes", [])]
+                            for path in scope.get("changed_files", [])} & self._analysis_paths
         for path in changed_analysis:
             observed.setdefault(path, {"path": path, "kind": "delete" if stamp(self.repo / path) is None else "modify", "dirty_git": False})
         rename_origins = {item["old_path"] for item in dirty if item.get("kind") == "rename"}
@@ -347,6 +354,7 @@ class DevelopmentObserver:
                         "counts": {"changed": len(changes), "unmapped": sum(not c["covered"] for c in changes), "omitted": 0},
                         "limitations": [git_error] if git_error else [], "watched_files": len(current),
                         "analysis_stat_files": len(self._analysis_paths),
+                        "analysis_omitted_files": self._analysis_metadata.get("omitted_files", 0),
                         "live": self.live, "metadata_stat_limit": CHANGE_LIMIT,
                         "legacy_semantics": {"components": "union of working/accepted evidence owners", "impacted_components": "all-kind incoming authored reach in accepted graph, minus legacy direct IDs; use change_scope instead"},
                         "omitted_dirty_metadata_stats": max(0, len(dirty) - CHANGE_LIMIT),
@@ -452,6 +460,7 @@ class DevelopmentObserver:
                              "last_good_preserved": bool(self._record)}
             if analysis:
                 self._payload["updates"]["source_analysis"] = {**analysis, "status": "STALE", "retained_previous_observation": True,
+                    "scopes": [{**scope, "status": "UNKNOWN"} for scope in analysis.get("scopes", [])],
                     "reason": "Current observation unavailable; retained analysis is not current source evidence"}
             self._bound(self._payload)
 

@@ -74,6 +74,7 @@ class UnderstandIntegrationTest(unittest.TestCase):
         self.receipt = {"analysis_id": "a" * 64, "graph_sha256": archctx.sha(raw),
                         "worktree": str(self.root), "source_revision": "synthetic-source",
                         "source_hashes": understand.content_hashes(understand.source_bytes(self.root, ["source.py", "helper.py"])),
+                        "dependencies": {p: {"dependencies": [], "coverage": "resolved", "unknown": [], "unresolvedLocal": []} for p in ("source.py", "helper.py")},
                         "provider": {"name": "understand-anything", "url": understand.PROVIDER_URL, "revision": understand.PROVIDER_REVISION},
                         "node_count": 2, "edge_count": 1, "tour": [],
                         "candidates": [{"id": self.ident, "kind": "source_analysis", "files": ["source.py"],

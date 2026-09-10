@@ -13,6 +13,7 @@ class NativeIdentityTest(unittest.TestCase):
         self.contents = {"a.py": b"def run(): pass\n", "b.py": b"def save(): pass\n", "c.py": b"other = 1\n"}
         self.receipt = {"analysis_id": "a" * 64, "graph_sha256": "b" * 64,
                         "source_hashes": ua.content_hashes(self.contents),
+                        "dependencies": {p: {"dependencies": [], "coverage": "resolved", "unknown": [], "unresolvedLocal": []} for p in self.contents},
                         "provider": {"name": "understand-anything", "url": ua.PROVIDER_URL, "revision": ua.PROVIDER_REVISION}}
         self.graph = {
             "nodes": [{"id": p, "type": "file", "name": p, "filePath": p, "summary": "source"} for p in self.contents],

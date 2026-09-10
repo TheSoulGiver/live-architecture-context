@@ -56,18 +56,24 @@ class UnderstandPageTest(unittest.TestCase):
         self.assertEqual(archctx.refresh(config, str(state))["status"], "PASS")
         return repo, config, state, git
 
-    def receipt(self, repo, state, ident="a" * 64):
-        raw = (repo / "analysis_only.py").read_bytes()
+    def receipt(self, repo, state, ident="a" * 64, path="analysis_only.py"):
+        raw = (repo / path).read_bytes()
         source = state / "understand/runs" / ident / "source"
-        archctx.atomic_bytes(source / "analysis_only.py", raw)
+        archctx.atomic_bytes(source / path, raw)
         value = {"analysis_id": ident, "worktree": str(repo), "source_root": str(source),
-                 "source_revision": archctx.revision(repo), "source_hashes": {"analysis_only.py": archctx.sha(raw)},
+                 "source_revision": archctx.revision(repo), "source_hashes": {path: archctx.sha(raw)},
                  "graph_sha256": "b" * 64, "node_count": 1, "edge_count": 0, "tour": [],
                  "provider": {"name": "understand-anything", "url": understand.PROVIDER_URL, "revision": understand.PROVIDER_REVISION},
                  "candidates": [{"id": "ua:" + ident, "title": "Synthetic investigation", "summary": "Not a canonical owner",
-                                 "files": ["analysis_only.py"], "evidence": [], "raw_relations": [], "blocking": False}]}
+                                 "files": [path], "evidence": [{"path": path, "line": 1, "sha256": archctx.sha(raw)}],
+                                 "raw_relations": [], "blocking": False}]}
         archctx.atomic(understand.current_path(state), value)
         return value
+
+    def catalog(self, state, *receipts):
+        entries = {understand.scope_id(receipt): understand.retain_analysis(state, receipt, b"{}") for receipt in receipts}
+        archctx.atomic(state / "understand/catalog.json", {"version": 1,
+                       "active": understand.scope_id(receipts[-1]), "scopes": entries})
 
     def test_observer_tracks_receipt_and_committed_analysis_only_sources_without_idle_reads(self):
         repo, config, state, git = self.fixture()
@@ -133,16 +139,15 @@ class UnderstandPageTest(unittest.TestCase):
             # Live source may have moved; this endpoint remains a labelled historical snapshot.
             (repo / path).write_text("current product source differs")
             self.assertEqual(get(query)[0], 200)
-            original = understand.local_json
+            original = understand.analysis_receipt
             reads = []
             def moved(*args):
-                value = original(*args)
-                if args[0] == understand.current_path(state):
-                    reads.append(1)
-                    if len(reads) > 1:
-                        value = {**value, "analysis_id": "e" * 64}
-                return value
-            with patch.object(understand, "local_json", side_effect=moved):
+                receipt_path, value = original(*args)
+                reads.append(1)
+                if len(reads) > 1:
+                    value = {**value, "analysis_id": "e" * 64}
+                return receipt_path, value
+            with patch.object(understand, "analysis_receipt", side_effect=moved):
                 self.assertEqual(get(query)[0], 409)
             forged = {**receipt, "source_root": str(repo)}
             archctx.atomic(understand.current_path(state), forged)
@@ -154,6 +159,84 @@ class UnderstandPageTest(unittest.TestCase):
             server.shutdown()
             thread.join()
             server.server_close()
+
+    def test_retained_scope_selection_history_and_observer_are_independent_and_read_only(self):
+        repo, config, state, git = self.fixture()
+        a = self.receipt(repo, state)
+        b = self.receipt(repo, state, "c" * 64, "owner.py")
+        self.catalog(state, a, b)
+        observer = DevelopmentObserver(config, str(state))
+        before = observer.poll_once()
+        self.assertEqual(before["analysis_stat_files"], 2)
+        with patch.object(understand, "local_json", side_effect=AssertionError("idle catalog reread")), \
+             patch.object(understand, "verify_sources", side_effect=AssertionError("idle source reread")):
+            self.assertEqual(observer.poll_once()["observation_id"], before["observation_id"])
+        (repo / "analysis_only.py").write_text("VALUE = 'changed after analysis A'\n")
+        git("add", "analysis_only.py")
+        git("commit", "-qm", "change retained non-focused scope")
+        changed = observer.poll_once()
+        packet = changed["updates"]["source_analysis"]
+        self.assertEqual(packet["analysis_id"], b["analysis_id"])
+        self.assertEqual(packet["status"], "FRESH")
+        self.assertEqual({scope["analysis_id"]: scope["status"] for scope in packet["scopes"]},
+                         {a["analysis_id"]: "STALE", b["analysis_id"]: "FRESH"})
+        self.assertTrue(next(item for item in changed["changes"] if item["path"] == "analysis_only.py")["analysis_changed"])
+        self.assertEqual(changed["accepted_context_hash"], before["accepted_context_hash"])
+        state_before = {p.relative_to(state): p.read_bytes() for p in state.rglob("*") if p.is_file()}
+        server = ThreadingHTTPServer(("127.0.0.1", 0), blueprint.handler(config, str(state), observer))
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            def get(url, etag=None):
+                connection = http.client.HTTPConnection("127.0.0.1", server.server_port)
+                connection.request("GET", url, headers={"If-None-Match": etag} if etag else {})
+                response = connection.getresponse()
+                value = response.status, response.read().decode(), response.getheader("ETag")
+                connection.close()
+                return value
+            with patch.object(understand, "run_upstream", side_effect=AssertionError("GET invokes no provider")), \
+                 patch.object(archctx, "atomic", side_effect=AssertionError("GET writes no state")), \
+                 patch.object(archctx, "snapshot", side_effect=AssertionError("GET uses paired observer context")):
+                code, raw, etag_a = get("/api/current?analysis=" + a["analysis_id"])
+                selected = json.loads(raw)
+                self.assertEqual((code, selected["development"]["updates"]["source_analysis"]["status"]), (200, "STALE"))
+                self.assertEqual(selected["context_hash"], before["accepted_context_hash"])
+                self.assertEqual(get("/api/current?analysis=" + a["analysis_id"], etag_a)[:2], (304, ""))
+                code, raw, etag_b = get("/api/current?analysis=" + b["analysis_id"], etag_a)
+                self.assertEqual((code, json.loads(raw)["development"]["updates"]["source_analysis"]["status"]), (200, "FRESH"))
+                self.assertNotEqual(etag_a, etag_b)
+                self.assertEqual(observer.read()["updates"]["source_analysis"]["analysis_id"], b["analysis_id"])
+                _, raw, _ = get("/api/current?file=never-understood.py")
+                unknown = json.loads(raw)["development"]["updates"]["source_analysis"]
+                self.assertEqual(unknown["uncovered_files"], ["never-understood.py"])
+                self.assertEqual(unknown["candidates"], [])
+                self.assertNotEqual(unknown["status"], "FRESH")
+                query = "/analysis-source?analysis=" + a["analysis_id"] + "&path=analysis_only.py&sha=" + a["source_hashes"]["analysis_only.py"]
+                code, source, _ = get(query)
+                self.assertEqual(code, 200)
+                self.assertIn("Historical captured analysis source", source)
+                self.assertIn("&lt;script&gt;", source)
+                self.assertEqual(get(query.replace(a["analysis_id"], "d" * 64))[0], 409)
+                self.assertEqual(get("/api/current?analysis=")[0], 409)
+                with patch.object(understand, "discoveries", return_value={"configured": True, "accepted_context_hash": "new-accepted"}):
+                    self.assertEqual(get("/api/current?analysis=" + a["analysis_id"])[0], 409)
+        finally:
+            server.shutdown()
+            thread.join()
+            server.server_close()
+        self.assertEqual(state_before, {p.relative_to(state): p.read_bytes() for p in state.rglob("*") if p.is_file()})
+        receipt_path, _ = understand.analysis_receipt(state, a["analysis_id"])
+        receipt_bytes = receipt_path.read_bytes()
+        receipt_path.write_bytes(receipt_bytes + b" ")
+        damaged = observer.poll_once()
+        self.assertEqual(observer._analysis_paths, {"owner.py"})
+        self.assertEqual(damaged["accepted_context_hash"], before["accepted_context_hash"])
+        self.assertEqual({scope["analysis_id"]: scope["status"] for scope in damaged["updates"]["source_analysis"]["scopes"]},
+                         {a["analysis_id"]: "INVALID", b["analysis_id"]: "FRESH"})
+        receipt_path.write_bytes(receipt_bytes)
+        recovered = observer.poll_once()
+        self.assertEqual(recovered["analysis_stat_files"], 2)
+        self.assertEqual(recovered["updates"]["source_analysis"]["status"], "FRESH")
 
     def test_analysis_scope_metadata_is_bounded_and_cannot_escape_repo(self):
         repo, config, state, _ = self.fixture()
@@ -178,11 +261,11 @@ const assert=require('node:assert/strict'),vm=require('node:vm');
 class Element{constructor(tag='div'){this.tag=tag;this.children=[];this.dataset={};this.style={};this.textContent='';this.contentWindow={messages:[],postMessage(v){this.messages.push(v)}}}
  append(...v){this.children.push(...v)} replaceChildren(...v){this.children=v} insertBefore(v,b){let i=this.children.indexOf(b);this.children.splice(i<0?this.children.length:i,0,v)}
  setAttribute(k,v){this[k]=v} removeAttribute(k){delete this[k]} querySelector(tag){return this.children.find(v=>v.tag===tag)} cloneNode(){return new Element(this.tag)} remove(){} set innerHTML(v){throw Error('untrusted HTML sink')}}
-const elements={},get=id=>elements[id]??=new Element(),text=e=>[e.textContent,...e.children.map(text)].join('\n');let message;
+const elements={},get=id=>elements[id]??=new Element(),text=e=>[e.textContent,...e.children.map(text)].join('\n'),all=e=>[e,...e.children.flatMap(all)],requests=[];let message;
 const accepted={status:'FRESH',context_hash:'accepted',generation:'accepted',revision:'product',artifacts:['current.html'],components:[{id:'owner',evidence:[]}],relations:[],development:{observation_id:'one',changes:[],updates:{}}};
 let next={status:'MISSING',context_hash:null,generation:'',artifacts:[],components:[],relations:[],development:{observation_id:'setup',changes:[],updates:{}}};
 const context=vm.createContext({TextEncoder,document:{getElementById:get,createElement:tag=>new Element(tag)},window:{addEventListener:(_,f)=>message=f},setTimeout(){},clearTimeout(){},
- fetch:async()=>({status:200,ok:true,json:async()=>next,headers:{get:()=>next.development.observation_id}})});
+ fetch:async url=>{requests.push(url);return {status:200,ok:true,json:async()=>next,headers:{get:()=>next.development.observation_id}}}});
 const read=s=>vm.runInContext(s,context);
 (async()=>{vm.runInContext(require('node:fs').readFileSync(0,'utf8'),context);await new Promise(setImmediate);
  assert.equal(read('loading'),null);assert.ok(text(get('analysis')).includes('尚未进行源码理解'));assert.ok(text(get('reason')).includes('没有可用的已接受图'));assert.equal(get('state').textContent,'尚无已展示的已接受图');
@@ -205,6 +288,19 @@ const read=s=>vm.runInContext(s,context);
  assert.deepEqual(Array.from(frame.contentWindow.messages.at(-1).direct),[]);
  assert.equal(read('data.relations.length'),0);get('flow-view').onclick();assert.equal(get('flows').hidden,false);assert.equal(get('analysis').hidden,true);
  for(const expected of ['已发现的源码导览 · 待核对流程','step-6'])assert.ok(text(get('flows')).includes(expected),expected);get('now').onclick();assert.equal(read('picture'),frame);
+ next.development.updates.source_analysis.scopes=[
+ {scope_id:'scope-a',analysis_id:'a'.repeat(64),source_files:['scope.py'],status:'FRESH',selected:true,candidate_count:1},
+ {scope_id:'scope-c',analysis_id:'c'.repeat(64),source_files:['other.py'],status:'STALE',selected:false,candidate_count:1},
+ {scope_id:'scope-d',analysis_id:'d'.repeat(64),source_files:['unknown.py'],status:'INVALID',selected:false,candidate_count:0}];
+ await context.poll();for(const expected of ['当前查看 · scope.py · 源码一致','other.py · 源码已变化','unknown.py · 状态未知'])assert.ok(text(get('analysis')).includes(expected),expected);
+ const chooser=all(get('analysis')).find(e=>e.tag==='select');assert.equal(chooser['aria-label'],'源码理解范围');
+ assert.ok(chooser.children.some(e=>e.value==='scope-c'));chooser.value='scope-c';next=JSON.parse(JSON.stringify(next));Object.assign(next.development.updates.source_analysis,{analysis_id:'c'.repeat(64),status:'STALE',source_files:['other.py']});
+ next.development.updates.source_analysis.candidates[0].analysis_id='c'.repeat(64);chooser.onchange();await new Promise(setImmediate);
+ assert.equal(requests.at(-1),'/api/current?analysis=scope-c');assert.equal(read('picture'),frame);assert.equal(read('data.context_hash'),'accepted');
+ assert.ok(links(get('analysis'))[0].href.includes('/analysis-source?analysis='+'c'.repeat(64)));assert.equal(read('data.components.length'),1);
+ const retained=next.development.updates.source_analysis;next.development.updates.source_analysis={configured:true,status:'UNKNOWN',scopes:retained.scopes,uncovered_files:['missing.py'],candidates:[]};
+ read("analysisQuery='?file=missing.py'");await context.poll();assert.ok(text(get('analysis')).includes('请求未覆盖：missing.py'));assert.ok(text(get('analysis')).includes('当前请求没有可复用的理解范围'));assert.ok(all(get('analysis')).some(e=>e.tag==='select'));
+ assert.equal(links(get('analysis')).length,0);assert.equal(read('picture'),frame);next.development.updates.source_analysis=retained;read("analysisQuery=''");await context.poll();
  next.development.observation_id='three';next.development.updates.source_analysis.status='STALE';next.development.updates.source_analysis.changed_files=['scope.py'];await context.poll();assert.ok(text(get('analysis')).includes('STALE'));assert.ok(text(get('analysis')).includes('分析后已变化：scope.py'));assert.equal(read('data.context_hash'),'accepted');
  next.development.observation_id='four';next.development.updates.source_analysis={configured:true,status:'INVALID',reason:'bad receipt',candidates:[]};await context.poll();assert.ok(text(get('analysis')).includes('INVALID'));assert.equal(read('picture'),frame);
  next.development.updates.source_analysis={configured:false};await context.poll();assert.equal(get('analysis').hidden,false);assert.ok(text(get('analysis')).includes('尚未进行源码理解'));assert.equal(read('data.components.length'),1);assert.equal(read('data.context_hash'),'accepted');console.log('PASS: native analysis empty state, separate discovery/tour, text-only content and accepted map/navigation preserved');

@@ -9,10 +9,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 import archctx
+import archctx_analysis_inputs as inputs
 import archctx_runtime
 import archctx_understand as ua
 from archctx_development import DevelopmentObserver
 import test_native_runtime
+from test_understand import fixture_capture
 
 
 class NativeUnderstandTest(unittest.TestCase):
@@ -38,12 +40,16 @@ class NativeUnderstandTest(unittest.TestCase):
             (archctx_runtime, "roots", {"return_value": {"analysis": self.repo / "fixture-provider"}}),
             (archctx, "revision", {"return_value": "fixture"}),
             (ua, "run_upstream", {"side_effect": self.upstream}),
+            (inputs, "capture", {"side_effect": self.capture}),
             (ua.subprocess, "run", {"side_effect": self.command}),
             (ua, "validate_graph", {"return_value": {"fixture": True}}),
         ):
             context = patch.object(target, name, **kwargs)
             context.start()
             self.addCleanup(context.stop)
+
+    def capture(self, repo, directory, plugin, files):
+        return fixture_capture(repo, directory, plugin, files, self.upstream)
 
     def upstream(self, plugin, script, args, cwd):
         self.calls[script] += 1
@@ -70,6 +76,8 @@ class NativeUnderstandTest(unittest.TestCase):
         return {"script": script, "exit_code": 0, "stdout_tail": "Fingerprints baseline: fixture"}
 
     def command(self, argv, **kwargs):
+        if argv[0] == "git" and "ls-files" in argv:
+            return self.real_run(argv, **kwargs)
         if argv[:2] == ["git", "init"]:
             return subprocess.CompletedProcess(argv, 0, "", "")
         self.assertTrue(str(argv[1]).endswith("merge-batch-graphs.py"), argv)
@@ -247,7 +255,7 @@ class NativeUnderstandTest(unittest.TestCase):
             stale = observer.poll_once()
             self.assertEqual(stale["updates"]["source_analysis"]["status"], "STALE")
             self.assertEqual(stale["updates"]["source_analysis"]["changed_files"], ["a.py"])
-            ua.current_path(self.directory).write_bytes(b"{ invalid analysis")
+            ua.analysis_receipt(self.directory)[0].write_bytes(b"{ invalid analysis")
             invalid = observer.poll_once()
             self.assertEqual((invalid["status"], invalid["updates"]["source_analysis"]["status"]), ("MISSING", "INVALID"))
 
@@ -272,10 +280,14 @@ class NativeUnderstandTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "interrupted"):
             self.advance()
         run = next((self.directory / "understand/runs").iterdir())
+        extraction = run / "source/.ua/tmp/ua-file-extract-results-0.json"
+        saved_extraction = extraction.read_bytes()
+        self.assertFalse(list(extraction.parent.glob("*.pending.json")))
         pending = self.advance({"analysis_id": run.name})
         self.assertEqual(self.calls["extract:a.py"], 1)
         self.assertEqual(self.calls["extract:b.py"], 2)
-        self.assertEqual(len(list((run / "source/.ua/tmp").glob("*.invalid.json"))), 1)
+        self.assertEqual(extraction.read_bytes(), saved_extraction)
+        self.assertFalse(list(extraction.parent.glob("*.pending.json")))
         self.write_files(pending)
         system = self.advance(pending)
         before = self.calls.copy()
@@ -301,7 +313,12 @@ class NativeUnderstandTest(unittest.TestCase):
         self.assertEqual(self.calls["extract:b.py"], before["extract:b.py"] + 1)
 
     def test_resume_completes_an_interrupted_preparation(self):
-        with patch.object(ua, "run_upstream", side_effect=ValueError("fixture interrupted preparation")):
+        atomic = archctx.atomic
+        def interrupted(path, value):
+            if path.name == "scan.json" and "runs" in path.parts:
+                raise ValueError("fixture interrupted preparation")
+            return atomic(path, value)
+        with patch.object(archctx, "atomic", side_effect=interrupted):
             with self.assertRaisesRegex(ValueError, "interrupted preparation"):
                 self.advance()
         run = next((self.directory / "understand/runs").iterdir())
@@ -384,10 +401,12 @@ class NativeUnderstandTest(unittest.TestCase):
     def test_writer_busy_and_source_import_race_keep_previous_publication(self):
         with archctx.refresh_lock(self.directory / "understand"):
             self.assertEqual(self.advance()["status"], "RETRY")
+        self.complete()
+        previous = ua.current_path(self.directory).read_bytes()
+        previous_receipt = ua.analysis_receipt(self.directory)[0].read_bytes()
+        (self.repo / "b.py").write_bytes(b"value = 2\n")
         system = self.system_stage()
         self.write_system(system)
-        archctx.atomic(ua.current_path(self.directory), {"analysis_id": "c" * 64, "historical": True})
-        previous = ua.current_path(self.directory).read_bytes()
         original = ua.graph_candidates
         def moving(*args):
             result = original(*args)
@@ -398,6 +417,7 @@ class NativeUnderstandTest(unittest.TestCase):
         self.assertEqual(result["status"], "STALE")
         self.assertEqual(result["changed_files"], ["b.py"])
         self.assertEqual(ua.current_path(self.directory).read_bytes(), previous)
+        self.assertEqual(ua.analysis_receipt(self.directory)[0].read_bytes(), previous_receipt)
         self.assertEqual(archctx.last_path(self.directory).read_bytes(), self.last_good)
 
 

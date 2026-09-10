@@ -18,4 +18,8 @@ archctx-hook = "archctx_hook:main"
 archctx-understand = "archctx_understand:main"
 
 [tool.setuptools]
-py-modules = ["archctx", "archctx_to_archify", "calm_query", "archctx_blueprint", "archctx_development", "archctx_hook", "archctx_understand", "archctx_runtime"]
+packages = ["archctx_assets"]
+py-modules = ["archctx", "archctx_to_archify", "calm_query", "archctx_blueprint", "archctx_development", "archctx_hook", "archctx_understand", "archctx_analysis_storage", "archctx_analysis_inputs", "archctx_runtime"]
+
+[tool.setuptools.package-data]
+archctx_assets = ["*.mjs"]

@@ -49,10 +49,18 @@ and import. The Agent reviews useful findings and updates the shared definition
 through existing acceptance. [Source understanding](docs/UNDERSTAND.md) explains
 this boundary. Ordinary queries and map polling never invoke a model.
 
+The project keeps independent source scopes: understanding B preserves A.
+Use `archctx understand --show --analysis <analysis-or-scope-id>` or
+`archctx understand --show --files src/service.py` to read retained findings.
+Source freshness, captured static dependencies and unknown coverage are reported
+per scope; a fresh selected scope is not a verified whole-project map.
+
 `map` opens the local live system map. People and Agents use the same component
 IDs, accepted source evidence and declared change scope. Project, component,
 flow and change views distinguish confirmed architecture, discovered findings
-and changed source. The map keeps working during development and explicit
+and changed source. Its read-only scope selector changes the displayed findings
+and their captured-source links while preserving the accepted diagram.
+The map keeps working during development and explicit
 acceptance. [Map guide](docs/LIVING_BLUEPRINT.md).
 
 These commands describe the current checkout, not the earlier `v0.1.6` release.
@@ -106,9 +114,13 @@ Native [source understanding](docs/UNDERSTAND.md) keeps raw edge meaning and
 provider provenance while the existing Agent supplies source-grounded semantic
 judgment. Findings have stable IDs plus separate content and evidence revisions;
 review bindings connect them to canonical component IDs. A file or understanding
-group is never automatically a canonical component. Changed source invalidates
-relevant review bindings, while unchanged results can be reused at the next
-meaningful task boundary. This is optional understanding, not another Gate.
+group is never automatically a canonical component. Changed source, captured
+dependency bytes or import-resolution inventory invalidate relevant review
+bindings; incomplete dependency evidence stays `UNKNOWN`. Unchanged results
+can be reused at the next meaningful task boundary. Retention uses a 256 MiB
+file-size budget rather than a run-count limit; only eligible completed
+mechanical caches can be reclaimed, preserving original and reviewed evidence.
+This is optional understanding, not another Gate.
 
 For this repository's [system map](docs/LIVING_BLUEPRINT.md), run
 `python archctx.py --config architecture/architecture.json map` after `setup`. The page
