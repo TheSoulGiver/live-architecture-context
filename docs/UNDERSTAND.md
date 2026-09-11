@@ -46,8 +46,30 @@ isolated source directory. Its pinned parser/resolver also supplies static
 dependency paths; LAC captures bounded dependency bytes, resolver configuration
 and the repository's file-name inventory. Missing, unsupported, dynamic or
 uncaptured dependencies remain `UNKNOWN`, not proof of no dependency. Changed
-dependency bytes or import-resolution inventory invalidate reuse and current
+dependency bytes or relevant resolution conditions invalidate reuse and current
 review bindings, even when the selected file is unchanged.
+
+For provider-covered Python static imports, the pinned resolver records its actual
+positive and negative candidate-path lookups. Queries compare those observations
+with a bounded filename inventory; an unrelated file addition or removal does
+not invalidate the explanation. A new nearer module, a formerly missing import,
+or a deleted target identifies the affected source with
+`@dependency-resolution:<source>`. These are static provider facts, not proof of
+Python's runtime environment, nested/dynamic loading or complete transitive
+coverage. In particular, the pinned extractor covers top-level imports, not
+every possible import inside a function.
+
+Other language/import forms, incomplete inventory, and old records without
+lookup evidence retain conservative `@dependency-resolution` / `UNKNOWN`
+behavior. In particular, JavaScript/CommonJS and alias configuration are not
+covered by the Python lookup proof. Ordinary queries and idle observation never
+run the parser. At the next relevant task, the existing `understand --files ...`
+path can capture the missing mechanical evidence. If source, resolved imports
+and interpretation dependencies still match, it reuses the complete previous
+graph, explanation and ordered tour without another Agent semantic task. The
+new capture has its own identity; original inputs, receipts and measurements
+are never relabelled. Proven unchanged review revisions remain reusable; unknown
+coverage cannot inherit an old confirmation.
 
 Mechanical work then advances to the next semantic boundary. On `NEEDS_AGENT`,
 the response

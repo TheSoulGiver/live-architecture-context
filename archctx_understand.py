@@ -79,6 +79,35 @@ def receipt_hashes(repo: Path, receipt: dict[str, Any]) -> dict[str, str]:
     return result
 
 
+def resolution_entries(receipt: dict[str, Any]) -> dict[str, Any]:
+    """Bounded provider observations, not another import resolver."""
+    proof = receipt.get("resolution")
+    if proof is None:
+        return {}
+    if not isinstance(proof, dict) or proof.get("version") != 1 or not isinstance(proof.get("files"), dict):
+        raise ValueError("invalid dependency resolution evidence")
+    rows, count = proof["files"], 0
+    if len(rows) > 2 * SOURCE_LIMIT or not set(rows) <= set(receipt.get("dependencies", {})):
+        raise ValueError("resolution evidence exceeds captured dependency scope")
+    for source, row in rows.items():
+        if not isinstance(row, dict) or type(row.get("supported")) is not bool or not isinstance(row.get("checks"), dict):
+            raise ValueError("invalid resolution observations for " + source)
+        for path, exists in row["checks"].items():
+            if (not isinstance(path, str) or not path or len(path) > 1024 or "\\" in path
+                    or Path(path).is_absolute() or any(p in ("", ".", "..", ".git", ".archctx", ".ua") for p in path.split("/"))
+                    or type(exists) is not bool):
+                raise ValueError("invalid resolution candidate path/membership")
+        count += len(row["checks"])
+    if count > 2048:
+        raise ValueError("resolution observations exceed 2048 paths")
+    return rows
+
+
+def resolution_changes(changed: list[str], files: set[str]) -> list[str]:
+    return [p for p in changed if p == "@dependency-resolution"
+            or p.startswith("@dependency-resolution:") and p.split(":", 1)[1] in files]
+
+
 def verify_sources(repo: Path, receipt: dict[str, Any], inventory_cache: dict | None = None) -> list[str]:
     """A commit is provenance, not proof of the bytes saved in a worktree."""
     if str(repo.resolve()) != receipt.get("worktree"):
@@ -94,8 +123,9 @@ def verify_sources(repo: Path, receipt: dict[str, Any], inventory_cache: dict | 
             actual = None
         if actual != digest:
             changed.append(relative)
-    if receipt.get("inventory_hash") and any(row.get(key) for row in receipt.get("dependencies", {}).values()
-                                              for key in ("dependencies", "external", "unknown", "unresolvedLocal")):
+    proofs = resolution_entries(receipt)
+    if receipt.get("inventory_hash") and (proofs or any(row.get(key) for row in receipt.get("dependencies", {}).values()
+                                              for key in ("dependencies", "external", "unknown", "unresolvedLocal"))):
         from archctx_analysis_inputs import inventory
         cache = inventory_cache if inventory_cache is not None else {}
         if "listing" not in cache:
@@ -103,9 +133,50 @@ def verify_sources(repo: Path, receipt: dict[str, Any], inventory_cache: dict | 
         listing = cache["listing"]
         if not set(receipt["source_hashes"]) <= set(listing["paths"]):
             listing = inventory(repo, list(receipt["source_hashes"]))
-        if listing["hash"] != receipt["inventory_hash"]:
-            changed.append("@dependency-resolution")
-    return changed
+
+        def check_listing(value):
+            paths = set(value["paths"])
+            complete = value["coverage"].get("complete") and value["coverage"] == receipt.get("inventory_coverage")
+            for path, row in proofs.items():
+                if row["supported"] and any((candidate in paths) != exists for candidate, exists in row["checks"].items()):
+                    changed.append("@dependency-resolution:" + path)
+            if value["hash"] != receipt["inventory_hash"]:
+                # Python's pinned resolver depends on recorded membership probes,
+                # not every file name. Other/old evidence remains conservative.
+                if not complete or any(not proofs.get(path, {}).get("supported") for path in receipt.get("dependencies", {})):
+                    changed.append("@dependency-resolution")
+
+        def stamps():
+            values = {}
+            for path in set(expected) | {p for row in proofs.values() if row["supported"] for p in row["checks"]}:
+                actual, _ = archctx.repo_file(repo, path, "analysis resolution input")
+                try:
+                    stat = actual.stat()
+                    values[path] = (stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size, stat.st_ino)
+                except FileNotFoundError:
+                    values[path] = None
+            return values
+
+        check_listing(listing)
+        before = stamps()
+        # A source save during the name-only check must not certify old bytes.
+        for relative, digest in expected.items():
+            if relative not in changed:
+                try:
+                    if content_hashes(source_bytes(repo, [relative]))[relative] != digest:
+                        changed.append(relative)
+                except OSError:
+                    changed.append(relative)
+        # The cached listing is only an early observation. Re-read names after
+        # bytes, and reject relevant changes during that final snapshot without
+        # treating an unrelated new name as semantic change.
+        check_listing(inventory(repo, list(receipt["source_hashes"])))
+        after = stamps()
+        moved = {path for path in before if before[path] != after[path]}
+        changed.extend(sorted(set(expected) & moved))
+        changed.extend("@dependency-resolution:" + path for path, row in proofs.items()
+                       if row["supported"] and set(row["checks"]) & moved)
+    return list(dict.fromkeys(changed))
 
 
 def dependency_files(receipt: dict[str, Any], files: list[str]) -> set[str]:
@@ -122,7 +193,11 @@ def dependency_files(receipt: dict[str, Any], files: list[str]) -> set[str]:
 
 def dependency_unknown(receipt: dict[str, Any], files: list[str]) -> list[str]:
     rows = receipt.get("dependencies", {})
+    proofs = resolution_entries(receipt)
     unknown = []
+    if receipt.get("resolution") is not None and not (
+            isinstance(receipt.get("inventory_coverage"), dict) and receipt["inventory_coverage"].get("complete")):
+        unknown.append("resolution inventory coverage is incomplete or missing")
     if "dependencies" in receipt and not receipt.get("inventory_hash") and any(
             rows.get(p, {}).get(key) for p in files for key in ("dependencies", "external", "unknown", "unresolvedLocal")):
         unknown.append("import resolution inventory was not captured")
@@ -134,6 +209,8 @@ def dependency_unknown(receipt: dict[str, Any], files: list[str]) -> list[str]:
             unknown.append(path + ": static dependency coverage not captured")
         elif row.get("coverage") != "resolved":
             unknown.append(path + ": " + ", ".join(row.get("unknown", []) + row.get("unresolvedLocal", []))[:240])
+        if receipt.get("resolution") is not None and not proofs.get(path, {}).get("supported"):
+            unknown.append(path + ": relevant resolution proof not captured for this import form")
         if path not in receipt.get("source_hashes", {}) and path not in receipt.get("dependency_hashes", {}):
             unknown.append(path + ": dependency bytes not captured")
     return unknown
@@ -189,6 +266,8 @@ def reusable_analysis(directory: Path, receipt: dict[str, Any], imports: dict[st
         reused = {p for p, digest in receipt["source_hashes"].items()
                   if old["source_hashes"].get(p) == digest
                   and old.get("import_hashes", {}).get(p) == archctx.semantic(imports.get(p, []))
+                  and all(old.get("dependencies", {}).get(dep) == receipt.get("dependencies", {}).get(dep)
+                          for dep in dependency_files(receipt, [p]) - set(receipt.get("resolver_hashes", {})))
                   and not dependency_unknown(receipt, [p])
                   and all(old_hashes.get(dep) == new_hashes.get(dep) for dep in dependency_files(receipt, [p]))}
         node_files = {node["id"]: node.get("filePath") for node in graph["nodes"]}
@@ -260,20 +339,26 @@ def prepare_captured(config_path: Path, directory: Path, plugin: Path, files: li
         try:
             _, prior = receipt_for_entry(directory, entry)
             if (prior.get("worktree") == str(repo) and prior.get("provider", {}).get("revision") == PROVIDER_REVISION
-                    and prior.get("inventory_hash") == captured["inventory_hash"]):
+                    and (prior.get("inventory_hash") == captured["inventory_hash"] or not verify_sources(repo, prior))):
                 for path, digest in prior["source_hashes"].items():
                     if path in prior.get("dependencies", {}):
-                        available[(path, digest)] = prior["dependencies"][path]
+                        available[(path, digest)] = (prior["dependencies"][path], resolution_entries(prior).get(path))
         except (OSError, ValueError, KeyError, TypeError):
             continue  # Broken scope stays visible as invalid; never borrow it.
     pending = list(captured["dependency_hashes"])
     remaining = SOURCE_BYTES - sum(map(len, {**contents, **captured.get("resolver_contents", {}), **captured.get("dependency_contents", {})}.values()))
     while pending:
         path = pending.pop()
-        row = available.get((path, captured["dependency_hashes"][path]))
-        if path in captured["dependencies"] or row is None:
+        fact = available.get((path, captured["dependency_hashes"][path]))
+        if path in captured["dependencies"] or fact is None:
             continue
+        row, proof = fact
         captured["dependencies"][path] = row
+        if proof and captured.get("resolution"):
+            size = sum(len(p["checks"]) for p in captured["resolution"]["files"].values())
+            if size + len(proof["checks"]) > 2048:
+                proof = {"supported": False, "checks": {}}
+            captured["resolution"]["files"][path] = proof
         for target in row.get("dependencies", []):
             if target in hashes or target in captured["dependency_hashes"]:
                 continue
@@ -290,6 +375,7 @@ def prepare_captured(config_path: Path, directory: Path, plugin: Path, files: li
     source_id = archctx.semantic({"worktree": str(repo), "source_hashes": hashes,
                                  "dependency_hashes": captured["dependency_hashes"], "dependencies": captured["dependencies"],
                                  "resolver_hashes": captured["resolver_hashes"], "inventory_hash": captured["inventory_hash"],
+                                 **({"resolution": captured["resolution"]} if captured.get("resolution") is not None else {}),
                                  "provider_revision": PROVIDER_REVISION})
     run = directory / "understand" / "runs" / source_id
     manifest_path = run / "input.json"
@@ -337,6 +423,7 @@ def prepare_captured(config_path: Path, directory: Path, plugin: Path, files: li
                "dependency_hashes": captured["dependency_hashes"], "dependencies": captured["dependencies"],
                "resolver_hashes": captured["resolver_hashes"], "inventory_hash": captured["inventory_hash"],
                "inventory_coverage": captured.get("inventory_coverage", "unknown"),
+               "resolution": captured.get("resolution"),
                "source_bytes": sum(map(len, contents.values())), "source_root": str(source),
                "snapshot_commit": None,
                "provider": {"name": "understand-anything", "url": PROVIDER_URL,
@@ -499,6 +586,7 @@ def source_manifest(directory: Path, repo: Path) -> dict[str, Any]:
             if receipt.get("worktree") != str(repo.resolve()):
                 raise ValueError("analysis scope belongs to another worktree")
             paths.update(receipt_hashes(repo, receipt))
+            paths.update(p for row in resolution_entries(receipt).values() for p in row["checks"])
         except (OSError, ValueError, KeyError, TypeError) as error:
             errors.append({"analysis_id": entry["analysis_id"], "reason": str(error)[:240]})
         identities.append(entry["analysis_id"])
@@ -655,7 +743,7 @@ def reviewed_decision(candidate: dict[str, Any], receipt: dict[str, Any],
     relevant = dependency_files(receipt, candidate.get("related_source_files", list(receipt["source_hashes"])))
     if dependency_unknown(receipt, list(relevant)):
         return None  # A prior decision is history, not proof of unknown dependencies now.
-    if "@dependency-resolution" in changed_files:
+    if resolution_changes(changed_files, relevant):
         return None
     if decision and not set(changed_files).intersection(relevant) and all(
             decision.get(key) == value for key, value in review_revisions(candidate, receipt).items()):
@@ -853,7 +941,7 @@ def discoveries(config_path: Path, explicit: str | None, limit: int = 8, details
                 receipts[key], changes[key] = value, changed
                 unknown = dependency_unknown(value, list(value["source_hashes"]))
                 row.update(status="STALE" if changed else "FRESH", changed_files=changed,
-                           candidate_count=len(value["candidates"]), dependency_status="UNKNOWN" if unknown or "@dependency-resolution" in changed else "CAPTURED_STATIC")
+                           candidate_count=len(value["candidates"]), dependency_status="UNKNOWN" if unknown or resolution_changes(changed, set(value.get("dependencies", {}))) else "CAPTURED_STATIC")
             except (OSError, ValueError, KeyError, TypeError) as error:
                 failures[key] = str(error)[:500]
                 row.update(status="INVALID", reason=failures[key], changed_files=[], candidate_count=None)
@@ -898,8 +986,8 @@ def discoveries(config_path: Path, explicit: str | None, limit: int = 8, details
                              "match": "review_binding" if bound else "evidence_overlap" if matches else "unmapped",
                              "review_state": decision.get("decision") if decision else "unreviewed"}
             finding["status"] = "STALE" if finding["affected_files"] else "FRESH"
-            if "@dependency-resolution" in changed:
-                finding.update(status="STALE", dependency_status="UNKNOWN", affected_files=finding["affected_files"] + ["@dependency-resolution"])
+            if resolution_changed := resolution_changes(changed, dependency_files(receipt, candidate.get("related_source_files", candidate["files"]))):
+                finding.update(status="STALE", dependency_status="UNKNOWN", affected_files=finding["affected_files"] + resolution_changed)
             if not decision:
                 previous = max((d for d in completed + committed
                     if d.get("state") == "final" and d.get("id") == candidate["id"]
@@ -916,7 +1004,7 @@ def discoveries(config_path: Path, explicit: str | None, limit: int = 8, details
         limit = len(findings) if limit == 0 else max(0, min(limit, 64))
         unknown = dependency_unknown(receipt, list(receipt["source_hashes"]))
         return {"configured": True, "status": "STALE" if changed else "FRESH", **collection,
-                "scope_id": selected, "dependency_status": "UNKNOWN" if unknown or "@dependency-resolution" in changed else "CAPTURED_STATIC",
+                "scope_id": selected, "dependency_status": "UNKNOWN" if unknown or resolution_changes(changed, set(receipt.get("dependencies", {}))) else "CAPTURED_STATIC",
                 "unknown_dependencies": unknown[:4], "omitted_unknown_dependencies": max(0, len(unknown) - 4),
                 "accepted_context_hash": last_good.get("context_hash"),
                 "analysis_id": receipt["analysis_id"], "graph_sha256": receipt["graph_sha256"],
@@ -1091,10 +1179,13 @@ def native_batch(value: dict[str, Any], files: set[str]) -> None:
 
 def native_findings(analysis: dict[str, Any], reused: bool = False) -> dict[str, Any]:
     fresh = analysis.get("status") == "FRESH"
+    reviewed = (fresh and analysis.get("candidates") and not analysis.get("omitted_candidate_count")
+                and all(c.get("review_state") in ("accepted", "rejected") for c in analysis["candidates"]))
     return {"status": ("REUSED" if reused else "FINDINGS_READY") if fresh else analysis.get("status", "INVALID"),
             "analysis_id": analysis.get("analysis_id"),
             "analysis": analysis, "automatic_model_invocations": 0,
-            "next_action": ("Agent: reconcile findings with shared component/relation definitions and source evidence, then accept; keep map running"
+            "next_action": ("Reuse the current findings and existing review bindings; no repeated semantic review or acceptance is needed"
+                            if reviewed else "Agent: reconcile findings with shared component/relation definitions and source evidence, then accept; keep map running"
                             if fresh else analysis.get("next_action", "read and repair the reported analysis result"))}
 
 
