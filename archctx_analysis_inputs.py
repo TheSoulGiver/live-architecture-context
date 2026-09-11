@@ -197,8 +197,9 @@ def capture(repo: Path, directory: Path, plugin: Path, files: list[str]) -> Iter
                 or {f["path"] for f in scan.get("files", [])} != set(contents)):
             raise ValueError("upstream scan did not cover the exact selected source")
         resolver_contents, resolver_unknown = {}, []
+        resolver_names = set() if all(f.get("language") == "python" for f in scan["files"]) else RESOLVER_NAMES
         for path in listing["paths"]:
-            if Path(path).name not in RESOLVER_NAMES:
+            if Path(path).name not in resolver_names:
                 continue
             try:
                 if path in contents:
@@ -253,6 +254,7 @@ def capture(repo: Path, directory: Path, plugin: Path, files: list[str]) -> Iter
             "source_bytes": sum(map(len, contents.values())),
             "dependency_hashes": {p: archctx.sha(raw) for p, raw in dependency_contents.items()},
             "dependency_contents": dependency_contents, "dependencies": dependencies,
+            "resolution": extracted.get("resolution"),
             "resolver_hashes": {p: archctx.sha(raw) for p, raw in resolver_contents.items()},
             "resolver_contents": resolver_contents, "resolver_unknown_paths": resolver_unknown,
             "inventory_hash": listing["hash"], "inventory_coverage": listing["coverage"],

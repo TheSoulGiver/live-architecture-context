@@ -82,8 +82,11 @@ async function main() {
   const externalPython = new Set(input.externalModules || []);
   const externalNode = new Set(builtinModules.flatMap(name => [name, `node:${name}`]));
   const output = { version: 1, scriptCompleted: true, files: {}, failures: [], stats: mapped.stats,
+    resolution: { version: 1, files: {} },
     limitations: ['Static imports only; dynamic loading and runtime reachability remain unknown.',
-      'Resolved paths are inventory evidence; the caller must capture and verify dependency bytes.'] };
+      'Resolved paths are inventory evidence; the caller must capture and verify dependency bytes.',
+      'Local resolution proof covers pinned Python static import probes only; other import forms remain conservative.'] };
+  let probeCount = 0, probeBytes = 0;
   for (const path of selected) {
     const file = byPath.get(path);
     const dependencies = mapped.importMap[path];
@@ -91,8 +94,22 @@ async function main() {
       throw new Error('upstream dependency output contains an invalid repository path');
     }
     const row = { dependencies: sorted(dependencies), unresolvedLocal: [], unknown: [], external: [], coverage: 'resolved' };
+    const proof = { checks: {}, supported: file.language === 'python' };
+    const probedFiles = { has(candidate) {
+      const present = fileSet.has(candidate);
+      try { sourcePath(candidate); }
+      catch { proof.supported = false; return present; }
+      if (!Object.hasOwn(proof.checks, candidate)) {
+        const bytes = Buffer.byteLength(JSON.stringify(candidate)) + 8;
+        if (probeCount >= 2048 || probeBytes + bytes > 16 * 1024) proof.supported = false;
+        else { proof.checks[candidate] = present; probeCount++; probeBytes += bytes; }
+      }
+      return present;
+    } };
+    const instrumented = [];
     const { analysis, structureOutcome } = analyzeFileWithOutcomes(registry, file, contents.get(path));
     if (structureOutcome !== 'succeeded') {
+      proof.supported = false;
       row.coverage = 'unsupported';
       row.unknown.push(`structural extraction ${structureOutcome}: ${file.language || 'unknown language'}`);
       output.failures.push({ path, stage: 'raw-imports', message: row.unknown[0] });
@@ -100,7 +117,8 @@ async function main() {
       for (const imp of analysis.imports) {
         let matches = [];
         if (file.language === 'python') {
-          matches = resolver.resolvePythonImport(imp.source, imp.specifiers, file, { fileSet });
+          matches = resolver.resolvePythonImport(imp.source, imp.specifiers, file, { fileSet: probedFiles });
+          instrumented.push(...matches);
         } else if (JS.has(file.language) && imp.source.startsWith('.')) {
           const target = resolver.resolveTsJsImport(imp.source, file, { fileSet, tsConfigs: new Map() });
           if (target) matches = [target];
@@ -114,6 +132,10 @@ async function main() {
       }
       if (row.unresolvedLocal.length || row.unknown.length) row.coverage = 'partial';
     }
+    // The provider's extra import passes must never silently escape this proof.
+    if (JSON.stringify(sorted(instrumented)) !== JSON.stringify(sorted(dependencies))) proof.supported = false;
+    if (!proof.supported) proof.checks = {};
+    output.resolution.files[path] = proof;
     for (const key of ['dependencies', 'unresolvedLocal', 'unknown', 'external']) row[key] = sorted(row[key]);
     output.files[path] = row;
   }
