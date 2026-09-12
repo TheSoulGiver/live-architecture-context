@@ -12,7 +12,7 @@ import tempfile
 import time
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parent
@@ -67,20 +67,51 @@ class MapServiceTest(unittest.TestCase):
 
     def stop(self, child):
         # Only a child started by this test and still proving its nonce can be terminated.
+        handle = None
+        if os.name == "nt":
+            import ctypes
+            from ctypes import wintypes
+
+            kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+            kernel.OpenProcess.restype = wintypes.HANDLE
+            kernel.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+            kernel.WaitForSingleObject.restype = wintypes.DWORD
+            kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+            kernel.CloseHandle.restype = wintypes.BOOL
+            handle = kernel.OpenProcess(0x00100000, False, child["pid"])  # SYNCHRONIZE, before final identity check.
+            if not handle:
+                error = ctypes.get_last_error()
+                if error == 87:  # No process object remains for this already-stopped child.
+                    return
+                raise ctypes.WinError(error)
         try:
-            health = self.health(child)
-        except (OSError, http.client.HTTPException):
-            return
-        self.assertEqual((health["pid"], health["instance_id"]), (child["pid"], child["instance_id"]))
-        os.kill(child["pid"], signal.SIGTERM)
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
             try:
-                self.health(child)
+                health = self.health(child)
             except (OSError, http.client.HTTPException):
+                if not handle:
+                    return
+            else:
+                self.assertEqual((health["pid"], health["instance_id"]), (child["pid"], child["instance_id"]))
+                os.kill(child["pid"], signal.SIGTERM)
+            if handle:
+                # HTTP can close before Windows releases the child's map-owner.lock handle.
+                result = kernel.WaitForSingleObject(handle, 5000)
+                if result == 0xFFFFFFFF:
+                    raise ctypes.WinError(ctypes.get_last_error())
+                self.assertEqual(result, 0, f"owned map child {child['pid']} did not exit within 5 seconds")
                 return
-            time.sleep(.05)
-        self.fail("owned map child did not stop")
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                try:
+                    self.health(child)
+                except (OSError, http.client.HTTPException):
+                    return
+                time.sleep(.05)
+            self.fail("owned map child did not stop")
+        finally:
+            if handle and not kernel.CloseHandle(handle):
+                raise ctypes.WinError(ctypes.get_last_error())
 
     def tearDown(self):
         for child in self.children:
@@ -203,6 +234,47 @@ class MapServiceTest(unittest.TestCase):
         self.assertEqual(value["identity"]["entry"], [sys.executable, str(self.trusted / "archctx.py")])
         self.assertFalse(marker.exists(), "consumer module ran before startup authentication")
         self.assertEqual(self.health(value)["identity"]["modules"]["archctx"]["path"], str(self.trusted / "archctx.py"))
+
+    @unittest.skipUnless(os.name == "nt", "Windows process-handle cleanup")
+    def test_windows_stop_waits_for_exit_after_http_disconnect(self):
+        import ctypes
+        from ctypes import wintypes
+
+        child, handle = {"pid": 123, "instance_id": "owned-fixture"}, 0x100000001
+        for outcome in (0, 258, 0xFFFFFFFF):
+            with self.subTest(wait_result=outcome):
+                events = []
+                kernel = SimpleNamespace(OpenProcess=Mock(side_effect=lambda *_: events.append("open") or handle),
+                                         WaitForSingleObject=Mock(),
+                                         CloseHandle=Mock(side_effect=lambda *_: events.append("close") or True))
+                def health(_child):
+                    if "kill" in events:
+                        raise ConnectionRefusedError("HTTP closed before process exit")
+                    events.append("health")
+                    return child
+                def wait(_handle, _timeout):
+                    with self.assertRaises(ConnectionRefusedError):
+                        health(child)
+                    events.append("wait")
+                    ctypes.set_last_error(6)
+                    return outcome
+                kernel.WaitForSingleObject.side_effect = wait
+                with patch("ctypes.WinDLL", return_value=kernel), patch.object(self, "health", side_effect=health), \
+                     patch("os.kill", side_effect=lambda *_: events.append("kill")) as kill:
+                    if outcome == 0:
+                        self.stop(child)
+                    elif outcome == 258:
+                        with self.assertRaisesRegex(AssertionError, "did not exit within 5 seconds"):
+                            self.stop(child)
+                    else:
+                        with self.assertRaises(OSError):
+                            self.stop(child)
+                self.assertEqual(events, ["open", "health", "kill", "wait", "close"])
+                kernel.OpenProcess.assert_called_once_with(0x00100000, False, child["pid"])
+                kernel.WaitForSingleObject.assert_called_once_with(handle, 5000)
+                kernel.CloseHandle.assert_called_once_with(handle)
+                kill.assert_called_once_with(child["pid"], signal.SIGTERM)
+                self.assertIs(kernel.OpenProcess.restype, wintypes.HANDLE)
 
 
 if __name__ == "__main__":
