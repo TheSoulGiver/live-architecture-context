@@ -86,6 +86,52 @@ class DevelopmentTest(unittest.TestCase):
         self.assertEqual(first["observed_at"], again["observed_at"])
         self.assertEqual(files, {p.name: p.read_bytes() for p in self.state.iterdir() if p.is_file()})
 
+    def test_worker_idle_wait_is_capped_and_source_change_restores_hot_interval(self):
+        observer = self.observer()
+        now, waits = [100.], []
+        def wait(delay):
+            waits.append(delay)
+            now[0] += delay
+            if len(waits) == 4:
+                (self.repo / "owner.py").write_text("OWNER = 2\n")
+            return len(waits) == 8
+        with patch("archctx_development.time.monotonic", side_effect=lambda: now[0]):
+            first = observer.poll_once()
+            with patch.object(observer._stop, "wait", side_effect=wait):
+                observer._run()
+        self.assertEqual(waits, [.75, 1.5, 3., 3., .75, 1.5, 3., 3.])
+        self.assertEqual(observer._metrics["polls"], 8)
+        self.assertNotEqual(observer.read()["observation_id"], first["observation_id"])
+        self.assertEqual(observer.read()["accepted_context_hash"], first["accepted_context_hash"])
+
+    def test_worker_idle_wait_respects_settle_and_retry_deadlines(self):
+        observer = self.observer(live=True, settle_seconds=.5)
+        now, waits, attempts = [100.], [], []
+        accepted = (self.state / "last-good.json").read_bytes()
+        def wait(delay):
+            waits.append(delay)
+            now[0] += delay
+            if len(waits) == 3:
+                self.definition["components"][0]["purpose"] = "Revised ownership"
+                self.save()
+            return len(waits) == 13
+        def refresh(*args, **kwargs):
+            attempts.append(now[0])
+            return {"status": "RETRY" if len(attempts) < 3 else "INVALID", "last_good_preserved": True}
+        with patch("archctx_development.time.monotonic", side_effect=lambda: now[0]):
+            observer.poll_once()
+            with patch.object(observer._stop, "wait", side_effect=wait), patch.object(archctx, "refresh", side_effect=refresh):
+                observer._run()
+        expected = [.75, 1.5, 3., .5, .75, .25, .75, .75, .5, .75, .75, 1.5, 3.]
+        self.assertEqual(len(waits), len(expected))
+        for actual, delay in zip(waits, expected):
+            self.assertAlmostEqual(actual, delay)
+        self.assertEqual(len(attempts), 3)  # Deterministic failure never retries unchanged inputs.
+        for actual, deadline in zip(attempts, [105.75, 106.75, 108.75]):
+            self.assertAlmostEqual(actual, deadline)
+        self.assertEqual(observer.read()["refresh"]["status"], "INVALID")
+        self.assertEqual((self.state / "last-good.json").read_bytes(), accepted)
+
     def test_debounce_and_failed_refresh_attempt_once_until_input_changes(self):
         observer = self.observer(live=True, settle_seconds=10)
         now = [100.]

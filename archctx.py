@@ -83,10 +83,10 @@ def atomic(path: Path, value: dict[str, Any]) -> None:
 
 
 @contextmanager
-def refresh_lock(directory: Path):
+def refresh_lock(directory: Path, lock_name: str = "refresh.lock"):
     """A non-waiting, process-safe writer lock; the OS releases it on exit."""
     directory.mkdir(parents=True, exist_ok=True)
-    path = directory / "refresh.lock"
+    path = directory / lock_name
     handle = path.open("a+b")
     acquired = False
     try:
@@ -1126,7 +1126,7 @@ From the repository root, run `{prefix} status`. Keep this exact CLI prefix for 
 When this installed version supports it, `updates` can replace that status read at the next relevant task boundary; reuse the returned cursor with `updates --since <cursor>` (MCP: `architecture_updates` with `since`). Keep the cursor in the caller, not a new event log. Do not invoke it on every tool call.
 Read only returned evidence and the next directly needed source file. Source wins; stale, missing, or irrelevant context means normal targeted discovery. Default `watch` only observes; opt-in `watch --apply` may refresh already-declared evidence after validation, never candidates. Orientation, never a gate.
 When completed work changes architecture semantics, maintain the affected shared config/view from source, whether or not this task queried LAC. Existing candidate review and validation still govern promotion.
-After an explicitly authorized `{prefix} setup`, `{prefix} map` keeps the shared map live. For a real understanding gap during authorized development, use `{prefix} understand "question" --files <small-scope>`; follow its compact `NEEDS_AGENT` contract and resume with the returned analysis ID. LAC performs mechanical steps; this Agent supplies semantics. Reuse existing findings with `understand --show`; ordinary queries never install or invoke a model. Keep the map open during candidate acceptance.
+After an explicitly authorized `{prefix} setup`, use `{prefix} map --ensure --no-open` once at a relevant development start to silently start or reuse this project's live map; no remembered port or foreground terminal is needed. Use the returned URL when a person wants the page. A mismatch preserves the other instance; do not stop another session's process. Ordinary queries need no viewer and never start one. For a real understanding gap during authorized development, use `{prefix} understand "question" --files <small-scope>`; follow its compact `NEEDS_AGENT` contract and resume with the returned analysis ID. LAC performs mechanical steps; this Agent supplies semantics. Reuse existing findings with `understand --show`; ordinary queries never install or invoke a model.
 {CODEX_END}
 '''
 
@@ -1962,6 +1962,10 @@ def main() -> int:
     x.add_argument("question", nargs="?"); x.add_argument("--files", nargs="+"); x.add_argument("--resume"); x.add_argument("--show", action="store_true", help="read-only retained discoveries; no analysis"); x.add_argument("--details", action="store_true"); x.add_argument("--analysis", help="retained analysis or scope ID; requires --show")
     x = sub.add_parser("map", help="open the shared map and observe saved development changes")
     x.add_argument("--port", type=int, default=0); x.add_argument("--no-open", action="store_true"); x.add_argument("--read-only", action="store_true", help="disable automatic maintenance for this viewer")
+    mode = x.add_mutually_exclusive_group()
+    mode.add_argument("--ensure", action="store_true", help="start or reuse a matching project-local background viewer")
+    mode.add_argument("--status", dest="map_status", action="store_true", help="read-only background viewer identity and availability")
+    mode.add_argument("--_serve", metavar="INSTANCE", help=argparse.SUPPRESS)
     x = sub.add_parser("status"); x.add_argument("--diagnose", action="store_true", help="read-only core identity and selected config/state paths; works even without a config")
     x = sub.add_parser("refresh"); x.add_argument("--reset-candidate-baseline", action="store_true")
     x = sub.add_parser("candidates"); x.add_argument("--limit", type=int, default=CANDIDATE_OUTPUT_LIMIT)
@@ -2008,6 +2012,16 @@ def main() -> int:
             value = understand(config_path, args.state_dir, {key: getattr(args, key) for key in ("question", "files", "resume", "show", "details", "analysis")})
             dump(value); return 2 if value.get("status") in ("ERROR", "INVALID") else 0
         if args.command == "map":
+            if args.ensure or args.map_status or args._serve:
+                import archctx_map
+                if args._serve:
+                    return archctx_map.serve(config_path, args.state_dir, live=not args.read_only, port=args.port, instance_id=args._serve)
+                result = (archctx_map.status if args.map_status else archctx_map.ensure)(config_path, args.state_dir, live=not args.read_only, port=args.port)
+                dump(result)
+                if args.ensure and not args.no_open and result.get("status") in ("STARTED", "REUSED"):
+                    import webbrowser
+                    webbrowser.open(result["url"])
+                return 2 if result.get("status") in ("ERROR", "RETRY", "MISMATCH") else 0
             from archctx_blueprint import main as map_main
             options = ["--config", str(config_path), "--port", str(args.port)]
             if args.state_dir: options.extend(["--state-dir", args.state_dir])
