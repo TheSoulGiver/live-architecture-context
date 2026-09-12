@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import archctx
+from archctx_analysis_storage import RECEIPT_BYTES
 
 PROVIDER_REVISION = "5feed1f2ce4f9c368d860f4c0ebc36d98a4693fc"
 PROVIDER_URL = "https://github.com/Egonex-AI/Understand-Anything"
@@ -22,6 +23,14 @@ SOURCE_LIMIT, SOURCE_BYTES = 64, 4 * 1024 * 1024
 GRAPH_BYTES = 8 * 1024 * 1024
 SUMMARY_BYTES = 64 * 1024
 CATALOG_BYTES = 256 * 1024
+
+
+def bounded_json(value: Any, limit: int) -> bytes:
+    """Budget the exact persisted bytes, not a smaller serialization estimate."""
+    raw = (json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+    if len(raw) > limit:
+        raise ValueError(f"analysis metadata exceeds {limit} bytes; retained input/results are unchanged")
+    return raw
 
 
 def bounded_raw(path: Path, limit: int) -> bytes:
@@ -250,6 +259,10 @@ def reusable_analysis(directory: Path, receipt: dict[str, Any], imports: dict[st
     """Reuse exact saved bytes, never upstream's signature-only COSMETIC skip."""
     candidates = sorted(analysis_catalog(directory)["scopes"].values(),
         key=lambda entry: -len(set(entry["source_files"]) & set(receipt["source_hashes"])))
+    revision = receipt.get("revision_of")
+    if revision:
+        candidates = [entry for entry in candidates if entry_token(entry) ==
+                      {k: revision[k] for k in ("analysis_id", "graph_sha256")}]
     best = ({}, {"nodes": [], "edges": []}, [])
     for entry in candidates[:8]:
         if not set(entry["source_files"]) & set(receipt["source_hashes"]):
@@ -271,7 +284,7 @@ def reusable_analysis(directory: Path, receipt: dict[str, Any], imports: dict[st
                   and not dependency_unknown(receipt, [p])
                   and all(old_hashes.get(dep) == new_hashes.get(dep) for dep in dependency_files(receipt, [p]))}
         node_files = {node["id"]: node.get("filePath") for node in graph["nodes"]}
-        affected = set(old["source_hashes"]) - reused
+        affected = (set(old["source_hashes"]) - reused) | set((revision or {}).get("files", []))
         while True:
             before = set(affected)
             for edge in graph["edges"]:
@@ -307,7 +320,8 @@ def check_reused_graph(source: Path, receipt: dict[str, Any], graph: dict[str, A
         raise ValueError("retained incoming relation lost/changed; review surviving symbol IDs or reanalyze its caller")
 
 
-def prepare(config_path: Path, explicit: str | None, provider: Path, files: list[str], _locked: bool = False) -> dict[str, Any]:
+def prepare(config_path: Path, explicit: str | None, provider: Path, files: list[str], _locked: bool = False,
+            revision: dict[str, Any] | None = None) -> dict[str, Any]:
     """Capture saved bytes, then run the real upstream scanner/import resolver.
 
     The isolated scope is a Git root only to prevent upstream discovery from
@@ -320,15 +334,16 @@ def prepare(config_path: Path, explicit: str | None, provider: Path, files: list
     plugin = provider_root(provider)
     if not _locked:
         with archctx.refresh_lock(directory / "understand"):
-            return prepare(config_path, explicit, provider, files, _locked=True)
+            return prepare(config_path, explicit, provider, files, _locked=True, revision=revision)
     storage = capacity(directory, 2 * SOURCE_BYTES + 2 * GRAPH_BYTES)
     with capture(repo, directory, plugin, files) as captured:
-        result = prepare_captured(config_path, directory, plugin, files, captured)
+        result = prepare_captured(config_path, directory, plugin, files, captured, revision=revision)
     result["storage"] = storage | {"used_bytes_after": capacity(directory)["used_bytes"]}
     return result
 
 
-def prepare_captured(config_path: Path, directory: Path, plugin: Path, files: list[str], captured: dict[str, Any]) -> dict[str, Any]:
+def prepare_captured(config_path: Path, directory: Path, plugin: Path, files: list[str], captured: dict[str, Any],
+                     revision: dict[str, Any] | None = None) -> dict[str, Any]:
     repo = archctx.repo_for(config_path, archctx.load(config_path)).resolve()
     contents = source_bytes(captured["source"], files)
     hashes = captured["source_hashes"]
@@ -373,6 +388,7 @@ def prepare_captured(config_path: Path, directory: Path, plugin: Path, files: li
             captured["dependency_hashes"][target] = archctx.sha(raw)
             pending.append(target)
     source_id = archctx.semantic({"worktree": str(repo), "source_hashes": hashes,
+                                 **({"revision_of": revision} if revision else {}),
                                  "dependency_hashes": captured["dependency_hashes"], "dependencies": captured["dependencies"],
                                  "resolver_hashes": captured["resolver_hashes"], "inventory_hash": captured["inventory_hash"],
                                  **({"resolution": captured["resolution"]} if captured.get("resolution") is not None else {}),
@@ -381,7 +397,7 @@ def prepare_captured(config_path: Path, directory: Path, plugin: Path, files: li
     manifest_path = run / "input.json"
     existing = {}
     if manifest_path.exists():
-        existing = local_json(manifest_path)
+        existing = local_json(manifest_path, RECEIPT_BYTES)
         if existing.get("source_hashes") != hashes or existing.get("worktree") != str(repo):
             raise ValueError("analysis input identity collision")
         inputs_ready = all((run / f"source/.ua/tmp/ua-file-analyzer-input-{i}.json").is_file() for i in range(len(hashes)))
@@ -418,6 +434,7 @@ def prepare_captured(config_path: Path, directory: Path, plugin: Path, files: li
         archctx.atomic_bytes(run / "dependencies" / relative, raw)
     subprocess.run(["git", "init", "--quiet", str(source)], check=True, capture_output=True)
     receipt = {"version": 1, "analysis_id": source_id, "worktree": str(repo),
+               **({"revision_of": revision} if revision else {}),
                "captured_at": existing.get("captured_at", archctx.datetime.now(archctx.timezone.utc).isoformat()),
                "source_revision": existing.get("source_revision", archctx.revision(repo)), "source_hashes": hashes,
                "dependency_hashes": captured["dependency_hashes"], "dependencies": captured["dependencies"],
@@ -432,13 +449,14 @@ def prepare_captured(config_path: Path, directory: Path, plugin: Path, files: li
                "semantic_executor": "existing authorized Codex session; not run by this command"}
     # Recovering mechanical inputs must not rebase already-issued Agent work.
     receipt["scope_base"] = (existing.get("scope_base") if existing else
+                             {k: revision[k] for k in ("analysis_id", "graph_sha256")} if revision else
                              entry_token(analysis_catalog(directory)["scopes"].get(scope_id(receipt))))
     if archctx.last_path(directory).exists():
         accepted = archctx.load(archctx.last_path(directory))
         receipt["accepted_object_ids"] = {"context_hash": accepted.get("context_hash"),
             "components": [item["id"] for item in accepted.get("context", {}).get("components", [])],
             "relations": [archctx.relation_id(item) for item in accepted.get("context", {}).get("relations", [])]}
-    archctx.atomic(manifest_path, receipt)
+    archctx.atomic_bytes(manifest_path, bounded_json(receipt, RECEIPT_BYTES))
     if changed := verify_sources(repo, receipt):
         raise ValueError("source moved during capture: " + ", ".join(changed))
     steps, scan = captured["steps"], captured["scan"]
@@ -467,7 +485,7 @@ def prepare_captured(config_path: Path, directory: Path, plugin: Path, files: li
     if old:
         receipt["previous_system"] = {"layers": old.get("layers", [])[:8], "tour": old.get("tour", [])[:8],
             "omitted_layers": max(0, len(old.get("layers", [])) - 8), "omitted_tour_steps": max(0, len(old.get("tour", [])) - 8)}
-        if set(old["source_hashes"]) == set(hashes) and set(reused) == set(hashes):
+        if not revision and set(old["source_hashes"]) == set(hashes) and set(reused) == set(hashes):
             receipt["previous_graph_content"] = graph_content(previous)
     # One input per file permits scoped semantic updates without re-reading an
     # unchanged batch. Actual extraction remains the upstream agent's first step.
@@ -484,7 +502,7 @@ def prepare_captured(config_path: Path, directory: Path, plugin: Path, files: li
                        {"projectRoot": str(source), "batchFiles": [file],
                         "batchImportData": {relative: imports["importMap"].get(relative, [])},
                         "previousSymbols": symbols})
-        if relative in reused:
+        if relative in reused or (revision and old.get("source_hashes", {}).get(relative) == hashes[relative]):
             previous_index = sorted(old["source_hashes"]).index(relative)
             old_run = directory / "understand/runs" / old["analysis_id"]
             old_extract = old_run / f"source/.ua/tmp/ua-file-extract-results-{previous_index}.json"
@@ -493,7 +511,7 @@ def prepare_captured(config_path: Path, directory: Path, plugin: Path, files: li
     if changed := verify_sources(repo, receipt):
         raise ValueError("source moved during preparation: " + ", ".join(changed))
     receipt.update(structure_preparation=steps, prepared=True)
-    archctx.atomic(manifest_path, receipt)
+    archctx.atomic_bytes(manifest_path, bounded_json(receipt, RECEIPT_BYTES))
     return {"status": "NEEDS_SEMANTIC_ANALYSIS", "analysis_id": source_id,
             "input": str(manifest_path), "source_root": str(source), "files": scan["files"],
             "incremental": receipt["incremental"],
@@ -551,7 +569,7 @@ def receipt_for_entry(directory: Path, entry: dict[str, Any]) -> tuple[Path, dic
     path = (current_path(directory) if entry.get("legacy") else
             directory / "understand/runs" / entry["analysis_id"] / "imports" / (entry["graph_sha256"] + ".json"))
     path.resolve().relative_to((directory / "understand").resolve())
-    raw = bounded_raw(path, SUMMARY_BYTES)
+    raw = bounded_raw(path, RECEIPT_BYTES)
     if not entry.get("legacy") and archctx.sha(raw) != entry["receipt_sha256"]:
         raise ValueError("retained analysis receipt changed")
     receipt = json.loads(raw)
@@ -600,15 +618,15 @@ def retain_analysis(directory: Path, receipt: dict[str, Any], raw: bytes) -> dic
     run = directory / "understand/runs" / receipt["analysis_id"]
     path = run / "imports" / (receipt["graph_sha256"] + ".json")
     if path.exists():
-        prior = local_json(path, SUMMARY_BYTES)
+        prior = local_json(path, RECEIPT_BYTES)
         # Import time is not new analysis. Never rewrite a referenced receipt.
         if {k: v for k, v in prior.items() if k != "imported_at"} != {k: v for k, v in receipt.items() if k != "imported_at"}:
             raise ValueError("analysis receipt identity collision; retained evidence preserved")
     else:
-        archctx.atomic(path, receipt)
+        archctx.atomic_bytes(path, bounded_json(receipt, RECEIPT_BYTES))
     archctx.atomic_bytes(path.with_suffix(".graph.json"), raw)
     return {"analysis_id": receipt["analysis_id"], "graph_sha256": receipt["graph_sha256"],
-            "source_files": sorted(receipt["source_hashes"]), "receipt_sha256": archctx.sha(bounded_raw(path, SUMMARY_BYTES))}
+            "source_files": sorted(receipt["source_hashes"]), "receipt_sha256": archctx.sha(bounded_raw(path, RECEIPT_BYTES))}
 
 
 def graph_file(directory: Path, receipt: dict[str, Any]) -> Path:
@@ -657,7 +675,7 @@ def finish(config_path: Path, explicit: str | None, input_path: Path, _locked: b
     capacity(directory, 3 * GRAPH_BYTES, input_path.parent.name)
     input_path = input_path.resolve()
     input_path.relative_to(directory / "understand/runs")
-    receipt = local_json(input_path, SUMMARY_BYTES)
+    receipt = local_json(input_path, RECEIPT_BYTES)
     source = input_path.parent / "source"
     if Path(receipt["source_root"]).resolve() != source:
         raise ValueError("analysis source root does not match run")
@@ -807,7 +825,7 @@ def import_graph(config_path: Path, explicit: str | None, input_path: Path, _loc
     directory = archctx.state(config_path, explicit).resolve()
     input_path = input_path.resolve()
     input_path.relative_to(directory / "understand/runs")
-    receipt = local_json(input_path, SUMMARY_BYTES)
+    receipt = local_json(input_path, RECEIPT_BYTES)
     selected_scope = scope_id(receipt)
     config = archctx.load(config_path)
     repo = archctx.repo_for(config_path, config).resolve()
@@ -839,14 +857,7 @@ def import_graph(config_path: Path, explicit: str | None, input_path: Path, _loc
     extraction = []
     for index, relative in enumerate(sorted(receipt["source_hashes"])):
         path = source / f".ua/tmp/ua-file-extract-results-{index}.json"
-        result = local_json(path)
-        if (not result.get("scriptCompleted") or result.get("filesSkipped")
-                or result.get("analysisOutcomes", {}).get("structure", {}).get("succeeded") != 1
-                or result.get("analysisOutcomes", {}).get("structure", {}).get("failed")
-                or result.get("analysisOutcomes", {}).get("callGraph", {}).get("failed")
-                or result.get("filesAnalyzed") != 1 or len(result.get("results", [])) != 1
-                or result["results"][0].get("path") != relative):
-            raise ValueError("partial/failed upstream structural extraction; not deletion evidence")
+        result = native_extraction(path, relative)
         extraction.append(result["analysisOutcomes"])
     receipt = {**receipt, "graph_sha256": archctx.sha(raw), "graph_bytes": len(raw),
                "imported_at": archctx.datetime.now(archctx.timezone.utc).isoformat(),
@@ -856,8 +867,7 @@ def import_graph(config_path: Path, explicit: str | None, input_path: Path, _loc
     import_map = local_json(scan_path).get("importMap", {}) if scan_path.exists() else {}
     receipt["import_hashes"] = {p: archctx.semantic(import_map.get(p, [])) for p in receipt["source_hashes"]}
     receipt["candidates"] = graph_candidates(graph, receipt, contents)
-    if len(json.dumps(receipt, ensure_ascii=False).encode()) > SUMMARY_BYTES:
-        raise ValueError("analysis summary exceeds 64 KiB; use a smaller architecture scope")
+    receipt_raw = bounded_json(receipt, RECEIPT_BYTES)
     with archctx.refresh_lock(directory):
         if changed := verify_sources(repo, receipt):
             raise ValueError("analysis stale; saved source moved: " + ", ".join(changed))
@@ -867,7 +877,7 @@ def import_graph(config_path: Path, explicit: str | None, input_path: Path, _loc
             return discoveries(config_path, explicit, analysis=selected_scope)
         if present != receipt.get("scope_base"):
             raise ValueError("analysis scope advanced since preparation; retained newer scope and history. Read current findings and re-review before replacing this scope; resume cannot rebase old semantic work")
-        capacity(directory, len(raw) * 2 + SUMMARY_BYTES * 3 + CATALOG_BYTES, receipt["analysis_id"])
+        capacity(directory, len(raw) * 2 + len(receipt_raw) * 3 + CATALOG_BYTES, receipt["analysis_id"])
         # Migrate the single legacy entry without changing its source/graph identity.
         for key, entry in list(catalog["scopes"].items()):
             if entry.get("legacy"):
@@ -878,15 +888,14 @@ def import_graph(config_path: Path, explicit: str | None, input_path: Path, _loc
                 catalog["scopes"][key] = retain_analysis(directory, legacy, legacy_raw)
         catalog["scopes"][selected_scope] = retain_analysis(directory, receipt, raw)
         catalog["active"] = selected_scope
-        if len(json.dumps(catalog, ensure_ascii=False).encode()) > CATALOG_BYTES:
-            raise ValueError("project analysis catalog exceeds 256 KiB; existing scopes and canonical architecture retained")
+        catalog_raw = bounded_json(catalog, CATALOG_BYTES)
         archctx.atomic_bytes(input_path.parent / "graph.json", raw)
         # One catalog swap commits the current set; immutable evidence is already
         # durable. A compatibility mirror cannot roll back this publication.
-        archctx.atomic(directory / "understand/catalog.json", catalog)
+        archctx.atomic_bytes(directory / "understand/catalog.json", catalog_raw)
         try:
-            archctx.atomic(current_path(directory), receipt)
-            archctx.atomic(input_path.parent / "completed.json", receipt)
+            archctx.atomic_bytes(current_path(directory), receipt_raw)
+            archctx.atomic_bytes(input_path.parent / "completed.json", receipt_raw)
         except OSError:
             pass  # Catalog owns visibility; absent completion protects caches.
     return discoveries(config_path, explicit, analysis=selected_scope)
@@ -1008,6 +1017,7 @@ def discoveries(config_path: Path, explicit: str | None, limit: int = 8, details
                 "unknown_dependencies": unknown[:4], "omitted_unknown_dependencies": max(0, len(unknown) - 4),
                 "accepted_context_hash": last_good.get("context_hash"),
                 "analysis_id": receipt["analysis_id"], "graph_sha256": receipt["graph_sha256"],
+                **({"revision_of": receipt["revision_of"]} if receipt.get("revision_of") else {}),
                 "source_revision": receipt["source_revision"], "source_set_hash": archctx.semantic(receipt["source_hashes"]),
                 "provider": {key: receipt["provider"][key] for key in ("name", "url", "revision")},
                 "source_files": list(receipt["source_hashes"]), "changed_files": changed,
@@ -1159,7 +1169,11 @@ def native_extraction(path: Path, relative: str) -> dict[str, Any]:
             or outcomes["structure"].get("succeeded") != 1 or outcomes["structure"].get("failed")
             or not isinstance(outcomes.get("callGraph"), dict) or outcomes["callGraph"].get("failed")
             or not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict) or rows[0].get("path") != relative):
-        raise ValueError("structural extraction incomplete for " + relative)
+        reason = ("provider skipped selected source (unsupported language or unreadable input)"
+                  if result.get("filesSkipped") else "provider failed or returned incomplete structural/call coverage")
+        raise ValueError(f"structural extraction incomplete for {relative}: {reason}; "
+                         "coverage UNKNOWN, not absence of implementation or dependencies. "
+                         "Choose supported source scope or verify source directly as canonical evidence; prior analysis/LKG retained")
     return result
 
 
@@ -1190,19 +1204,22 @@ def native_findings(analysis: dict[str, Any], reused: bool = False) -> dict[str,
 
 
 def native_understand(config_path: Path, explicit: str | None, question: str | None = None,
-                      files: list[str] | None = None, resume: str | None = None) -> dict[str, Any]:
+                      files: list[str] | None = None, resume: str | None = None,
+                      revise: str | None = None) -> dict[str, Any]:
     """Advance mechanical work to the next Agent boundary; no model runs here."""
     from archctx_runtime import roots
     directory = archctx.state(config_path, explicit).resolve()
     repo = archctx.repo_for(config_path, archctx.load(config_path)).resolve()
     if question is not None and len(question) > 2000:
         raise ValueError("use a short development question (at most 2000 characters)")
-    receipt = None
+    receipt, revision = None, None
+    if revise and (resume or len(revise) != 64 or any(c not in "0123456789abcdef" for c in revise)):
+        raise ValueError("--revise needs the current analysis_id, not --resume or a scope ID")
     if resume:
         if files is not None or len(resume) != 64 or any(c not in "0123456789abcdef" for c in resume):
             raise ValueError("invalid analysis identity")
         input_path = directory / "understand/runs" / resume / "input.json"
-    else:
+    elif not revise:
         if files is None:
             matches = archctx.search(config_path, explicit, question or "", 3).get("matches", [])
             config = archctx.load(config_path)
@@ -1220,8 +1237,18 @@ def native_understand(config_path: Path, explicit: str | None, question: str | N
         # ponytail: serialize one mechanical advance per analysis directory;
         # per-run locks are enough if concurrent scopes become necessary.
         with archctx.refresh_lock(directory / "understand"):
+            if revise:
+                _, old = analysis_receipt(directory, revise)
+                if old["analysis_id"] != revise:
+                    raise ValueError("--revise needs the current analysis_id, not a scope ID")
+                selected = files if files is not None else sorted(old["source_hashes"])
+                if not selected or len(selected) != len(set(selected)) or not set(selected) <= set(old["source_hashes"]):
+                    raise ValueError("revision files must be a non-empty subset of the retained analysis scope")
+                check_publication(repo, directory, publication_proof(old))
+                revision = {**entry_token(old), "files": sorted(selected)}
+                files = sorted(old["source_hashes"])
             if not resume:
-                entries = sorted(analysis_catalog(directory)["scopes"].values(), key=lambda entry: len(entry["source_files"]))
+                entries = [] if revise else sorted(analysis_catalog(directory)["scopes"].values(), key=lambda entry: len(entry["source_files"]))
                 for entry in entries:
                     if not set(files) <= set(entry["source_files"]):
                         continue
@@ -1230,18 +1257,19 @@ def native_understand(config_path: Path, explicit: str | None, question: str | N
                             and set(files) <= set(old.get("source_hashes", {})) and not verify_sources(repo, old)):
                         check_publication(repo, directory, publication_proof(old))
                         return native_findings(discoveries(config_path, explicit, analysis=old["analysis_id"], files=files), reused=True)
-                prepared = prepare(config_path, explicit, roots(directory)["analysis"], files, _locked=True)
+                prepared = prepare(config_path, explicit, roots(directory)["analysis"], files, _locked=True, revision=revision)
                 input_path = Path(prepared["input"])
-            receipt = local_json(input_path, SUMMARY_BYTES)
+            receipt = local_json(input_path, RECEIPT_BYTES)
             if receipt.get("analysis_id") != input_path.parent.name or (resume and receipt["analysis_id"] != resume):
                 raise ValueError("analysis input identity changed")
             if changed := verify_sources(repo, receipt):
                 return stale(changed)
             if not receipt.get("prepared") or any(not (input_path.parent / f"source/.ua/tmp/ua-file-analyzer-input-{i}.json").exists() for i in range(len(receipt["source_hashes"]))):
-                prepared = prepare(config_path, explicit, Path(receipt["provider"]["root"]).parent, list(receipt["source_hashes"]), _locked=True)
+                prepared = prepare(config_path, explicit, Path(receipt["provider"]["root"]).parent, list(receipt["source_hashes"]),
+                                   _locked=True, revision=receipt.get("revision_of"))
                 if Path(prepared["input"]).resolve() != input_path.resolve():
                     raise ValueError("source changed while recovering preparation")
-                receipt = local_json(input_path, SUMMARY_BYTES)
+                receipt = local_json(input_path, RECEIPT_BYTES)
             capacity(directory, 2 * GRAPH_BYTES, receipt["analysis_id"])
             result = native_advance(config_path, explicit, directory, input_path, receipt)
             result["storage"] = capacity(directory, active=receipt["analysis_id"])

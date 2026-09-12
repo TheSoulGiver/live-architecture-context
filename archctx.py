@@ -1199,18 +1199,20 @@ def understand(config_path: Path, explicit: str | None, args: dict[str, Any]) ->
     from archctx_understand import discoveries, native_understand
     for name in ("show", "details"):
         if name in args and not isinstance(args[name], bool): raise ValueError(f"{name} must be boolean")
-    for name in ("question", "resume", "analysis"):
+    for name in ("question", "resume", "analysis", "revise"):
         if args.get(name) is not None and not isinstance(args[name], str): raise ValueError(f"{name} must be a string")
     files = args.get("files")
     if files is not None and (not isinstance(files, list) or not all(isinstance(path, str) for path in files)):
         raise ValueError("files must be a string array")
+    if args.get("revise") and (args.get("show") or args.get("resume") or args.get("analysis")):
+        raise ValueError("--revise starts a new source-bound semantic correction; do not combine with --show/--resume/--analysis")
     if args.get("show"):
         if args.get("question") or args.get("resume"): raise ValueError("--show is read-only; do not combine it with question/resume")
         return discoveries(config_path, explicit, details=args.get("details", False), analysis=args.get("analysis"), files=files)
     if args.get("details"): raise ValueError("--details requires --show")
     if args.get("analysis") is not None: raise ValueError("--analysis requires --show; use --resume to continue analysis")
     try:
-        return native_understand(config_path, explicit, args.get("question"), files, args.get("resume"))
+        return native_understand(config_path, explicit, args.get("question"), files, args.get("resume"), args.get("revise"))
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
         return {"status": "INVALID", "reason": str(error)[:1600], "last_good_preserved": last_path(state(config_path, explicit)).exists(),
                 "next_action": "repair the reported local input or component failure, then resume; other queries remain available"}
@@ -1892,7 +1894,7 @@ def mcp_tools() -> list[dict[str, Any]]:
         {"name": "architecture_reject_candidate", "description": "Record one bounded fixed-code rejection and advance the verified candidate baseline.", "inputSchema": reject_input},
         {"name": "architecture_canonical", "description": "Canonical component and evidence.", "inputSchema": ident},
         {"name": "architecture_search", "description": "Match the current task to compact canonical components; defaults to three results and reports omissions.", "inputSchema": search_input},
-        {"name": "architecture_understand", "description": "Explicit bounded source understanding after setup: run recoverable mechanical stages, then return a compact semantic task for the already-authorized Agent. Never invokes a model. show is strictly read-only; optional analysis/files select retained project findings.", "inputSchema": {"type": "object", "properties": {"question": {"type": "string"}, "files": {"type": "array", "items": {"type": "string"}}, "analysis": {"type": "string"}, "resume": {"type": "string"}, "show": {"type": "boolean"}, "details": {"type": "boolean"}}}},
+        {"name": "architecture_understand", "description": "Explicit bounded source understanding after setup; no model invocation. show only reads findings. revise starts a semantic correction from a current analysis ID; optional files selects re-review within its retained scope.", "inputSchema": {"type": "object", "properties": {"question": {"type": "string"}, "files": {"type": "array", "items": {"type": "string"}}, "analysis": {"type": "string"}, "resume": {"type": "string"}, "revise": {"type": "string"}, "show": {"type": "boolean"}, "details": {"type": "boolean"}}}},
         {"name": "architecture_evidence", "description": "Source evidence for one component.", "inputSchema": ident},
         {"name": "architecture_trace", "description": "Authored relations; optional code graph stays separate.", "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}, "direction": {"enum": ["upstream", "downstream"]}, "include_code_edges": {"type": "boolean"}}, "required": ["id"]}},
         {"name": "architecture_impact", "description": "Shared declared change_scope: direct components, dependencies, dependents, typed relation evidence; accepted and unaccepted working definitions stay separate. Not runtime impact. details expands omissions; legacy reachable_components is all-kind outgoing reach.", "inputSchema": {"type": "object", "properties": {"base": {"type": "string"}, "files": {"type": "array", "items": {"type": "string"}}, "details": {"type": "boolean"}}}},
@@ -1959,6 +1961,7 @@ def main() -> int:
     x = sub.add_parser("setup", help="explicitly prepare compatible project-local analysis/render components and Codex guidance; no model or refresh")
     x.add_argument("--analysis-home", help="reuse an existing compatible source checkout without modifying it"); x.add_argument("--renderer-home", help="reuse an existing compatible renderer checkout without modifying it"); x.add_argument("--command", dest="cli_command", default="archctx")
     x = sub.add_parser("understand", help="bounded source understanding; mechanical work is recoverable, semantics stay with the authorized Agent")
+    x.add_argument("--revise", help="start a semantic correction from this current analysis ID; optional --files limits re-review within its scope")
     x.add_argument("question", nargs="?"); x.add_argument("--files", nargs="+"); x.add_argument("--resume"); x.add_argument("--show", action="store_true", help="read-only retained discoveries; no analysis"); x.add_argument("--details", action="store_true"); x.add_argument("--analysis", help="retained analysis or scope ID; requires --show")
     x = sub.add_parser("map", help="open the shared map and observe saved development changes")
     x.add_argument("--port", type=int, default=0); x.add_argument("--no-open", action="store_true"); x.add_argument("--read-only", action="store_true", help="disable automatic maintenance for this viewer")
@@ -2005,7 +2008,7 @@ def main() -> int:
             dump(diagnose_status(config_path, args.state_dir)); return 0
         if not config_path.is_file(): raise ValueError("--config is required except for init (or run from a repository with .archctx/architecture.json)")
         if args.command == "understand":
-            value = understand(config_path, args.state_dir, {key: getattr(args, key) for key in ("question", "files", "resume", "show", "details", "analysis")})
+            value = understand(config_path, args.state_dir, {key: getattr(args, key) for key in ("question", "files", "resume", "show", "details", "analysis", "revise")})
             dump(value); return 2 if value.get("status") in ("ERROR", "INVALID") else 0
         if args.command == "map":
             from archctx_blueprint import main as map_main
