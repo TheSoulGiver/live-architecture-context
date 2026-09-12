@@ -9,6 +9,7 @@ import mimetypes
 import os
 import re
 import shlex
+import sys
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -20,6 +21,9 @@ import archctx_understand as understand
 from archctx_development import DevelopmentObserver
 
 MAX_ARTIFACT_BYTES = 8 * 1024 * 1024
+# A long-lived viewer must identify loaded code, not subsequently replaced files.
+CORE_SOURCE_PATH = Path(__file__).resolve()
+CORE_SOURCE_SHA256 = archctx.sha(CORE_SOURCE_PATH.read_bytes())
 
 
 def analysis_source(repo: Path, directory: Path, args: dict[str, list[str]]) -> str:
@@ -347,10 +351,13 @@ def handler(config_path: Path, explicit: str | None, observer: DevelopmentObserv
         # An invalid edit must not prevent opening the retained accepted view.
         repo = Path(archctx.load(archctx.last_path(directory))["repo"]).resolve()
     quote = (lambda value: "'" + value.replace("'", "''") + "'") if os.name == "nt" else shlex.quote
-    entry = Path(archctx.__file__).resolve()
-    entry_name = entry.relative_to(repo).as_posix() if entry.is_relative_to(repo) else entry.as_posix()
+    if "map" in sys.argv[1:]:
+        from archctx_map import entry
+        invocation = entry()
+    else:
+        invocation = [sys.executable, *(["-I"] if sys.flags.isolated else []), str(archctx.CORE_SOURCE_PATH)]
     config_name = config_path.relative_to(repo).as_posix() if config_path.is_relative_to(repo) else config_path.as_posix()
-    prefix = "python " + quote(entry_name) + " --config " + quote(config_name)
+    prefix = ("& " if os.name == "nt" else "") + " ".join(map(quote, invocation)) + " --config " + quote(config_name)
     if explicit:
         prefix += " --state-dir " + quote(directory.as_posix())
 

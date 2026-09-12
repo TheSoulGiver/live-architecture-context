@@ -6,7 +6,7 @@ From the repository root, run `python archctx.py --config architecture/architect
 When this installed version supports it, `updates` can replace that status read at the next relevant task boundary; reuse the returned cursor with `updates --since <cursor>` (MCP: `architecture_updates` with `since`). Keep the cursor in the caller, not a new event log. Do not invoke it on every tool call.
 Read only returned evidence and the next directly needed source file. Source wins; stale, missing, or irrelevant context means normal targeted discovery. Default `watch` only observes; opt-in `watch --apply` may refresh already-declared evidence after validation, never candidates. Orientation, never a gate.
 When completed work changes architecture semantics, maintain the affected shared config/view from source, whether or not this task queried LAC. Existing candidate review and validation still govern promotion.
-After an explicitly authorized `python archctx.py --config architecture/architecture.json setup`, `python archctx.py --config architecture/architecture.json map` keeps the shared map live. For a real understanding gap during authorized development, use `python archctx.py --config architecture/architecture.json understand "question" --files <small-scope>`; follow its compact `NEEDS_AGENT` contract and resume with the returned analysis ID. LAC performs mechanical steps; this Agent supplies semantics. Reuse existing findings with `understand --show`; ordinary queries never install or invoke a model. Keep the map open during candidate acceptance.
+After an explicitly authorized `python archctx.py --config architecture/architecture.json setup`, use `python archctx.py --config architecture/architecture.json map --ensure --no-open` once at a relevant development start to silently start or reuse this project's live map; no remembered port or foreground terminal is needed. Use the returned URL when a person wants the page. A mismatch preserves the other instance; do not stop another session's process. Ordinary queries need no viewer and never start one. For a real understanding gap during authorized development, use `python archctx.py --config architecture/architecture.json understand "question" --files <small-scope>`; follow its compact `NEEDS_AGENT` contract and resume with the returned analysis ID. LAC performs mechanical steps; this Agent supplies semantics. Reuse existing findings with `understand --show`; ordinary queries never install or invoke a model.
 <!-- archctx:end -->
 
 # Live Architecture Context agent guide
@@ -47,7 +47,8 @@ Raw config/view are editing inputs, not the default query response.
 The human system map and reproduction commands are in `docs/LIVING_BLUEPRINT.md`.
 At an authorized setup boundary, use the same local CLI prefix with `setup` to
 provision the compatible project-local components; this is the explicit network
-step. `map` opens the live map. Ordinary queries never install components or
+step. `map --ensure --no-open` quietly starts or reuses the live map at a relevant
+development start; omit `--no-open` when a person wants to open it. Ordinary queries never install components or
 invoke a model. Keep this repository's explicit config/prefix from the managed
 block even though a sole conventional config can be discovered automatically.
 For an understanding gap or meaningful source change, run
