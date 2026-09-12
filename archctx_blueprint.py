@@ -26,7 +26,7 @@ def analysis_source(repo: Path, directory: Path, args: dict[str, list[str]]) -> 
     """Read only a retained analysis's captured source, never arbitrary worktree files."""
     ident, relative, digest = (args.get(key, [""])[0] for key in ("analysis", "path", "sha"))
     receipt_path, receipt = understand.analysis_receipt(directory, ident)
-    receipt_digest = archctx.sha(understand.bounded_raw(receipt_path, understand.SUMMARY_BYTES))
+    receipt_digest = archctx.sha(understand.bounded_raw(receipt_path, understand.RECEIPT_BYTES))
     if not isinstance(receipt.get("source_hashes"), dict):
         raise ValueError("invalid analysis source manifest")
     if not re.fullmatch(r"[0-9a-f]{64}", ident) or ident != receipt["analysis_id"] or Path(receipt["worktree"]).resolve() != repo:
@@ -44,7 +44,7 @@ def analysis_source(repo: Path, directory: Path, args: dict[str, list[str]]) -> 
         raise ValueError("invalid captured source path")
     raw = understand.bounded_raw(path, understand.SOURCE_BYTES)
     if (archctx.sha(raw) != digest or understand.analysis_receipt(directory, ident) != (receipt_path, receipt)
-            or archctx.sha(understand.bounded_raw(receipt_path, understand.SUMMARY_BYTES)) != receipt_digest):
+            or archctx.sha(understand.bounded_raw(receipt_path, understand.RECEIPT_BYTES)) != receipt_digest):
         raise ValueError("captured source or analysis receipt changed while reading")
     lines = raw.decode("utf-8", errors="replace").splitlines()
     line = int(args.get("line", ["1"])[0])

@@ -111,7 +111,7 @@
     {
       "id": "source-analysis",
       "name": "Source understanding",
-      "purpose": "Captures bounded saved source, static dependency evidence and resolution inventory around the current Agent's semantic contract. Retains independent project scopes and reuses verified results; unknown dependency coverage cannot inherit review. Explicit reviews bind canonical IDs through existing refresh/LKG publication. Capacity checks preserve original evidence and reclaim only eligible mechanical caches.",
+      "purpose": "Captures bounded saved source, static dependency evidence and resolution inventory around the current Agent's semantic contract. Retains independent scopes; explicit semantic corrections bind a current predecessor and reuse unaffected evidence without rewriting history. Full receipts and compact responses have separate budgets; unknown coverage cannot inherit review. Explicit reviews bind canonical IDs through existing refresh/LKG publication. Capacity checks preserve originals and reclaim only eligible mechanical caches.",
       "truth_sources": ["archctx_understand.py", "archctx_analysis_inputs.py", "archctx_assets/analysis_dependencies.mjs", "archctx_analysis_storage.py", "archctx_runtime.py"],
       "code_symbol": "native_understand",
       "tags": ["optional", "source-analysis", "non-blocking", "local-only"],
@@ -122,6 +122,7 @@
         {"path": "archctx_analysis_inputs.py", "contains": "steps.append(_run(\"analysis_dependencies.mjs\", [node, str(helper)"},
         {"path": "archctx_assets/analysis_dependencies.mjs", "contains": "const { analyzeFileWithOutcomes } = await import"},
         {"path": "archctx_understand.py", "contains": "def native_understand(config_path: Path"},
+        {"path": "archctx_understand.py", "contains": "revision = {**entry_token(old), \"files\": sorted(selected)}"},
         {"path": "archctx_understand.py", "contains": "def analysis_catalog(directory: Path)"},
         {"path": "archctx_understand.py", "contains": "catalog[\"scopes\"][selected_scope] = retain_analysis(directory, receipt, raw)"},
         {"path": "archctx_understand.py", "contains": "def review_revisions(candidate: dict"},
