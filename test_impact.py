@@ -187,6 +187,21 @@ class ImpactTest(unittest.TestCase):
         self.assertEqual(compact["summary"]["counts"]["dependents"], 20)
         self.assertEqual(details["summary"]["dependents"], callers)
 
+    def test_stale_accepted_scope_never_shrinks_the_summary(self):
+        # Dogfooded on this repository: the accepted scope predated the current declaration, so
+        # a summary that preferred it answered "nothing depends on this" while the working
+        # definition already named two dependents.
+        self.record = accepted({"version": 1, "components": [component(x) for x in ("sdk", "memory")],
+                                "relations": [relation("memory", "sdk", kind="guides-to")]})
+        working = {"version": 1, "components": [component(x) for x in ("sdk", "memory", "notify")],
+                   "relations": [relation("memory", "sdk"), relation("notify", "sdk")]}
+        summary = self.scope(["sdk.py"], config=working)["summary"]
+        self.assertEqual(summary["basis"], "accepted+working")
+        self.assertEqual(summary["dependents"], ["memory", "notify"])
+        self.assertEqual(summary["counts"]["dependents"], 2)
+        # The accepted side covers `sdk`, so only the declaration-only IDs are flagged.
+        self.assertEqual(summary["unvalidated"], ["memory", "notify"])
+
     def test_summary_falls_back_to_the_working_definition_and_then_to_none(self):
         working = copy.deepcopy(self.config)
         working["relations"] = [relation("A", "B"), relation("B", "C"), relation("C", "A")]
@@ -196,7 +211,8 @@ class ImpactTest(unittest.TestCase):
         unusable = archctx.change_scope(self.record, None, ["B.py"], config_path_relative="architecture.json")
         self.assertEqual(unusable["summary"],
                          {"basis": "none", "direct_components": [], "dependencies": [], "dependents": [],
-                          "counts": {"direct_components": 0, "dependencies": 0, "dependents": 0}, "omitted": {}})
+                          "counts": {"direct_components": 0, "dependencies": 0, "dependents": 0},
+                          "unvalidated": [], "omitted": {}})
 
     def fixture(self):
         root = Path(__file__).parent / ".archctx"

@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-CONFIG_VERSION, PROTOCOL_VERSION, SERVER_VERSION = 1, "1.0", "0.1.9"
+CONFIG_VERSION, PROTOCOL_VERSION, SERVER_VERSION = 1, "1.0", "0.1.10"
 COMPONENT_FIELDS = ("id", "name", "purpose", "truth_sources", "tags", "code_symbol")
 # Capture core source identity at import, not after a running MCP's file is replaced.
 CORE_SOURCE_PATH = Path(__file__).resolve()
@@ -1356,6 +1356,9 @@ def dependency_direction(relation: dict[str, Any]) -> tuple[str, str]:
     return "unclassified", "unclassified"
 
 
+SCOPE_KEYS = ("direct_components", "dependencies", "dependents")
+
+
 def dependency_graph(ctx: dict[str, Any]) -> dict[str, Any]:
     """Declared dependency edges only; unclassified kinds keep raw direction and do not propagate."""
     edges = []
@@ -1433,15 +1436,20 @@ def change_scope(record: dict[str, Any], config: dict[str, Any] | None, paths: l
              "detail_query": "impact with the same files and --details (MCP details:true); compare context/config hashes"}
     # One selected scope answers "who reviews this change" in both directions, so no caller has to
     # know which version-separated scope to read, and none of them defaults to outgoing edges alone.
-    primary = value["accepted"] or (value["working"] if isinstance(value["working"], dict) and "error" not in value["working"] else None)
-    value["summary"] = ({"basis": "accepted" if value["accepted"] else "working"}
-                        | {key: list(primary[key]) for key in ("direct_components", "dependencies", "dependents")}
-                        | {"counts": dict(primary["counts"]), "omitted": {}}) if primary else {
-                            "basis": "none", "direct_components": [], "dependencies": [], "dependents": [],
-                            "counts": {"direct_components": 0, "dependencies": 0, "dependents": 0}, "omitted": {}}
+    # An accepted scope that predates the current declaration is not the smaller truth. Reporting
+    # only it reproduces the under-report this summary exists to prevent, so both versions are
+    # unioned and the IDs no accepted evidence covers yet are named rather than dropped.
+    scoped = [(name, s) for name, s in (("accepted", value["accepted"]), ("working", value["working"]))
+              if isinstance(s, dict) and "omitted" in s]
+    merged = {key: sorted({x for _, s in scoped for x in s[key]}) for key in SCOPE_KEYS}
+    covered = {x for name, s in scoped if name == "accepted" for key in SCOPE_KEYS for x in s[key]}
+    value["summary"] = {"basis": "+".join(name for name, _ in scoped) or "none", **merged,
+                        "counts": {key: len(merged[key]) for key in SCOPE_KEYS},
+                        "unvalidated": sorted({x for name, s in scoped if name == "working"
+                                               for key in SCOPE_KEYS for x in s[key]} - covered), "omitted": {}}
     if not details:
         groups = [(s, key) for s in (value["accepted"], value["working"], value["summary"]) if isinstance(s, dict) and "omitted" in s
-                  for key in ("direct_components", "dependencies", "dependents", "relations", "associations", "config_seeds", "uncovered_files") if key in s]
+                  for key in (*SCOPE_KEYS, "unvalidated", "relations", "associations", "config_seeds", "uncovered_files") if key in s]
         for parent, key in groups:
             limit = 8 if key == "relations" else 12
             if len(parent[key]) > limit:
@@ -1479,9 +1487,10 @@ def impact(config_path: Path, explicit: str | None, base: str | None, files: lis
     summary = scopes["summary"]
     return {"protocol_version": PROTOCOL_VERSION, "kind": "authored_architecture_impact", "provenance": "source_evidence_plus_authored_architecture", "base": base, "changed_files": changed,
             "scope_basis": summary["basis"], "scope_components": summary["direct_components"], "dependents": summary["dependents"], "dependencies": summary["dependencies"],
-            "counts": summary["counts"], "omitted": summary["omitted"],
+            "counts": summary["counts"], "unvalidated": summary["unvalidated"], "omitted": summary["omitted"],
             "answers": {"dependents": "declared incoming dependency edges: components whose review this change can force",
                         "dependencies": "declared outgoing dependency edges: components this change relies on",
+                        "unvalidated": "IDs the current declaration adds that no accepted source evidence covers yet; refresh to validate them",
                         "proof": "declared_review_scope_not_runtime_impact"},
             "direct_components": direct, "reachable_components": reach,
             "legacy_semantics": {"direct_components": "working evidence owners only",
@@ -1972,7 +1981,7 @@ def mcp_tools() -> list[dict[str, Any]]:
         {"name": "architecture_understand", "description": "Explicit bounded source understanding after setup; no model invocation. show only reads findings. revise starts a semantic correction from a current analysis ID; optional files selects re-review within its retained scope.", "inputSchema": {"type": "object", "properties": {"question": {"type": "string"}, "files": {"type": "array", "items": {"type": "string"}}, "analysis": {"type": "string"}, "resume": {"type": "string"}, "revise": {"type": "string"}, "show": {"type": "boolean"}, "details": {"type": "boolean"}}}},
         {"name": "architecture_evidence", "description": "Source evidence for one component.", "inputSchema": ident},
         {"name": "architecture_trace", "description": "Authored relations; optional code graph stays separate.", "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}, "direction": {"enum": ["upstream", "downstream"]}, "include_code_edges": {"type": "boolean"}}, "required": ["id"]}},
-        {"name": "architecture_impact", "description": "Declared change scope in both directions by default: scope_components, dependencies, and dependents (who this change can force a review of), plus the shared change_scope with typed relation evidence; accepted and unaccepted working definitions stay separate. Not runtime impact. counts precede compaction; details expands omissions; legacy reachable_components is deprecated outgoing-only reach and never reports dependents.", "inputSchema": {"type": "object", "properties": {"base": {"type": "string"}, "files": {"type": "array", "items": {"type": "string"}}, "details": {"type": "boolean"}}}},
+        {"name": "architecture_impact", "description": "Declared change scope in both directions by default: scope_components, dependencies, and dependents (who this change can force a review of), plus the shared change_scope with typed relation evidence; accepted and unaccepted working definitions stay separate. Not runtime impact. the summary unions accepted and working scopes so a stale accepted scope cannot shrink it, and unvalidated names declaration-only IDs; counts precede compaction; details expands omissions; legacy reachable_components is deprecated outgoing-only reach and never reports dependents.", "inputSchema": {"type": "object", "properties": {"base": {"type": "string"}, "files": {"type": "array", "items": {"type": "string"}}, "details": {"type": "boolean"}}}},
         {"name": "architecture_changed_since", "description": "Retained architecture delta by revision.", "inputSchema": {"type": "object", "properties": {"revision": {"type": "string"}}, "required": ["revision"]}},
         {"name": "architecture_drift", "description": "Configured high-value historical Git-diff candidates only.", "inputSchema": {"type": "object", "properties": {"base": {"type": "string"}}, "required": ["base"]}},
         {"name": "architecture_stale", "description": "Alias for freshness status, including optional read-only diagnose.", "inputSchema": status_input},

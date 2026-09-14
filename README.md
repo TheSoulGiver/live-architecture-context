@@ -360,10 +360,13 @@ results. With a configured `code_graph.query`, code edges appear in a separate
 
 `impact` answers in both declared directions by default, with no direction flag
 to remember: `dependents` are the components whose review the change can force,
-`dependencies` are the ones it relies on, `scope_components` are the selected
-owners, and `scope_basis` names which version-separated scope was used
-(`accepted`, `working`, or `none`). `counts` is settled before any compaction,
-so a cut list never reads as a smaller blast radius.
+`dependencies` are the ones it relies on, and `scope_components` are the
+selected owners. `scope_basis` names which version-separated scopes were used
+(`accepted`, `working`, `accepted+working`, or `none`); when both exist the
+summary is their union, because an accepted scope that predates the current
+declaration is not the smaller truth. `unvalidated` lists the IDs the current
+declaration adds that no accepted evidence covers yet. `counts` is settled
+before any compaction, so a cut list never reads as a smaller blast radius.
 
 `impact.change_scope` is the same contract used by the Live Development Map:
 direct evidence owners, their declared `dependencies`, and their `dependents`
