@@ -11,7 +11,7 @@ import subprocess
 from typing import Any
 
 from archctx import components as validated_components
-from archctx import relation_id, repo_for, validate
+from archctx import Parser, relation_id, repo_for, validate
 
 
 COMPONENT_TYPES = {"frontend", "backend", "database", "cloud", "security", "messagebus", "external"}
@@ -328,7 +328,7 @@ def validate_source(config_path: Path, config: dict[str, Any]) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
+    parser = Parser()
     parser.add_argument("--config", required=True)
     parser.add_argument("--view", required=True)
     parser.add_argument("--output", required=True)

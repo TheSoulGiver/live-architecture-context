@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.1.9
+
+- Refuse a repeated single-value option in every declared console script, not
+  only `archctx`. `archctx-to-archify`, `archctx-calm-query`, `archctx-blueprint`,
+  `archctx-hook` and `archctx-understand` each built their own parser and kept
+  the last value in silence, so the same defect survived behind a different
+  front door. A test now reads `[project.scripts]` and checks each entry point,
+  so a new script cannot reintroduce it.
+- Stop the test suite from opening real browser windows. `test_map_service`
+  drove `map --ensure` through `archctx.main()` without `--no-open`, so every
+  run opened a loopback tab on the machine running the tests. Both subprocess
+  harnesses now neutralise `webbrowser.open`, which holds whatever flags a
+  test passes.
+
 ## v0.1.8
 
 - Bump the declared version. `0.1.7` covered dozens of commits, so an installed

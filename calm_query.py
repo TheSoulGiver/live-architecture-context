@@ -140,7 +140,8 @@ def query_http(url: str, symbol: str, direction: str, timeout_seconds: float) ->
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
+    from archctx import Parser  # Deferred: this adapter stays importable without the core.
+    parser = Parser()
     parser.add_argument("--repo", required=True)
     parser.add_argument("--symbol", required=True)
     parser.add_argument("--direction", choices=("upstream", "downstream"), required=True)

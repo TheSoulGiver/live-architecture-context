@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-CONFIG_VERSION, PROTOCOL_VERSION, SERVER_VERSION = 1, "1.0", "0.1.8"
+CONFIG_VERSION, PROTOCOL_VERSION, SERVER_VERSION = 1, "1.0", "0.1.9"
 COMPONENT_FIELDS = ("id", "name", "purpose", "truth_sources", "tags", "code_symbol")
 # Capture core source identity at import, not after a running MCP's file is replaced.
 CORE_SOURCE_PATH = Path(__file__).resolve()

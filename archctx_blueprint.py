@@ -515,7 +515,7 @@ def handler(config_path: Path, explicit: str | None, observer: DevelopmentObserv
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = archctx.Parser(description=__doc__)
     parser.add_argument("--config", default="architecture/architecture.json")
     parser.add_argument("--state-dir")
     parser.add_argument("--port", type=int, default=0, help="0 selects an unused local port")
