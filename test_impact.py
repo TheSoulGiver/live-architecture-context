@@ -187,6 +187,27 @@ class ImpactTest(unittest.TestCase):
         self.assertEqual(compact["summary"]["counts"]["dependents"], 20)
         self.assertEqual(details["summary"]["dependents"], callers)
 
+    def test_undeclared_direction_is_named_instead_of_answering_nothing_depends_on_this(self):
+        # Field repro: two components declared against a credential pool with a descriptive kind.
+        # `trace --direction upstream` found both; `impact` answered an empty dependents list with
+        # no statement that anything had been skipped, which reads as "safe to change".
+        self.config = {"version": 1, "components": [component(x) for x in ("credential-pool", "delegate-config", "delegate-tool")],
+                       "relations": [relation("delegate-config", "credential-pool", kind="provides-credentials-to"),
+                                     relation("delegate-tool", "credential-pool", kind="provides-credentials-to")]}
+        self.record = accepted(self.config)
+        scopes = self.scope(["credential-pool.py"])
+        self.assertEqual(scopes["summary"]["dependents"], [])
+        excluded = archctx.excluded_relations(scopes, archctx.summary_ids(scopes))
+        self.assertEqual([(x["from"], x["to"], x["dependency"]) for x in excluded],
+                         [("delegate-config", "credential-pool", "unclassified"),
+                          ("delegate-tool", "credential-pool", "unclassified")])
+        # A declared direction removes the exclusion and produces the dependents.
+        for edge in self.config["relations"]: edge["dependency"] = "from_to"
+        self.record = accepted(self.config)
+        declared = self.scope(["credential-pool.py"])
+        self.assertEqual(declared["summary"]["dependents"], ["delegate-config", "delegate-tool"])
+        self.assertEqual(archctx.excluded_relations(declared, archctx.summary_ids(declared)), [])
+
     def test_stale_accepted_scope_never_shrinks_the_summary(self):
         # Dogfooded on this repository: the accepted scope predated the current declaration, so
         # a summary that preferred it answered "nothing depends on this" while the working
@@ -250,9 +271,10 @@ class ImpactTest(unittest.TestCase):
         self.assertEqual(change["change_scope"], mcp["change_scope"])
         self.assertEqual(mcp["change_scope"]["accepted_context_hash"], page["accepted_context_hash"])
         self.assertEqual(mcp["change_scope"]["freshness"], "stale")
-        # Compatibility is explicit: old CLI downstream and old map upstream stay unchanged.
-        self.assertEqual(cli_value["reachable_components"], ["B", "C"])
-        self.assertEqual(change["impacted_components"], ["A"])
+        # The misread-prone legacy fields are gone, not deprecated in place.
+        self.assertNotIn("reachable_components", cli_value)
+        self.assertNotIn("legacy_semantics", cli_value)
+        self.assertNotIn("impacted_components", change)
         details = archctx.mcp_value(config, str(state), "architecture_impact", {"files": ["B.py"], "details": True})
         self.assertEqual(details["change_scope"]["accepted"]["direct_components"], ["B"])
         self.config["relations"][0]["to"] = "C"

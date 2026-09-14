@@ -64,7 +64,7 @@ function displayed(id,frame){
   relations:[{id:'raw-edge',from:'service',to:'db',kind:'custom-unclassified',dependency:'unclassified',semantics:'unclassified',
    evidence_state:'accepted_source_evidence',evidence:[{path:'wiring.py',line:8}],omitted_evidence:3}],associations:[{component:'service',paths:['service.py']}],omitted:{dependencies:2}};
  next.development.pending={changed_components:['working-only']};
- next.development.changes=[{path:'service.py',kind:'modify',components:['legacy-only'],impacted_components:['legacy-only'],
+ next.development.changes=[{path:'service.py',kind:'modify',components:['legacy-only'],
   change_scope:{contract:'declared_change_scope/v1',accepted_context_hash:'accepted-C',working_config_hash:'working-config',freshness:'stale',
    accepted:scope,working:{...scope,direct_components:['working-only'],dependencies:['app'],dependents:['db'],omitted:{}},
    limitations:['Synthetic unclassified relation limit'],detail_query:'impact --details'}}];
