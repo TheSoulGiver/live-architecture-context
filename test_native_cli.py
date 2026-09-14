@@ -1,6 +1,7 @@
 """The native entrypoint routes existing owners, without hidden work."""
 import contextlib
 import io
+import json
 from pathlib import Path
 import tempfile
 import subprocess
@@ -50,6 +51,21 @@ class NativeCliTest(unittest.TestCase):
                 refresh.assert_not_called()
             self.assertIn("understand", (repo / "AGENTS.md").read_text())
             self.assertFalse((config.parent / ".archctx/last-good.json").exists())
+
+    def test_map_ensure_and_status_do_not_enter_foreground_or_open_silently(self):
+        config = Path(__file__).parent / "architecture/architecture.json"
+        for flag, method in (("--ensure", "ensure"), ("--status", "status")):
+            output = io.StringIO()
+            with self.subTest(flag=flag), patch("sys.argv", ["archctx", "--config", str(config), "map", flag, "--no-open", "--read-only"]), patch(f"archctx_map.{method}", return_value={"status": "REUSED", "url": "http://127.0.0.1:12345/"}) as selected, patch("archctx_blueprint.main") as foreground, patch("webbrowser.open") as browser, contextlib.redirect_stdout(output):
+                self.assertEqual(archctx.main(), 0)
+            selected.assert_called_once_with(config, None, live=False, port=0)
+            foreground.assert_not_called()
+            browser.assert_not_called()
+            self.assertEqual(json.loads(output.getvalue())["status"], "REUSED")
+
+        with patch("sys.argv", ["archctx", "--config", str(config), "map", "--ensure"]), patch("archctx_map.ensure", return_value={"status": "MISMATCH"}), patch("webbrowser.open") as browser, contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(archctx.main(), 2)
+            browser.assert_not_called()
 
     def test_mcp_analysis_failure_does_not_close_other_tools(self):
         import json

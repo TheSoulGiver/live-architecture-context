@@ -6,6 +6,7 @@ existing watcher/refresh transaction owns publication. This module caches reads.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import subprocess
 import threading
@@ -18,6 +19,11 @@ import archctx
 import archctx_understand as understand
 
 CHANGE_LIMIT, PAYLOAD_BYTES, GIT_BYTES = 128, 64 * 1024, 256 * 1024
+CORE_SOURCE_PATH = Path(__file__).resolve()
+try:
+    CORE_SOURCE_SHA256 = hashlib.sha256(CORE_SOURCE_PATH.read_bytes()).hexdigest()
+except OSError:
+    CORE_SOURCE_SHA256 = None
 
 
 def stamp(path: Path):
@@ -138,9 +144,23 @@ class DevelopmentObserver:
         return self
 
     def _run(self):
+        delay = self.poll_seconds
+        signature = self._signature, self._input_signature
         try:
-            while not self._stop.wait(self.poll_seconds):
+            while True:
+                wait_seconds = delay
+                if self.live and self._pending_controls and (self._attempted != self._input_signature or self._retry_at):
+                    deadline = self._retry_at or self._settled_at + self.settle_seconds
+                    remaining = deadline - time.monotonic()
+                    # Failed observations may leave an overdue deadline; do not spin.
+                    wait_seconds = min(delay, remaining if remaining > 0 else self.poll_seconds)
+                if self._stop.wait(wait_seconds):
+                    break
                 self.poll_once()
+                current = self._signature, self._input_signature
+                # ponytail: idle discovery can take 3s; add file notifications only if that latency is insufficient.
+                delay = min(max(3., self.poll_seconds), delay * 2) if current == signature else self.poll_seconds
+                signature = current
         except Exception as error:
             self._failure(error)  # Keep the old map readable, but never hide a stopped observer.
 
