@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-CONFIG_VERSION, PROTOCOL_VERSION, SERVER_VERSION = 1, "1.0", "0.1.7"
+CONFIG_VERSION, PROTOCOL_VERSION, SERVER_VERSION = 1, "1.0", "0.1.8"
 COMPONENT_FIELDS = ("id", "name", "purpose", "truth_sources", "tags", "code_symbol")
 # Capture core source identity at import, not after a running MCP's file is replaced.
 CORE_SOURCE_PATH = Path(__file__).resolve()
@@ -202,7 +202,7 @@ def usage_result(event: str, value: dict[str, Any]) -> dict[str, Any]:
     for key in ("matches",):
         for item in value.get(key, []) if isinstance(value.get(key), list) else []:
             if isinstance(item, dict) and isinstance(item.get("id"), str): component_ids.append(item["id"])
-    for key in ("components", "direct_components", "reachable_components", "changed_components"):
+    for key in ("components", "direct_components", "scope_components", "dependents", "dependencies", "reachable_components", "changed_components"):
         component_ids.extend(str(item) for item in value.get(key, []) if isinstance(item, str))
     if component_ids: result["component_ids"] = bounded_strings(component_ids)
     for key in ("match_count", "omitted_match_count", "watched_files"):
@@ -363,15 +363,24 @@ def semantic(value: dict[str, Any]) -> str: return sha(json.dumps(value, ensure_
 def architecture_semantic(value: dict[str, Any]) -> str: return semantic({key: item for key, item in value.items() if key != "revision"})
 def substitution(command: list[Any], values: dict[str, str]) -> list[str]: return [values.get(str(x), str(x)) for x in command]
 def run(command: list[Any], repo: Path, timeout: int, values: dict[str, str], extra_env: dict[str, Any] | None = None) -> tuple[list[str], subprocess.CompletedProcess[str]]:
-    argv = substitution(command, {**values, "{python}": sys.executable,
-                                 "{lac_runtime}": str(CORE_SOURCE_PATH.with_name("archctx_runtime.py"))})
+    supported = {**values, "{python}": sys.executable,
+                 "{lac_runtime}": str(CORE_SOURCE_PATH.with_name("archctx_runtime.py"))}
+    argv = substitution(command, supported)
+    # A config written for a different core used to reach the OS verbatim, where an unreplaced
+    # `{placeholder}` only surfaced as "file not found" against an argument nobody could locate.
+    if unresolved := sorted({x for x in argv if len(x) > 2 and x.startswith("{") and x.endswith("}")}):
+        raise ValueError(f"configured command has placeholders this tool does not substitute: {', '.join(unresolved)}. "
+                         f"Supported here: {', '.join(sorted(supported))}. Check the config against the running tool version.")
     if command[:2] == ["{python}", "{lac_runtime}"] and sys.flags.isolated:
         argv.insert(1, "-I")
     env = os.environ.copy()
     if extra_env:
         if not all(isinstance(k, str) and isinstance(v, str) for k, v in extra_env.items()): raise ValueError("command env must be a string map")
         env.update(extra_env)
-    return argv, subprocess.run(argv, cwd=repo, text=True, encoding="utf-8", errors="replace", capture_output=True, timeout=timeout, env=env)
+    try:
+        return argv, subprocess.run(argv, cwd=repo, text=True, encoding="utf-8", errors="replace", capture_output=True, timeout=timeout, env=env)
+    except OSError as error:
+        raise ValueError(f"cannot run configured command {argv[0]!r}: {error}") from error
 
 def graph_changed_files(changed: list[str] | None) -> list[str]: return sorted({str(path).replace("\\", "/") for path in changed or []})
 def graph_changed_files_hash(changed: list[str] | None) -> str: return sha(json.dumps(graph_changed_files(changed), ensure_ascii=False, separators=(",", ":")).encode())
@@ -903,7 +912,13 @@ def status(config_path: Path, explicit: str | None, record: dict[str, Any] | Non
             settings = archify_config(config, repo) if repo else None
             _observed["view_hash"] = sha(settings["view"].read_bytes()) if settings else None
         except (OSError, ValueError): _observed["view_hash"] = None
-    if not old_path.exists(): return {"protocol_version": PROTOCOL_VERSION, "status": "MISSING", "freshness": "missing", "repo": str(repo) if repo else None, "next_action": "run refresh"}
+    if not old_path.exists():
+        # First use fails here too: without this, a refresh that cannot complete is answered by
+        # advising the same refresh again, with no statement of what stopped it.
+        attempt = last_refresh_failure(directory)
+        return {"protocol_version": PROTOCOL_VERSION, "status": "MISSING", "freshness": "missing", "repo": str(repo) if repo else None} | (
+            {"reason": [f"last refresh did not complete ({attempt.get('status')}): {attempt['failures'][0]}"], "last_refresh": attempt,
+             "next_action": "repair the reported refresh failure, then refresh"} if attempt else {"next_action": "run refresh"})
     old = record if record is not None else load(old_path); current = context(config, revision(repo, {"components": facts, "relations": relation_facts}), facts, relation_facts) if repo and not failures else None
     try: visual_failure = archify_stale_reason(config, repo, directory, old) if repo and not failures else None
     except (OSError, ValueError) as error: visual_failure = f"Archify projection check failed: {error}"
@@ -919,9 +934,16 @@ def status(config_path: Path, explicit: str | None, record: dict[str, Any] | Non
     elif candidate_state in ("incomplete", "baseline_incomplete"): reason = ["candidate observation incomplete; tighten configured drift rules before trusting this context"]
     elif candidate_state == "baseline_missing": reason = ["candidate baseline missing; run refresh to establish it"]
     elif candidate_state == "rules_changed": reason = ["candidate rules changed; run refresh to establish a new reviewed baseline"]
-    result = freshness(old, "FRESH" if fresh and not blocked else "STALE", None if fresh and not blocked else reason) | {"last_good_available": True, "last_good_context_hash": old.get("context_hash"), "graph": persistent_graph(old.get("graph", {}))} | candidate_fields(observation)
+    stale = not (fresh and not blocked)
+    # A retained state that is stale because refresh itself failed must not read as a missing
+    # artifact: "run refresh" is the wrong repair when refresh is what is broken.
+    attempt = last_refresh_failure(directory) if stale else None
+    if attempt: reason = reason + [f"last refresh did not complete ({attempt.get('status')}): {attempt['failures'][0]}"]
+    result = freshness(old, "STALE" if stale else "FRESH", reason if stale else None) | {"last_good_available": True, "last_good_context_hash": old.get("context_hash"), "graph": persistent_graph(old.get("graph", {}))} | candidate_fields(observation)
+    if attempt: result["last_refresh"] = attempt
     if candidates: result["next_action"] = "inspect candidates, update canonical config/evidence if accepted, then run accept or reject"
     elif candidate_state in ("baseline_missing", "rules_changed"): result["next_action"] = "review current source, then run refresh with reset_candidate_baseline"
+    elif attempt: result["next_action"] = "repair the reported refresh failure, then refresh"
     return result
 
 def diagnose_status(config_path: Path, explicit: str | None) -> dict[str, Any]:
@@ -1035,6 +1057,35 @@ def _refresh_locked(config_path: Path, explicit: str | None, directory: Path, ch
 
 
 def refresh(config_path: Path, explicit: str | None, changed: list[str] | None = None, acknowledged: dict[str, dict[str, Any]] | None = None, expected_context_hash: str | None = None, reset_candidate_baseline: bool = False) -> dict[str, Any]:
+    """Retain why the last promotion attempt failed, so `status` can stop advising the step that failed."""
+    value = refresh_attempt(config_path, explicit, changed, acknowledged, expected_context_hash, reset_candidate_baseline)
+    try: record_refresh_outcome(state(config_path, explicit), value)
+    except (OSError, ValueError): pass
+    return value
+
+
+def refresh_outcome_path(directory: Path) -> Path: return directory / "last-refresh.json"
+
+
+def record_refresh_outcome(directory: Path, value: dict[str, Any]) -> None:
+    path = refresh_outcome_path(directory)
+    if value.get("status") == "PASS":
+        try: path.unlink(missing_ok=True)
+        except OSError: pass
+        return
+    failures = value.get("failures") if isinstance(value.get("failures"), list) else []
+    atomic(path, {"status": value.get("status"), "at": datetime.now(timezone.utc).isoformat(),
+                  "failures": [str(x)[:500] for x in failures][:8], "next_action": value.get("next_action")})
+
+
+def last_refresh_failure(directory: Path) -> dict[str, Any] | None:
+    path = refresh_outcome_path(directory)
+    try: value = load(path) if path.is_file() else None
+    except ValueError: return None
+    return value if isinstance(value, dict) and value.get("failures") else None
+
+
+def refresh_attempt(config_path: Path, explicit: str | None, changed: list[str] | None = None, acknowledged: dict[str, dict[str, Any]] | None = None, expected_context_hash: str | None = None, reset_candidate_baseline: bool = False) -> dict[str, Any]:
     directory = state(config_path, explicit)
     try:
         with refresh_lock(directory):
@@ -1305,6 +1356,17 @@ def dependency_direction(relation: dict[str, Any]) -> tuple[str, str]:
     return "unclassified", "unclassified"
 
 
+def dependency_graph(ctx: dict[str, Any]) -> dict[str, Any]:
+    """Declared dependency edges only; unclassified kinds keep raw direction and do not propagate."""
+    edges = []
+    for relation in ctx.get("relations", []):
+        direction, _ = dependency_direction(relation)
+        if direction in ("from_to", "to_from"):
+            source, target = (relation["from"], relation["to"]) if direction == "from_to" else (relation["to"], relation["from"])
+            edges.append({"from": source, "to": target})
+    return {"relations": edges}
+
+
 def change_scope(record: dict[str, Any], config: dict[str, Any] | None, paths: list[str],
                  config_path_relative: str | None = None, freshness: str = "unknown", details: bool = False) -> dict[str, Any]:
     """One pure, version-separated review scope for Agent queries and saved-file overlays."""
@@ -1337,13 +1399,7 @@ def change_scope(record: dict[str, Any], config: dict[str, Any] | None, paths: l
             for ident in owners(declared, [path]):
                 associations.setdefault(ident, []).append(path)
         direct = set(associations) | seeds[name]
-        edges = []
-        for relation in ctx.get("relations", []):
-            direction, _ = dependency_direction(relation)
-            if direction in ("from_to", "to_from"):
-                source, target = (relation["from"], relation["to"]) if direction == "from_to" else (relation["to"], relation["from"])
-                edges.append({"from": source, "to": target})
-        graph = {"relations": edges}
+        graph = dependency_graph(ctx)
         downstream = set().union(*(set(authored(graph, ident, "downstream")) for ident in direct)) if direct else set()
         upstream = set().union(*(set(authored(graph, ident, "upstream")) for ident in direct)) if direct else set()
         witnesses = []
@@ -1359,7 +1415,10 @@ def change_scope(record: dict[str, Any], config: dict[str, Any] | None, paths: l
                               "evidence_state": ("accepted_source_evidence" if name == "accepted" else "working_anchor_unvalidated") if evidence_items else "authored_only",
                               "evidence": evidence_items if details else [{k: e[k] for k in ("path", "line", "sha256") if k in e} for e in evidence_items[:1]],
                               "omitted_evidence": 0 if details else max(0, len(evidence_items) - 1)})
-        return {"direct_components": sorted(direct), "dependencies": sorted(downstream - direct), "dependents": sorted(upstream - direct),
+        dependencies, dependents = sorted(downstream - direct), sorted(upstream - direct)
+        return {"direct_components": sorted(direct), "dependencies": dependencies, "dependents": dependents,
+                # Counts are settled before any compaction, so a truncated list never reads as a smaller scope.
+                "counts": {"direct_components": len(direct), "dependencies": len(dependencies), "dependents": len(dependents)},
                 "relations": witnesses, "associations": [{"component": k, "paths": v} for k, v in sorted(associations.items())],
                 "config_seeds": sorted(seeds[name]), "uncovered_files": [p for p in paths if p != config_path_relative and not any(p in v for v in associations.values())], "omitted": {}}
 
@@ -1372,9 +1431,17 @@ def change_scope(record: dict[str, Any], config: dict[str, Any] | None, paths: l
              "limitations": ["Declared dependency directions define checks, not runtime impact. Other kinds retain raw direction and do not propagate.",
                              "Accepted evidence belongs to its context; recheck stale evidence. Working anchors are unvalidated. Uncovered files are unknown."],
              "detail_query": "impact with the same files and --details (MCP details:true); compare context/config hashes"}
+    # One selected scope answers "who reviews this change" in both directions, so no caller has to
+    # know which version-separated scope to read, and none of them defaults to outgoing edges alone.
+    primary = value["accepted"] or (value["working"] if isinstance(value["working"], dict) and "error" not in value["working"] else None)
+    value["summary"] = ({"basis": "accepted" if value["accepted"] else "working"}
+                        | {key: list(primary[key]) for key in ("direct_components", "dependencies", "dependents")}
+                        | {"counts": dict(primary["counts"]), "omitted": {}}) if primary else {
+                            "basis": "none", "direct_components": [], "dependencies": [], "dependents": [],
+                            "counts": {"direct_components": 0, "dependencies": 0, "dependents": 0}, "omitted": {}}
     if not details:
-        groups = [(s, key) for s in (value["accepted"], value["working"]) if s and "omitted" in s
-                  for key in ("direct_components", "dependencies", "dependents", "relations", "associations", "config_seeds", "uncovered_files")]
+        groups = [(s, key) for s in (value["accepted"], value["working"], value["summary"]) if isinstance(s, dict) and "omitted" in s
+                  for key in ("direct_components", "dependencies", "dependents", "relations", "associations", "config_seeds", "uncovered_files") if key in s]
         for parent, key in groups:
             limit = 8 if key == "relations" else 12
             if len(parent[key]) > limit:
@@ -1409,8 +1476,16 @@ def impact(config_path: Path, explicit: str | None, base: str | None, files: lis
         moved = True
     if moved:
         return {"protocol_version": PROTOCOL_VERSION, "status": "RETRY", "freshness": "stale", "reason": "config or accepted context changed during impact; retry the read"}
-    return {"protocol_version": PROTOCOL_VERSION, "kind": "authored_architecture_impact", "provenance": "source_evidence_plus_authored_architecture", "base": base, "changed_files": changed, "direct_components": direct, "reachable_components": reach,
-            "legacy_semantics": {"direct_components": "working evidence owners only", "reachable_components": "all-kind outgoing authored reach from legacy direct IDs in the accepted graph; not dependency or runtime impact"},
+    summary = scopes["summary"]
+    return {"protocol_version": PROTOCOL_VERSION, "kind": "authored_architecture_impact", "provenance": "source_evidence_plus_authored_architecture", "base": base, "changed_files": changed,
+            "scope_basis": summary["basis"], "scope_components": summary["direct_components"], "dependents": summary["dependents"], "dependencies": summary["dependencies"],
+            "counts": summary["counts"], "omitted": summary["omitted"],
+            "answers": {"dependents": "declared incoming dependency edges: components whose review this change can force",
+                        "dependencies": "declared outgoing dependency edges: components this change relies on",
+                        "proof": "declared_review_scope_not_runtime_impact"},
+            "direct_components": direct, "reachable_components": reach,
+            "legacy_semantics": {"direct_components": "working evidence owners only",
+                                 "reachable_components": "deprecated: outgoing-only, all-kind authored reach from legacy direct IDs in the accepted graph. It never reports dependents; read `dependents` for that."},
             "change_scope": scopes, "code_graph": {"available": isinstance((config or {}).get("code_graph"), dict), "note": "Code edges remain separate provider facts; use trace --code."}, "freshness": retained.get("freshness"), "status": retained.get("status"), "warning": retained.get("reason"), "next_action": next_action}
 
 def snapshot_files(directory: Path) -> list[Path]:
@@ -1897,7 +1972,7 @@ def mcp_tools() -> list[dict[str, Any]]:
         {"name": "architecture_understand", "description": "Explicit bounded source understanding after setup; no model invocation. show only reads findings. revise starts a semantic correction from a current analysis ID; optional files selects re-review within its retained scope.", "inputSchema": {"type": "object", "properties": {"question": {"type": "string"}, "files": {"type": "array", "items": {"type": "string"}}, "analysis": {"type": "string"}, "resume": {"type": "string"}, "revise": {"type": "string"}, "show": {"type": "boolean"}, "details": {"type": "boolean"}}}},
         {"name": "architecture_evidence", "description": "Source evidence for one component.", "inputSchema": ident},
         {"name": "architecture_trace", "description": "Authored relations; optional code graph stays separate.", "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}, "direction": {"enum": ["upstream", "downstream"]}, "include_code_edges": {"type": "boolean"}}, "required": ["id"]}},
-        {"name": "architecture_impact", "description": "Shared declared change_scope: direct components, dependencies, dependents, typed relation evidence; accepted and unaccepted working definitions stay separate. Not runtime impact. details expands omissions; legacy reachable_components is all-kind outgoing reach.", "inputSchema": {"type": "object", "properties": {"base": {"type": "string"}, "files": {"type": "array", "items": {"type": "string"}}, "details": {"type": "boolean"}}}},
+        {"name": "architecture_impact", "description": "Declared change scope in both directions by default: scope_components, dependencies, and dependents (who this change can force a review of), plus the shared change_scope with typed relation evidence; accepted and unaccepted working definitions stay separate. Not runtime impact. counts precede compaction; details expands omissions; legacy reachable_components is deprecated outgoing-only reach and never reports dependents.", "inputSchema": {"type": "object", "properties": {"base": {"type": "string"}, "files": {"type": "array", "items": {"type": "string"}}, "details": {"type": "boolean"}}}},
         {"name": "architecture_changed_since", "description": "Retained architecture delta by revision.", "inputSchema": {"type": "object", "properties": {"revision": {"type": "string"}}, "required": ["revision"]}},
         {"name": "architecture_drift", "description": "Configured high-value historical Git-diff candidates only.", "inputSchema": {"type": "object", "properties": {"base": {"type": "string"}}, "required": ["base"]}},
         {"name": "architecture_stale", "description": "Alias for freshness status, including optional read-only diagnose.", "inputSchema": status_input},
@@ -1955,8 +2030,25 @@ def serve_mcp(config_path: Path, explicit: str | None) -> int:
             if "id" in request: print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "error": {"code": -32602, "message": str(e)}}, ensure_ascii=False), flush=True)
     return 0
 
+class Once(argparse._StoreAction):
+    """A repeated single-value option silently replaced the earlier one, so onboarding could
+    report PASS for a declaration the caller never asked for. Refuse the ambiguity instead."""
+    def __call__(self, parser, namespace, values, option_string=None):
+        if option_string and getattr(namespace, f"_given_{self.dest}", False):
+            parser.error(f"{option_string} was given more than once; repeated values are not merged. Pass it once.")
+        setattr(namespace, f"_given_{self.dest}", True)
+        super().__call__(parser, namespace, values, option_string)
+
+
+class Parser(argparse.ArgumentParser):
+    """Every single-value option in every subcommand refuses repetition."""
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.register("action", None, Once); self.register("action", "store", Once)
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(); parser.add_argument("--config", help="defaults to .archctx/architecture.json in the current repository"); parser.add_argument("--state-dir"); sub = parser.add_subparsers(dest="command", required=True)
+    parser = Parser(); parser.add_argument("--config", help="defaults to .archctx/architecture.json in the current repository"); parser.add_argument("--state-dir"); sub = parser.add_subparsers(dest="command", required=True, parser_class=Parser)
     for name in ("snapshot", "mcp", "telemetry"): sub.add_parser(name)
     x = sub.add_parser("setup", help="explicitly prepare compatible project-local analysis/render components and Codex guidance; no model or refresh")
     x.add_argument("--analysis-home", help="reuse an existing compatible source checkout without modifying it"); x.add_argument("--renderer-home", help="reuse an existing compatible renderer checkout without modifying it"); x.add_argument("--command", dest="cli_command", default="archctx")

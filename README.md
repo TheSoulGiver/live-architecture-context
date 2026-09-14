@@ -358,6 +358,13 @@ An MCP client configuration is simply:
 results. With a configured `code_graph.query`, code edges appear in a separate
 `code_graph` field with `confidence: provider_reported`.
 
+`impact` answers in both declared directions by default, with no direction flag
+to remember: `dependents` are the components whose review the change can force,
+`dependencies` are the ones it relies on, `scope_components` are the selected
+owners, and `scope_basis` names which version-separated scope was used
+(`accepted`, `working`, or `none`). `counts` is settled before any compaction,
+so a cut list never reads as a smaller blast radius.
+
 `impact.change_scope` is the same contract used by the Live Development Map:
 direct evidence owners, their declared `dependencies`, and their `dependents`
 (objects to check, not a prediction of runtime breakage). For A calls B and B
@@ -383,9 +390,11 @@ at one anchor per relation, and the scope envelope at 8 KiB; `omitted` and
 (MCP `architecture_impact` with `details: true`) for full scope/evidence and
 compare its context/config hashes. `trace` remains an explicit raw-direction
 relation query. Compatibility fields retain their old meaning: CLI
-`reachable_components` is all-kind outgoing reach, while the observer's
-`impacted_components` is all-kind incoming reach. Neither is the new dependency
-answer; both are labelled `legacy_semantics` and the page uses `change_scope`.
+`reachable_components` is deprecated all-kind outgoing reach and never reports
+dependents, while the observer's `impacted_components` is all-kind incoming
+reach. Neither is the dependency answer; both are labelled `legacy_semantics`,
+the top-level `dependents`/`dependencies` above are, and the page uses
+`change_scope`.
 
 `archctx-calm-query` is the supplied thin adapter for CALM's read-only
 `callers`/`callees` tools. It attaches to an explicitly managed loopback

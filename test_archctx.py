@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 import shlex
 import subprocess
 import sys
@@ -435,6 +436,15 @@ class ArchitectureContextTest(unittest.TestCase):
                         self.assertEqual(archctx.mcp_value(config, None, name, {"diagnose": True}), value)
                     self.assertEqual(contents(), before)
 
+    def test_every_declared_version_agrees_with_the_reported_one(self):
+        # A wheel and a checkout dozens of commits apart both reported 0.1.7, so the one version
+        # a caller can see must at least be the version every artifact here declares.
+        packaged = re.search(r'(?m)^version = "([^"]+)"$', (ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        plugin = json.loads((ROOT / "plugins" / "live-architecture-context" / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
+        self.assertEqual([packaged and packaged.group(1), plugin["version"]],
+                         [archctx.SERVER_VERSION, archctx.SERVER_VERSION])
+        self.assertIn(f"## v{archctx.SERVER_VERSION}\n", (ROOT / "CHANGELOG.md").read_text(encoding="utf-8"))
+
     def test_init_is_one_time_evidence_bound_and_uninstall_only_removes_managed_block(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); (root / "src").mkdir(); (root / "src" / "service.py").write_text("def serve(): pass\n")
@@ -452,6 +462,60 @@ class ArchitectureContextTest(unittest.TestCase):
             self.assertEqual(removed["action"], "removed"); self.assertTrue(config.exists())
             self.assertEqual((root / "AGENTS.md").read_text(), "# local rules\n")
             self.assertEqual(run_raw("--config", str(config), "uninstall-codex", "--target", str(root / "AGENTS.md"))["action"], "unchanged")
+
+    def test_repeated_single_value_options_are_refused_instead_of_silently_overwritten(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); (root / "src").mkdir()
+            (root / "src" / "alpha.py").write_text("def alpha(): pass\n"); (root / "src" / "beta.py").write_text("def beta(): pass\n")
+            # Onboarding used to keep the last --component, bind it to the first --evidence, and
+            # still report PASS for a component the caller never described.
+            refused = subprocess.run([PYTHON, str(TOOL), "init", "--repo", str(root), "--component", "alpha",
+                                      "--component", "beta", "--evidence", "src/alpha.py::def alpha"],
+                                     text=True, capture_output=True)
+            self.assertEqual(refused.returncode, 2)
+            self.assertIn("--component was given more than once", refused.stderr)
+            self.assertNotIn("PASS", refused.stdout)
+            self.assertFalse((root / ".archctx" / "architecture.json").exists())
+            accepted = run_raw("init", "--repo", str(root), "--component", "alpha",
+                               "--evidence", "src/alpha.py::def alpha", "--evidence", "src/beta.py::def beta")
+            self.assertEqual(accepted["status"], "PASS")
+            declared = json.loads((root / ".archctx" / "architecture.json").read_text())["components"]
+            self.assertEqual([x["id"] for x in declared], ["alpha"])
+            self.assertEqual([x["path"] for x in declared[0]["evidence"]], ["src/alpha.py", "src/beta.py"])
+
+    def test_unsupported_placeholder_is_named_and_a_failed_refresh_redirects_status(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); state = root / "state"
+            (root / "source.py").write_text("OWNER\n")
+            (root / "architecture.view.json").write_text(json.dumps({"nodes": [{"id": "owner", "pos": [0, 0]}]}))
+            (root / "architecture.archify.json").write_text("{}\n")
+            config = root / "architecture.json"
+            declared = {"version": 1, "repo": ".", "components": [{"id": "owner", "evidence": [{"path": "source.py", "contains": "OWNER"}]}]}
+            # A config written against a different core: this placeholder is not substituted for
+            # `validate`, and used to reach the OS verbatim as an unfindable program argument.
+            broken = {"view": "architecture.view.json", "output": "architecture.archify.json",
+                      "validate": ["{python}", "{lac_runtime}", "validate", "{archify_html}"]}
+            config.write_text(json.dumps(declared | {"archify": broken}))
+            failed = run(config, state, "refresh")
+            self.assertEqual(failed["status"], "INVALID")
+            self.assertIn("{archify_html}", failed["failures"][0])
+            self.assertIn("{lac_runtime}", failed["failures"][0])
+            first_use = run(config, state, "status")
+            self.assertEqual(first_use["status"], "MISSING")
+            self.assertIn("{archify_html}", " ".join(first_use["reason"]))
+            self.assertEqual(first_use["next_action"], "repair the reported refresh failure, then refresh")
+            config.write_text(json.dumps(declared))
+            self.assertEqual(run(config, state, "refresh")["status"], "PASS")
+            repaired = run(config, state, "status")
+            self.assertEqual(repaired["status"], "FRESH")
+            self.assertNotIn("last_refresh", repaired)
+            config.write_text(json.dumps(declared | {"archify": broken}))
+            self.assertEqual(run(config, state, "refresh")["status"], "INVALID")
+            after = run(config, state, "status")
+            self.assertEqual(after["status"], "STALE")
+            self.assertIn("{archify_html}", " ".join(after["reason"]))
+            self.assertEqual(after["next_action"], "repair the reported refresh failure, then refresh")
+            self.assertEqual(after["last_refresh"]["status"], "INVALID")
 
     def test_cli_uses_only_standard_repo_config_when_omitted(self):
         with tempfile.TemporaryDirectory() as directory:

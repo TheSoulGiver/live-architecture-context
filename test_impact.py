@@ -163,6 +163,41 @@ class ImpactTest(unittest.TestCase):
         self.assertFalse(any(details["accepted"]["omitted"].values()))
         self.assertIn("--details", str(compact["detail_query"]))
 
+    def test_default_answer_reports_dependents_without_a_direction_flag(self):
+        # Field report: changing an SDK file returned only the SDK itself, so both callers that
+        # the same accepted graph already knew about never reached the reviewer.
+        self.config = {"version": 1, "components": [component(x) for x in ("sdk", "memory", "notify")],
+                       "relations": [relation("memory", "sdk"), relation("notify", "sdk")]}
+        self.record = accepted(self.config)
+        summary = self.scope(["sdk.py"])["summary"]
+        self.assertEqual(summary["basis"], "accepted")
+        self.assertEqual(summary["direct_components"], ["sdk"])
+        self.assertEqual(summary["dependents"], ["memory", "notify"])
+        self.assertEqual(summary["dependencies"], [])
+        self.assertEqual(summary["counts"], {"direct_components": 1, "dependencies": 0, "dependents": 2})
+
+    def test_summary_counts_stay_true_when_the_compact_list_is_cut(self):
+        callers = [f"caller-{index:02}" for index in range(20)]
+        self.config = {"version": 1, "components": [component(x) for x in ["sdk", *callers]],
+                       "relations": [relation(caller, "sdk") for caller in callers]}
+        self.record = accepted(self.config)
+        compact, details = self.scope(["sdk.py"]), self.scope(["sdk.py"], details=True)
+        self.assertEqual(len(compact["summary"]["dependents"]), 12)
+        self.assertEqual(compact["summary"]["omitted"]["dependents"], 8)
+        self.assertEqual(compact["summary"]["counts"]["dependents"], 20)
+        self.assertEqual(details["summary"]["dependents"], callers)
+
+    def test_summary_falls_back_to_the_working_definition_and_then_to_none(self):
+        working = copy.deepcopy(self.config)
+        working["relations"] = [relation("A", "B"), relation("B", "C"), relation("C", "A")]
+        self.record = {"context_hash": "b" * 64, "config_hash": "c" * 64,
+                       "context": {"components": [], "relations": []}}
+        self.assertEqual(self.scope(["B.py"], config=working)["summary"]["basis"], "working")
+        unusable = archctx.change_scope(self.record, None, ["B.py"], config_path_relative="architecture.json")
+        self.assertEqual(unusable["summary"],
+                         {"basis": "none", "direct_components": [], "dependencies": [], "dependents": [],
+                          "counts": {"direct_components": 0, "dependencies": 0, "dependents": 0}, "omitted": {}})
+
     def fixture(self):
         root = Path(__file__).parent / ".archctx"
         root.mkdir(exist_ok=True)
