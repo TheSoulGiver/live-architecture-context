@@ -100,7 +100,7 @@ def offer(config: Path, explicit: str | None, event: str, session: str, output: 
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = archctx.Parser(description=__doc__)
     parser.add_argument("--config", required=True, help="explicit reviewed architecture config; never auto-discovered")
     parser.add_argument("--state-dir")
     args = parser.parse_args(argv)

@@ -33,7 +33,9 @@ class MapServiceTest(unittest.TestCase):
         self.state = self.repo / "selected state"
         self.wrapper = self.repo / "lac wrapper.py"
         self.wrapper.write_text(
-            "import sys, time\n"
+            "import sys, time, webbrowser\n"
+            # A test run must not open windows on the machine running it, whatever flags it passes.
+            "webbrowser.open = lambda *args, **kwargs: True\n"
             f"sys.path.insert(0, {str(self.trusted)!r})\n"
             "import archctx, archctx_development\n"
             "if '--_serve' in sys.argv:\n"
@@ -222,7 +224,8 @@ class MapServiceTest(unittest.TestCase):
         (self.repo / "archctx.py").write_text(
             f"from pathlib import Path\nPath({str(marker)!r}).write_text('unexpected execution')\n"
             "raise RuntimeError('consumer shadow executed')\n", encoding="utf-8")
-        program = (f"import sys; sys.path.insert(0, {str(self.trusted)!r}); import archctx; "
+        program = ("import sys, webbrowser; webbrowser.open = lambda *a, **k: True; "
+                   f"sys.path.insert(0, {str(self.trusted)!r}); import archctx; "
                    "sys.argv = ['archctx', *sys.argv[1:]]; raise SystemExit(archctx.main())")
         result = subprocess.run([sys.executable, "-c", program, "--config", str(self.config),
                                  "--state-dir", str(self.state), "map", "--ensure", "--read-only"],

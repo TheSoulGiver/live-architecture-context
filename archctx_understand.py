@@ -1447,7 +1447,7 @@ def native_advance(config_path: Path, explicit: str | None, directory: Path,
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = archctx.Parser(description=__doc__)
     parser.add_argument("--config", default="architecture/architecture.json")
     parser.add_argument("--state-dir")
     commands = parser.add_subparsers(dest="command", required=True)

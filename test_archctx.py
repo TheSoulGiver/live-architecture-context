@@ -1,4 +1,5 @@
 import hashlib
+import inspect
 import json
 import re
 import shlex
@@ -444,6 +445,21 @@ class ArchitectureContextTest(unittest.TestCase):
         self.assertEqual([packaged and packaged.group(1), plugin["version"]],
                          [archctx.SERVER_VERSION, archctx.SERVER_VERSION])
         self.assertIn(f"## v{archctx.SERVER_VERSION}\n", (ROOT / "CHANGELOG.md").read_text(encoding="utf-8"))
+
+    def test_no_declared_console_script_keeps_the_last_repeated_option(self):
+        # Fixing only `archctx` left the sibling entry points silently last-wins, which is the
+        # same defect with a different front door. Every declared script is checked here so a
+        # new one cannot reintroduce it.
+        scripts = re.search(r"(?ms)^\[project\.scripts\]\n(.*?)(?=^\[|\Z)", (ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        targets = re.findall(r'=\s*"([\w.]+):(\w+)"', scripts.group(1))
+        self.assertEqual(len(targets), 6)
+        for module, entry in targets:
+            with self.subTest(script=module):
+                imported = __import__(module)
+                source = inspect.getsource(getattr(imported, entry))
+                self.assertNotIn("argparse.ArgumentParser(", source,
+                                 f"{module}:{entry} builds a parser that accepts repeated single-value options")
+                self.assertRegex(source, r"(archctx\.)?Parser\(")
 
     def test_init_is_one_time_evidence_bound_and_uninstall_only_removes_managed_block(self):
         with tempfile.TemporaryDirectory() as directory:
