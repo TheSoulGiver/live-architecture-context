@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 import shlex
 import subprocess
 import sys
@@ -434,6 +435,15 @@ class ArchitectureContextTest(unittest.TestCase):
                     for name in ("architecture_status", "architecture_stale"):
                         self.assertEqual(archctx.mcp_value(config, None, name, {"diagnose": True}), value)
                     self.assertEqual(contents(), before)
+
+    def test_every_declared_version_agrees_with_the_reported_one(self):
+        # A wheel and a checkout dozens of commits apart both reported 0.1.7, so the one version
+        # a caller can see must at least be the version every artifact here declares.
+        packaged = re.search(r'(?m)^version = "([^"]+)"$', (ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        plugin = json.loads((ROOT / "plugins" / "live-architecture-context" / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
+        self.assertEqual([packaged and packaged.group(1), plugin["version"]],
+                         [archctx.SERVER_VERSION, archctx.SERVER_VERSION])
+        self.assertIn(f"## v{archctx.SERVER_VERSION}\n", (ROOT / "CHANGELOG.md").read_text(encoding="utf-8"))
 
     def test_init_is_one_time_evidence_bound_and_uninstall_only_removes_managed_block(self):
         with tempfile.TemporaryDirectory() as directory:

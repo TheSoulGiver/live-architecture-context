@@ -1,7 +1,11 @@
 # Changelog
 
-## Unreleased
+## v0.1.8
 
+- Bump the declared version. `0.1.7` covered dozens of commits, so an installed
+  wheel and a current checkout both reported `version: 0.1.7` and only
+  `status --diagnose`'s `core_source_sha256` could tell them apart. A field
+  report was misattributed to live defects because of it.
 - Answer `impact` in both declared directions by default. `dependents`,
   `dependencies`, `scope_components` and `scope_basis` are top-level, so no
   caller needs a direction flag to learn who a change can force a review of.
@@ -15,6 +19,8 @@
   was not found. A config written for a different core is now self-diagnosing.
 - Retain why the last refresh failed and report it from `status`, which no
   longer advises `run refresh` as the repair for a refresh that is failing.
+
+## v0.1.7
 
 - Validate optional relation-level source evidence, expose it through `trace`,
   and distinguish evidence-only relation refreshes from topology changes.
