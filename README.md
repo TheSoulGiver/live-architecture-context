@@ -32,7 +32,7 @@ python -m pip install .
 cd your-repository
 archctx setup
 archctx understand "How does this request reach storage?" --files src/service.py src/storage.py
-archctx map
+archctx map --ensure
 ```
 
 Use Python 3.10+, Git and Node.js 20+. `setup` is the explicit one-time network
@@ -55,7 +55,12 @@ Use `archctx understand --show --analysis <analysis-or-scope-id>` or
 Source freshness, captured static dependencies and unknown coverage are reported
 per scope; a fresh selected scope is not a verified whole-project map.
 
-`map` opens the local live system map. People and Agents use the same component
+`map --ensure` starts or reuses the matching local live system map and returns
+without keeping a terminal open; add `--no-open` for silent Agent use.
+`map --status` checks its actual runtime identity without starting anything.
+After a reboot, the same ensure command resumes from retained local state,
+not a new setup or whole-project analysis. Plain `map` remains foreground-compatible.
+People and Agents use the same component
 IDs, accepted source evidence and declared change scope. Project, component,
 flow and change views distinguish confirmed architecture, discovered findings
 and changed source. Its read-only scope selector changes the displayed findings
@@ -123,7 +128,7 @@ mechanical caches can be reclaimed, preserving original and reviewed evidence.
 This is optional understanding, not another Gate.
 
 For this repository's [system map](docs/LIVING_BLUEPRINT.md), run
-`python archctx.py --config architecture/architecture.json map` after `setup`. The page
+`python archctx.py --config architecture/architecture.json map --ensure` after `setup`. The page
 shows the accepted system plus saved worktree changes, without rendering on
 each source save. Codex maintains changed architecture declarations; validation
 then publishes one shared version for the map and Agent queries. Before / Delta

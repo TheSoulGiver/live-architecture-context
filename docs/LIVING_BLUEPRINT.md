@@ -4,7 +4,7 @@ From this checkout, with Python 3.10+, Git and Node.js 20+:
 
 ```sh
 python archctx.py --config architecture/architecture.json setup
-python archctx.py --config architecture/architecture.json map
+python archctx.py --config architecture/architecture.json map --ensure
 ```
 
 `setup` explicitly provisions the compatible source-understanding and Archify
@@ -13,8 +13,9 @@ incompatible or modified installations are preserved. Nothing is downloaded
 by ordinary queries, refresh or the viewer. Provider versions and overrides
 are diagnostics; [source understanding](UNDERSTAND.md) uses the same setup.
 
-Run `setup` once; thereafter `map` is the development entrypoint, with live
-observation enabled by default. It opens an unused loopback port and starts its own
+Run `setup` once; thereafter `map --ensure` is the development entrypoint, with live
+observation enabled by default. It starts or reuses a matching background viewer
+on an unused loopback port and returns its URL. The viewer owns only its
 project-local observer. If no last-good exists, it requests the existing
 refresh transaction to build the first accepted blueprint. Failed validation
 does not create a pretend baseline. An existing last-good remains readable.
@@ -43,8 +44,13 @@ automatically. Invalid intermediate saves and failed refreshes retain the old
 map with specific reasons. The development observation has its own identity;
 its file activity is neither accepted architecture, task progress nor runtime.
 
-Use `archctx map --no-open --port 0` for an unattended local viewer, or
-`archctx map --read-only` for observation without automatic publication. The older
+Use `archctx map --ensure --no-open` for silent Agent startup/reuse, or add
+`--read-only` for observation without automatic publication. `map --status`
+checks the receipt against the live loopback identity without writing state.
+The runtime code, accepted architecture, and source-analysis inputs have separate
+identities: a running server does not prove a fresh diagram or fresh analysis.
+
+Plain `archctx map --no-open --port 0` still runs in the foreground. The older
 `archctx-blueprint` / `python archctx_blueprint.py` entrypoints remain compatible;
 their explicit `--live` flag retains its original meaning, and omission provides
 observation without automatic publication. Ctrl+C stops this viewer and its own
@@ -107,6 +113,41 @@ config, then rebuild their own local index. No previous chat is required.
 The live observer reuses `watch_once`, `updates` and the existing refresh
 transaction. Idle polls use bounded metadata checks; continuous saves coalesce.
 There is no new event ledger, model-per-save analysis or render-per-save loop.
+
+### Silent recovery and load tradeoffs
+
+At a relevant authorized development start, the managed Agent guidance uses
+`map --ensure --no-open` once. It is not a command the user must remember on every
+task, nor a hook on every query/tool call. CLI/MCP context queries require no
+viewer. Closed terminals and lost processes do not erase the retained LKG,
+analysis or history; the next ensure can start a new process using that state.
+It does not install components, clear state or run semantic analysis.
+
+| Choice | Current implementation / boundary |
+| --- | --- |
+| Startup and reuse | Same interpreter/entry, config/state, mode and loaded-code identity; loopback nonce handshake and OS locks prevent duplicate managed instances. |
+| Another live version or mode | `MISMATCH`, preserving the existing process. No PID-only reuse, automatic killing or second writer. The owner must resolve it; ordinary development can continue. |
+| Idle work | Existing bounded observer backs off from 0.75 to at most 3 seconds; detected activity resets it. Pending settle/retry deadlines retain their scheduling. The first save after idle can take about 3 seconds plus scan time to appear. |
+| Local records | One overwritten runtime receipt, bounded startup failure details, no stdout/access-log stream; existing LKG/history retention is unchanged. |
+| Host automation | No new service, login task or global hook. The existing read-only advisory hook is unchanged. A stopped machine has no listener; recovery occurs at the next authorized ensure. |
+
+Only ensure-managed instances participate in reuse; older foreground viewers
+are not adopted or stopped. Failures after the child acquires its owner lock
+can retain a bounded startup reason in the same receipt. Failure before the
+entrypoint loads may provide only an exit code; no diagnostic detail is invented.
+
+Implementation uses stdlib [subprocess](https://docs.python.org/3/library/subprocess.html#subprocess.Popen):
+Windows `CREATE_NO_WINDOW`, Unix `start_new_session`, no shell, no unused pipes.
+Windows [job-object policy](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)
+can still terminate descendants when a host closes; no breakaway privilege or
+survival across reboot is claimed. Recovery is repeatable, not a hidden system service.
+
+Codex supports [SessionStart command hooks](https://learn.chatgpt.com/docs/hooks),
+but exact hook definitions require host trust, and asynchronous hooks are tied
+to their session. Adding an untrusted hook file would not prove automatic startup.
+System autostart, a new file-watcher dependency and layout-only validation reuse
+are deferred: the current gap is safe start/reuse, not a new scheduling platform
+or weaker publication checks.
 
 ## Consume changes during development
 

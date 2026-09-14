@@ -42,7 +42,7 @@
       "id": "blueprint-viewer",
       "type": "frontend",
       "label": "System map",
-      "sublabel": "Project / components / flows / changes",
+      "sublabel": "Live map / silent start or reuse",
       "tag": "human + Agent",
       "pos": [950, 300],
       "size": [220, 76]
@@ -51,7 +51,7 @@
       "id": "development-observer",
       "type": "messagebus",
       "label": "Development observation",
-      "sublabel": "Saved files / coalesced deltas",
+      "sublabel": "Saved files / adaptive idle polling",
       "tag": "not canonical",
       "pos": [950, 530],
       "size": [220, 76]

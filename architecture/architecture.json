@@ -10,6 +10,7 @@
       "The diagram is a focused human view. Source, accepted context, and retained local receipts remain the authority for details and history.",
       "Saved-worktree activity is a separate local observation, not canonical architecture or runtime. Codex maintains semantic declarations; the live page never invokes a model.",
       "Native hook configuration does not prove host trust or delivery; offered cursors are not consumption receipts.",
+      "Managed map startup is project-local and explicit through Agent guidance, not an installed system service. Runtime code identity, accepted architecture and analysis freshness are independent; a live incompatible instance is preserved.",
       "Rendered IR, HTML, comparisons, snapshots, watcher state, and pinned renderer checkout stay in local .archctx state and are not GitHub facts."
     ]
   },
@@ -38,7 +39,7 @@
       "code_symbol": "refresh_lock",
       "tags": ["state", "trust", "local-only"],
       "evidence": [
-        {"path": "archctx.py", "contains": "def refresh_lock(directory: Path):"},
+        {"path": "archctx.py", "contains": "def refresh_lock(directory: Path, lock_name: str = \"refresh.lock\"):"},
         {"path": "archctx.py", "contains": "atomic(last_path(directory), record)"}
       ]
     },
@@ -85,20 +86,22 @@
     {
       "id": "blueprint-viewer",
       "name": "Local system map",
-      "purpose": "Organizes the accepted Archify map around project, components, declared flows and changes. Read-only scope selection shows retained findings and their captured source with independent scope freshness, preserving accepted component IDs and diagram identity. The local HTTP UI owns only its observer.",
-      "truth_sources": ["archctx_blueprint.py"],
+      "purpose": "Organizes accepted architecture, retained discoveries and worktree changes with independent identities. The native ensure path starts or reuses a matching background loopback viewer using an identity handshake and local OS locks; incompatible live instances are preserved. It owns only its observer, not a system service or new truth source.",
+      "truth_sources": ["archctx_blueprint.py", "archctx_map.py"],
       "code_symbol": "render_bundle",
       "tags": ["human-view", "local-only", "source-evidence"],
       "evidence": [
         {"path": "archctx_blueprint.py", "contains": "def render_bundle("},
         {"path": "archctx_blueprint.py", "contains": "if url.path == \"/source\":"},
-        {"path": "archctx_blueprint.py", "contains": "ThreadingHTTPServer((\"127.0.0.1\", args.port)"}
+        {"path": "archctx_blueprint.py", "contains": "ThreadingHTTPServer((\"127.0.0.1\", args.port)"},
+        {"path": "archctx_map.py", "contains": "def ensure(config_path: Path"},
+        {"path": "archctx_map.py", "contains": "def identity(config_path: Path"}
       ]
     },
     {
       "id": "development-observer",
       "name": "Development observation",
-      "purpose": "Caches bounded worktree observations and caller-cursor updates, reusing the core declared change scope and metadata from independently retained source scopes. Idle polls stat known source/receipt paths; ordinary saves update the overlay. Settled definitions request the existing serialized validation/publication without model execution.",
+      "purpose": "Caches bounded worktree observations and caller-cursor updates, reusing declared change scope and retained source-scope metadata. Idle metadata/Git polling backs off to at most three seconds; activity resets it while settle/retry deadlines remain bounded. Ordinary saves update the overlay; settled definitions request existing validation/publication without model execution.",
       "truth_sources": ["archctx_development.py"],
       "code_symbol": "DevelopmentObserver",
       "tags": ["development-overlay", "bounded", "local-only"],
@@ -163,6 +166,11 @@
   ],
   "relations": [
     {
+      "id": "cli-ensures-viewer", "from": "archctx-cli", "to": "blueprint-viewer",
+      "kind": "starts-or-reuses-local-map", "dependency": "from_to",
+      "evidence": [{"path": "archctx.py", "contains": "archctx_map.status if args.map_status else archctx_map.ensure"}]
+    },
+    {
       "id": "cli-reads-source-analysis", "from": "archctx-cli", "to": "source-analysis",
       "kind": "reads-nonblocking-investigation", "dependency": "from_to",
       "evidence": [{"path": "archctx.py", "contains": "analysis = discoveries(config_path, explicit, analysis=analysis, files=files)"}]
@@ -197,7 +205,8 @@
       "dependency": "from_to",
       "evidence": [
         {"path": "archctx_blueprint.py", "contains": "observer = DevelopmentObserver(path, args.state_dir, live=args.live).start()"},
-        {"path": "archctx_blueprint.py", "contains": "development, record = observer.bundle()"}
+        {"path": "archctx_blueprint.py", "contains": "development, record = observer.bundle()"},
+        {"path": "archctx_map.py", "contains": "observer = development.DevelopmentObserver(config_path, str(directory), live=live)"}
       ]
     },
     {
@@ -313,7 +322,7 @@
     {
       "id": "blueprint-loopback-http-boundary",
       "kind": "new-local-http-boundary",
-      "paths": ["archctx_blueprint.py"],
+      "paths": ["archctx_blueprint.py", "archctx_map.py"],
       "added_contains": ["ThreadingHTTPServer("]
     },
     {
@@ -337,6 +346,7 @@
       "archctx_to_archify.py",
       "calm_query.py",
       "archctx_blueprint.py",
+      "archctx_map.py",
       "archctx_development.py",
       "archctx_understand.py",
       "archctx_analysis_inputs.py",
