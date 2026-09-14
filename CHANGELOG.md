@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Answer `impact` in both declared directions by default. `dependents`,
+  `dependencies`, `scope_components` and `scope_basis` are top-level, so no
+  caller needs a direction flag to learn who a change can force a review of.
+  `counts` is settled before compaction, and the outgoing-only
+  `reachable_components` is labelled deprecated rather than left to read as
+  the blast radius.
+- Refuse a repeated single-value CLI option instead of keeping the last one.
+  Onboarding could report `PASS` for a component the caller never described.
+- Name an unsubstituted `{placeholder}` and the placeholders this tool does
+  support, instead of passing it to the OS and reporting only that some file
+  was not found. A config written for a different core is now self-diagnosing.
+- Retain why the last refresh failed and report it from `status`, which no
+  longer advises `run refresh` as the repair for a refresh that is failing.
+
 - Validate optional relation-level source evidence, expose it through `trace`,
   and distinguish evidence-only relation refreshes from topology changes.
 - Add an installed, dependency-free Archctx-to-Archify projection that
