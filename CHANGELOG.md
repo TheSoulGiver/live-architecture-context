@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.1.10
+
+- Stop a stale accepted scope from shrinking the `impact` summary. Dogfooded on
+  this repository, the accepted scope predated the current declaration, so the
+  summary answered `dependents: []` while the working definition already named
+  two — the same under-report the summary exists to prevent, one version apart.
+  The summary is now the union of both scopes, `scope_basis` can read
+  `accepted+working`, and `unvalidated` names the IDs no accepted evidence
+  covers yet instead of dropping them.
+
 ## v0.1.9
 
 - Refuse a repeated single-value option in every declared console script, not
