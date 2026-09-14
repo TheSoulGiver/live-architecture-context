@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.1.11
+
+- Remove `reachable_components` (CLI) and `impacted_components` (observer)
+  rather than leaving them deprecated in place. Each was an all-kind
+  one-directional reach carrying a name that reads like the dependency answer.
+  Keeping them labelled was not enough: a second reader took
+  `reachable_components` as proof the blast-radius fix had not landed, twice,
+  and wrote that conclusion into shared guidance. `legacy_semantics` goes with
+  them.
+- Name the relations an answer could not use. A relation whose kind is not
+  `calls`/`uses`/`depends-on` and which declares no `dependency` propagates
+  nothing, so `impact` returned an empty `dependents` that read as "nothing
+  depends on this" while `trace --direction upstream` listed three components.
+  `excluded_relations` now lists them and `next_action` says to declare a
+  direction before trusting the empty list.
+- Report which `coverage.limitations` entry is wrong and its actual length,
+  instead of restating the rule and leaving the author to find the entry.
+
 ## v0.1.10
 
 - Stop a stale accepted scope from shrinking the `impact` summary. Dogfooded on

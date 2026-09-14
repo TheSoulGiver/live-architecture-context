@@ -325,8 +325,7 @@ class DevelopmentObserver:
             direct = set(archctx.owners(config, paths))
             if old_context["components"]:
                 direct.update(archctx.owners(accepted_config, paths))
-            impacted = set().union(*(set(archctx.authored(old_context, owner, "upstream")) for owner in direct)) if direct else set()
-            changes.append({**item, "components": sorted(direct), "impacted_components": sorted(impacted - direct),
+            changes.append({**item, "components": sorted(direct),
                             "sha256": current.get(path), "observation": "manifested_content" if path in current else "metadata_only",
                             "analysis_changed": bool(changed_analysis.intersection(paths)),
                             "evidence_changed": bool(changed_evidence.intersection(paths)), "covered": bool(direct)})
@@ -376,7 +375,7 @@ class DevelopmentObserver:
                         "analysis_stat_files": len(self._analysis_paths),
                         "analysis_omitted_files": self._analysis_metadata.get("omitted_files", 0),
                         "live": self.live, "metadata_stat_limit": CHANGE_LIMIT,
-                        "legacy_semantics": {"components": "union of working/accepted evidence owners", "impacted_components": "all-kind incoming authored reach in accepted graph, minus legacy direct IDs; use change_scope instead"},
+                        "legacy_semantics": {"components": "union of working/accepted evidence owners"},
                         "omitted_dirty_metadata_stats": max(0, len(dirty) - CHANGE_LIMIT),
                         "auto_publish": "initial reconstruction, then settled shared config/view only" if self.live else "disabled; observation only"}
 

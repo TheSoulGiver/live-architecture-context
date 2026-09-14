@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-CONFIG_VERSION, PROTOCOL_VERSION, SERVER_VERSION = 1, "1.0", "0.1.10"
+CONFIG_VERSION, PROTOCOL_VERSION, SERVER_VERSION = 1, "1.0", "0.1.11"
 COMPONENT_FIELDS = ("id", "name", "purpose", "truth_sources", "tags", "code_symbol")
 # Capture core source identity at import, not after a running MCP's file is replaced.
 CORE_SOURCE_PATH = Path(__file__).resolve()
@@ -202,7 +202,7 @@ def usage_result(event: str, value: dict[str, Any]) -> dict[str, Any]:
     for key in ("matches",):
         for item in value.get(key, []) if isinstance(value.get(key), list) else []:
             if isinstance(item, dict) and isinstance(item.get("id"), str): component_ids.append(item["id"])
-    for key in ("components", "direct_components", "scope_components", "dependents", "dependencies", "reachable_components", "changed_components"):
+    for key in ("components", "direct_components", "scope_components", "dependents", "dependencies", "changed_components"):
         component_ids.extend(str(item) for item in value.get(key, []) if isinstance(item, str))
     if component_ids: result["component_ids"] = bounded_strings(component_ids)
     for key in ("match_count", "omitted_match_count", "watched_files"):
@@ -310,8 +310,16 @@ def coverage(config: dict[str, Any]) -> dict[str, Any] | None:
     limitations = value.get("limitations", [])
     if not isinstance(scope, str) or not scope.strip() or len(scope) > 1000:
         raise ValueError("coverage.scope must be a non-empty string up to 1000 characters")
-    if not isinstance(limitations, list) or len(limitations) > 16 or any(not isinstance(item, str) or not item.strip() or len(item) > 240 for item in limitations):
-        raise ValueError("coverage.limitations must contain at most 16 non-empty strings up to 240 characters")
+    if not isinstance(limitations, list):
+        raise ValueError("coverage.limitations must be a list of at most 16 non-empty strings up to 240 characters")
+    if len(limitations) > 16:
+        raise ValueError(f"coverage.limitations has {len(limitations)} entries; at most 16 are allowed")
+    for index, item in enumerate(limitations):
+        # Reporting only the rule left the author to find the offending entry by hand.
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError(f"coverage.limitations[{index}] must be a non-empty string")
+        if len(item) > 240:
+            raise ValueError(f"coverage.limitations[{index}] is {len(item)} characters; at most 240 are allowed: {item[:60]!r}...")
     return {"scope": scope, "limitations": limitations}
 
 def relation_id(relation: dict[str, Any]) -> str:
@@ -1359,6 +1367,27 @@ def dependency_direction(relation: dict[str, Any]) -> tuple[str, str]:
 SCOPE_KEYS = ("direct_components", "dependencies", "dependents")
 
 
+def summary_ids(scopes: dict[str, Any]) -> set[str]:
+    return {x for key in SCOPE_KEYS for x in scopes["summary"][key]}
+
+
+def excluded_relations(scopes: dict[str, Any], selected: set[str]) -> list[dict[str, Any]]:
+    """Relations that touch the answer but carry no declared direction, so they propagated nothing.
+
+    Without naming these, an empty `dependents` is indistinguishable from a component nothing
+    depends on, which is the exact wrong conclusion this command exists to prevent.
+    """
+    seen: dict[str, dict[str, Any]] = {}
+    for name in ("accepted", "working"):
+        scope = scopes.get(name)
+        if not isinstance(scope, dict) or "omitted" not in scope: continue
+        for relation in scope["relations"]:
+            if relation["dependency"] in ("from_to", "to_from") or relation["id"] in seen: continue
+            if not {relation["from"], relation["to"]} & selected: continue
+            seen[relation["id"]] = {key: relation[key] for key in ("id", "from", "to", "kind", "dependency")} | {"scope": name}
+    return sorted(seen.values(), key=lambda item: item["id"])[:12]
+
+
 def dependency_graph(ctx: dict[str, Any]) -> dict[str, Any]:
     """Declared dependency edges only; unclassified kinds keep raw direction and do not propagate."""
     edges = []
@@ -1472,11 +1501,13 @@ def impact(config_path: Path, explicit: str | None, base: str | None, files: lis
     changed = paths_for(repo, base, files) if repo else paths_for(Path(), None, files)
     relative = os.path.relpath(config_path, repo).replace("\\", "/") if repo else None
     scopes = change_scope(record, config, changed, relative, retained.get("freshness", "unknown"), details)
-    # Preserve the old fields' direction/selection, but do not use them as the shared contract.
     direct = owners(config, changed) if config and not (scopes.get("working") or {}).get("error") else []
-    ctx = record.get("context", {})
-    reach = sorted(set().union(*(set(authored(ctx, x, "downstream")) for x in direct))) if direct else []
-    next_action = "inspect affected evidence and test" if retained.get("status") == "FRESH" else "refresh" if direct else "no canonical evidence owner; no architecture refresh needed"
+    # An empty `dependents` must never be readable as "nothing depends on this" when relations
+    # touching the selection were skipped for having no declared direction.
+    excluded = excluded_relations(scopes, summary_ids(scopes))
+    next_action = ("declare `dependency` on the listed relations, or confirm they carry none, before trusting an empty dependents list" if excluded
+                   else "inspect affected evidence and test" if retained.get("status") == "FRESH"
+                   else "refresh" if direct else "no canonical evidence owner; no architecture refresh needed")
     try:
         current_record = load(last_path(state(config_path, explicit))) if last_path(state(config_path, explicit)).exists() else {}
         moved = current_record != record or config is not None and load(config_path) != config
@@ -1488,13 +1519,13 @@ def impact(config_path: Path, explicit: str | None, base: str | None, files: lis
     return {"protocol_version": PROTOCOL_VERSION, "kind": "authored_architecture_impact", "provenance": "source_evidence_plus_authored_architecture", "base": base, "changed_files": changed,
             "scope_basis": summary["basis"], "scope_components": summary["direct_components"], "dependents": summary["dependents"], "dependencies": summary["dependencies"],
             "counts": summary["counts"], "unvalidated": summary["unvalidated"], "omitted": summary["omitted"],
+            "excluded_relations": excluded,
             "answers": {"dependents": "declared incoming dependency edges: components whose review this change can force",
                         "dependencies": "declared outgoing dependency edges: components this change relies on",
                         "unvalidated": "IDs the current declaration adds that no accepted source evidence covers yet; refresh to validate them",
+                        "excluded_relations": "relations touching this selection whose direction is undeclared, so they could not contribute to dependents/dependencies",
                         "proof": "declared_review_scope_not_runtime_impact"},
-            "direct_components": direct, "reachable_components": reach,
-            "legacy_semantics": {"direct_components": "working evidence owners only",
-                                 "reachable_components": "deprecated: outgoing-only, all-kind authored reach from legacy direct IDs in the accepted graph. It never reports dependents; read `dependents` for that."},
+            "direct_components": direct,
             "change_scope": scopes, "code_graph": {"available": isinstance((config or {}).get("code_graph"), dict), "note": "Code edges remain separate provider facts; use trace --code."}, "freshness": retained.get("freshness"), "status": retained.get("status"), "warning": retained.get("reason"), "next_action": next_action}
 
 def snapshot_files(directory: Path) -> list[Path]:
@@ -1981,7 +2012,7 @@ def mcp_tools() -> list[dict[str, Any]]:
         {"name": "architecture_understand", "description": "Explicit bounded source understanding after setup; no model invocation. show only reads findings. revise starts a semantic correction from a current analysis ID; optional files selects re-review within its retained scope.", "inputSchema": {"type": "object", "properties": {"question": {"type": "string"}, "files": {"type": "array", "items": {"type": "string"}}, "analysis": {"type": "string"}, "resume": {"type": "string"}, "revise": {"type": "string"}, "show": {"type": "boolean"}, "details": {"type": "boolean"}}}},
         {"name": "architecture_evidence", "description": "Source evidence for one component.", "inputSchema": ident},
         {"name": "architecture_trace", "description": "Authored relations; optional code graph stays separate.", "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}, "direction": {"enum": ["upstream", "downstream"]}, "include_code_edges": {"type": "boolean"}}, "required": ["id"]}},
-        {"name": "architecture_impact", "description": "Declared change scope in both directions by default: scope_components, dependencies, and dependents (who this change can force a review of), plus the shared change_scope with typed relation evidence; accepted and unaccepted working definitions stay separate. Not runtime impact. the summary unions accepted and working scopes so a stale accepted scope cannot shrink it, and unvalidated names declaration-only IDs; counts precede compaction; details expands omissions; legacy reachable_components is deprecated outgoing-only reach and never reports dependents.", "inputSchema": {"type": "object", "properties": {"base": {"type": "string"}, "files": {"type": "array", "items": {"type": "string"}}, "details": {"type": "boolean"}}}},
+        {"name": "architecture_impact", "description": "Declared change scope in both directions by default: scope_components, dependencies, and dependents (who this change can force a review of), plus the shared change_scope with typed relation evidence; accepted and unaccepted working definitions stay separate. Not runtime impact. the summary unions accepted and working scopes so a stale accepted scope cannot shrink it, and unvalidated names declaration-only IDs; counts precede compaction; details expands omissions; excluded_relations names relations that could not propagate because their direction is undeclared, so an empty dependents is never silent.", "inputSchema": {"type": "object", "properties": {"base": {"type": "string"}, "files": {"type": "array", "items": {"type": "string"}}, "details": {"type": "boolean"}}}},
         {"name": "architecture_changed_since", "description": "Retained architecture delta by revision.", "inputSchema": {"type": "object", "properties": {"revision": {"type": "string"}}, "required": ["revision"]}},
         {"name": "architecture_drift", "description": "Configured high-value historical Git-diff candidates only.", "inputSchema": {"type": "object", "properties": {"base": {"type": "string"}}, "required": ["base"]}},
         {"name": "architecture_stale", "description": "Alias for freshness status, including optional read-only diagnose.", "inputSchema": status_input},

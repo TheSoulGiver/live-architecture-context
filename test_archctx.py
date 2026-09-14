@@ -437,6 +437,22 @@ class ArchitectureContextTest(unittest.TestCase):
                         self.assertEqual(archctx.mcp_value(config, None, name, {"diagnose": True}), value)
                     self.assertEqual(contents(), before)
 
+    def test_coverage_limitation_error_names_the_entry_and_its_real_length(self):
+        base = {"version": 1, "repo": ".", "components": [{"id": "c", "evidence": [{"path": "s.py", "contains": "s"}]}]}
+        long = "x" * 300
+        with self.assertRaises(ValueError) as caught:
+            archctx.coverage(base | {"coverage": {"scope": "s", "limitations": ["ok", long]}})
+        message = str(caught.exception)
+        # Reporting only the rule left the author to find the offending entry by hand.
+        self.assertIn("limitations[1]", message)
+        self.assertIn("300 characters", message)
+        with self.assertRaisesRegex(ValueError, r"limitations\[0\] must be a non-empty string"):
+            archctx.coverage(base | {"coverage": {"scope": "s", "limitations": ["  "]}})
+        with self.assertRaisesRegex(ValueError, "has 17 entries"):
+            archctx.coverage(base | {"coverage": {"scope": "s", "limitations": ["e"] * 17}})
+        self.assertEqual(archctx.coverage(base | {"coverage": {"scope": "s", "limitations": ["ok"]}}),
+                         {"scope": "s", "limitations": ["ok"]})
+
     def test_every_declared_version_agrees_with_the_reported_one(self):
         # A wheel and a checkout dozens of commits apart both reported 0.1.7, so the one version
         # a caller can see must at least be the version every artifact here declares.
@@ -772,7 +788,7 @@ class ArchitectureContextTest(unittest.TestCase):
 
             impact = archctx.impact(config, str(state), None, ["wiring.py"])
             self.assertEqual(impact["direct_components"], ["b", "a"])
-            self.assertEqual(impact["reachable_components"], ["a", "b"])
+            self.assertNotIn("reachable_components", impact)
             self.assertEqual(impact["kind"], "authored_architecture_impact")
             with patch.object(archctx, "refresh", wraps=archctx.refresh) as refresh:
                 unrelated.write_text("# changed unrelated implementation\n", encoding="utf-8")

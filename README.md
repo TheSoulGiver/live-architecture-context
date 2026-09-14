@@ -392,12 +392,17 @@ at one anchor per relation, and the scope envelope at 8 KiB; `omitted` and
 `omitted_evidence` make missing detail explicit. Use the same `impact --details`
 (MCP `architecture_impact` with `details: true`) for full scope/evidence and
 compare its context/config hashes. `trace` remains an explicit raw-direction
-relation query. Compatibility fields retain their old meaning: CLI
-`reachable_components` is deprecated all-kind outgoing reach and never reports
-dependents, while the observer's `impacted_components` is all-kind incoming
-reach. Neither is the dependency answer; both are labelled `legacy_semantics`,
-the top-level `dependents`/`dependencies` above are, and the page uses
-`change_scope`.
+relation query. The CLI's `reachable_components` and the observer's
+`impacted_components` are removed, not deprecated in place: each was an
+all-kind one-directional reach under a name that read like the dependency
+answer, and readers acted on them as such. Use the top-level
+`dependents`/`dependencies`; the page uses `change_scope`.
+
+Only exact `calls`, `uses` and `depends-on` default to a dependency direction.
+A relation of any other kind without an explicit `"dependency"` cannot
+propagate, so `impact` lists it in `excluded_relations` and says so in
+`next_action`. An empty `dependents` therefore never doubles as "nothing
+depends on this".
 
 `archctx-calm-query` is the supplied thin adapter for CALM's read-only
 `callers`/`callees` tools. It attaches to an explicitly managed loopback
