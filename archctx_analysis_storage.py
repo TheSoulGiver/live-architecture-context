@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 CAPACITY_BYTES = 256 * 1024 * 1024
-RECEIPT_BYTES = 64 * 1024
+RECEIPT_BYTES = 256 * 1024
 GRAPH_BYTES = 8 * 1024 * 1024
 KEEP_MARKERS = {".keep", "keep", "keep.json"}
 MECHANICAL_TMP = re.compile(
@@ -49,7 +49,7 @@ def small_json(path: Path) -> dict[str, Any]:
     with path.open("rb") as stream:
         raw = stream.read(RECEIPT_BYTES + 1)
     if len(raw) > RECEIPT_BYTES:
-        raise ValueError("analysis storage receipt exceeds 64 KiB")
+        raise ValueError(f"analysis storage receipt exceeds {RECEIPT_BYTES} bytes")
     value = json.loads(raw)
     if not isinstance(value, dict):
         raise ValueError("analysis storage receipt must be an object")

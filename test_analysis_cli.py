@@ -46,9 +46,16 @@ class AnalysisCliTest(unittest.TestCase):
     def test_active_files_keep_native_behavior_and_invalid_modes_do_not_execute(self):
         with patch.object(understand, "native_understand", return_value={"status": "NEEDS_AGENT"}) as native:
             self.assertEqual(self.cli("understand", "Why?", "--files", "source.py")[0], 0)
-            native.assert_called_once_with(self.config, str(self.state), "Why?", ["source.py"], None)
+            native.assert_called_once_with(self.config, str(self.state), "Why?", ["source.py"], None, None)
             native.reset_mock()
-            for arguments in (("--analysis", "a" * 64), ("--show", "Why?"), ("--show", "--resume", "a" * 64)):
+            self.assertEqual(self.cli("understand", "--revise", "b" * 64, "--files", "source.py")[0], 0)
+            native.assert_called_once_with(self.config, str(self.state), None, ["source.py"], None, "b" * 64)
+            native.reset_mock()
+            archctx.mcp_value(self.config, str(self.state), "architecture_understand", {"revise": "b" * 64, "files": ["source.py"]})
+            native.assert_called_once_with(self.config, str(self.state), None, ["source.py"], None, "b" * 64)
+            native.reset_mock()
+            for arguments in (("--analysis", "a" * 64), ("--show", "Why?"), ("--show", "--resume", "a" * 64),
+                              ("--show", "--revise", "a" * 64), ("--resume", "a" * 64, "--revise", "a" * 64)):
                 with self.subTest(arguments=arguments):
                     self.assertEqual(self.cli("understand", *arguments)[0], 2)
             native.assert_not_called()

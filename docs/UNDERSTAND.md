@@ -113,6 +113,32 @@ eight-item `previous_system` preview. Layers and ordered tour steps remain whole
 in storage. If that full evidence is missing or changed, `NEEDS_AGENT` requests
 complete groups and tour; the preview cannot stand in for omitted content.
 
+### Correct an interpretation without changing source
+
+Do not edit a published run or change source just to bypass reuse. Read its
+current findings and evidence, then explicitly start a successor:
+
+```sh
+archctx understand --show --analysis <current-analysis-id>
+archctx understand --revise <current-analysis-id> --files src/service.py
+archctx understand --resume <returned-new-analysis-id>
+```
+
+`--revise` (MCP `architecture_understand.revise`) binds the exact current
+analysis and graph as predecessor. Optional `--files` selects what needs semantic
+re-review **within the original scope**; omitted files means re-review that whole
+scope. Existing incoming dependencies also invalidate reuse as needed. Unchanged
+captured extraction and unaffected semantic results can be reused, while source
+and symbol identities remain checked. System grouping/tour still requires Agent
+judgment, even when the assembled graph is unchanged. No model is invoked.
+
+The successor gets its own run, `revision_of` lineage and normal findings/review
+path. Original source, graphs, receipts, accepted architecture and measurements
+remain untouched. A concurrent same-scope publication rejects a late result;
+read the latest findings and start a new explicit correction instead of rebasing
+old work. Repeating the same completed successor resume is idempotent. For
+changed source, use ordinary `understand --files`, not a stale revision token.
+
 ## Review into the same system map
 
 ```sh
@@ -166,10 +192,16 @@ historical analysis bytes, not the current worktree.
 
 Each request selects at most 64 files. Selected source, captured dependency
 bytes and resolver configuration share a 4 MiB budget; raw graphs remain bounded
-to 8 MiB, each receipt to 64 KiB and the project catalog to 256 KiB. Compact
+to 8 MiB, full input/import receipts to 256 KiB and the project catalog to
+256 KiB. Persisted JSON budgets use the exact compact UTF-8 bytes written,
+including the newline; an oversize prepared input is rejected before a semantic
+handoff. System-result inputs retain their separate 64 KiB bound. Compact
 queries show at most eight scope summaries with explicit omissions; this is
 a response bound, not an eight-run retention limit. `updates` retains its
 16 KiB response budget. Idle observers stat bounded known paths and receipts.
+Older builds with the former 64 KiB receipt reader cannot consume larger new
+receipts; use the matching project-local CLI/viewer version. This change does
+not upgrade shared installations or rewrite existing receipts.
 
 Analysis storage uses a 256 MiB budget based on retained file sizes, checked at
 explicit write boundaries. Under pressure it can reclaim only known mechanical
@@ -189,6 +221,20 @@ Lazy imports, embedded languages and cross-batch calls can be missed; absent
 edges are not proof of no dependency. Dedicated domain/flow analysis, complete
 runtime reachability and automatic host scheduling are not supplied. CALM remains
 a separate optional code-fact provider.
+
+The pinned extractor does not support GDScript (`.gd`). A skipped or unreadable
+file is not an empty successful analysis: native/import paths keep prior results
+and report unknown structural coverage. Select a supported native scope, and use
+source-reviewed canonical evidence for other files. Dynamic JavaScript may have
+raw call records without extracted named functions (for example IIFE/prototype
+forms); inspect the captured facts and source, not just final graph edge counts.
+
+Analysis findings remain readable before canonical acceptance. When rendering is
+configured, layout/validation failure still prevents a new accepted bundle so
+Agent context, IR and HTML cannot claim mismatched current versions. Keep full
+relations in canonical definitions and use a smaller selected view for the map.
+Independent semantic and visual publication is not implemented by bypassing
+Archify validation.
 
 The expert `archctx-understand prepare/finish/import/show`,
 `python archctx_understand.py`, `archctx-blueprint` and
