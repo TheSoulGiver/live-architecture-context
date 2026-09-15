@@ -2,13 +2,13 @@
 """Source-grounded live architecture context; CALM/Archify remain external owners."""
 from __future__ import annotations
 
-import argparse, fnmatch, hashlib, json, os, shlex, shutil, subprocess, sys, time, uuid
+import argparse, fnmatch, hashlib, json, os, re, shlex, shutil, subprocess, sys, time, uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-CONFIG_VERSION, PROTOCOL_VERSION, SERVER_VERSION = 1, "1.0", "0.1.11"
+CONFIG_VERSION, PROTOCOL_VERSION, SERVER_VERSION = 1, "1.0", "0.1.12"
 COMPONENT_FIELDS = ("id", "name", "purpose", "truth_sources", "tags", "code_symbol")
 # Capture core source identity at import, not after a running MCP's file is replaced.
 CORE_SOURCE_PATH = Path(__file__).resolve()
@@ -612,6 +612,40 @@ def archify_artifact_reason(directory: Path, receipt: dict[str, Any]) -> str | N
     return None
 
 
+def decoded_projection_ids(text: str) -> str:
+    """Restore the declared IDs the projection hex-encodes, so a renderer complaint is readable."""
+    def restore(match: re.Match[str]) -> str:
+        try: return match[1] + bytes.fromhex(match[2]).decode("utf-8")
+        except (ValueError, UnicodeDecodeError): return match[0]
+    return re.sub(r"\b([cr]-)((?:[0-9a-f]{2})+)\b", restore, text)
+
+
+def renderer_layout_failure(raw: str) -> bool:
+    """True only for a render-stage layout complaint about geometry this tool never supplied.
+
+    The projection emits `id`/`from`/`to`/`label` and no routing, so this failure is the renderer
+    rejecting its own automatic route. Nothing the caller declares can clear it.
+    """
+    try: value = json.loads(raw)
+    except (json.JSONDecodeError, ValueError): return False
+    return (isinstance(value, dict) and value.get("stage") == "render" and value.get("command") == "validate"
+            and isinstance(value.get("error"), str) and "layout validation failed" in value["error"])
+
+
+def renderer_diagnostic(raw: str) -> str:
+    """Report the renderer's own message, not a slice of whatever its output ended with.
+
+    The renderer emits a JSON envelope whose `error` explains the failure and whose other keys
+    repeat the offending subject. Tailing the raw text cut the explanation off and kept the noise.
+    """
+    try: value = json.loads(raw)
+    except (json.JSONDecodeError, ValueError): value = None
+    if isinstance(value, dict) and isinstance(value.get("error"), str):
+        stage = " ".join(str(value[key]) for key in ("command", "stage") if isinstance(value.get(key), str))
+        return decoded_projection_ids(f"[{stage}] {value['error']}" if stage else value["error"])[:2000]
+    return decoded_projection_ids(raw)[-1000:]
+
+
 def archify_projection(config: dict[str, Any], repo: Path, directory: Path, candidate: dict[str, Any], previous: dict[str, Any] | None) -> dict[str, Any]:
     settings = archify_config(config, repo)
     if settings is None: return {"configured": False}
@@ -626,10 +660,20 @@ def archify_projection(config: dict[str, Any], repo: Path, directory: Path, cand
         projected = project(config, json.loads(view_bytes.decode("utf-8")), context_value=candidate, repository=repository)
         atomic(ir, projected)
         _, result = run(settings["validate"], repo, settings["timeout_seconds"], {"{repo}": str(repo), "{state}": str(directory), "{archify_output}": str(ir)})
+        layout_failure = None
         if result.returncode:
-            diagnostic = result.stderr.strip() or result.stdout.strip()
-            raise RuntimeError(f"Archify validation failed ({result.returncode}): {diagnostic[-1000:]}")
+            raw = result.stderr.strip() or result.stdout.strip()
+            diagnostic = renderer_diagnostic(raw)
+            # A renderer that cannot lay out a diagram has produced no diagram to disagree with the
+            # accepted context, and no query reads one. Source evidence still gates promotion; only
+            # the visual bundle is withheld, and the reason travels with the receipt.
+            if not renderer_layout_failure(raw):
+                raise RuntimeError(f"Archify validation failed ({result.returncode}): {diagnostic}")
+            layout_failure = diagnostic
         receipt: dict[str, Any] = {"configured": True, "view": settings["view_relative"], "view_sha256": sha(view_bytes), "output": settings["output_relative"], "generation": str(generation.resolve()), "ir": str(ir.resolve()), "ir_sha256": sha(ir.read_bytes()), "validation": "PASS", "repository_evidence": repository or {"status": "not_available_for_current_evidence"}}
+        if layout_failure is not None:
+            return receipt | {"validation": "LAYOUT_FAILED", "visual": "unavailable", "layout_failure": layout_failure,
+                              "next_action": "queries are unaffected; report this renderer layout failure upstream, or adjust the view positions"}
         if settings["render"] is not None:
             from archctx_blueprint import render_bundle
 
@@ -666,6 +710,13 @@ def archify_stale_reason(config: dict[str, Any], repo: Path, directory: Path, re
         return "Archify projection is missing; run refresh"
     if receipt.get("view") != settings["view_relative"] or receipt.get("output") != settings["output_relative"]:
         return "Archify projection configuration changed; run refresh"
+    # A withheld visual bundle is a settled outcome, not a reason to keep re-running the renderer
+    # that already reported it cannot lay this diagram out.
+    if receipt.get("validation") == "LAYOUT_FAILED":
+        try:
+            return None if sha(settings["view"].read_bytes()) == receipt.get("view_sha256") else "Archify view changed; run refresh"
+        except OSError:
+            return "Archify view is missing or unreadable; run refresh"
     # Legacy projections did not bind a visual bundle to the accepted context.
     # New render configurations must: an intact generation from another
     # accepted refresh is still stale if its receipt names a different state.

@@ -6,7 +6,39 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import archctx
 from archctx_to_archify import archify_id, project, repository_evidence, validate_source
+
+
+LAYOUT_ERROR = json.dumps({
+    "schemaVersion": 1, "ok": False, "command": "validate", "stage": "render", "type": "architecture",
+    "input": "x.json",
+    "error": ('Architecture layout validation failed:\n- [clean-flow/endpoint-side-direction] architecture '
+              'connections[3] id "r-7375627374726174652d6576616c756174696f6e2d2d646570656e64735f6f6e2d2d6c69662d737562737472617465" '
+              '"c-7375627374726174652d6576616c756174696f6e" -> "c-6c69662d737562737472617465" does not honor '
+              'inferred fromSide "right"; keep automatic routing so the renderer can use a side-aware bridge.'),
+    "subject": {"collection": "connections", "index": 3, "padding": "n" * 1200},
+})
+
+
+class RendererDiagnosticTest(unittest.TestCase):
+    def test_the_renderer_message_survives_and_its_ids_are_readable(self):
+        # The envelope puts `error` first and a large subject last, so tailing the raw text cut the
+        # explanation off and kept the noise, and the hex-encoded IDs were unreadable either way.
+        reported = archctx.renderer_diagnostic(LAYOUT_ERROR)
+        self.assertTrue(reported.startswith("[validate render] Architecture layout validation failed:"))
+        self.assertIn('"r-substrate-evaluation--depends_on--lif-substrate"', reported)
+        self.assertIn('"c-substrate-evaluation" -> "c-lif-substrate"', reported)
+        self.assertNotIn("7375627374726174", reported)
+        self.assertNotIn("padding", reported)
+
+    def test_only_a_render_stage_layout_complaint_is_treated_as_withheld_visuals(self):
+        self.assertTrue(archctx.renderer_layout_failure(LAYOUT_ERROR))
+        for altered in ({"stage": "source"}, {"command": "deliver"}, {"error": "evidence sha256 mismatch"}):
+            with self.subTest(**altered):
+                self.assertFalse(archctx.renderer_layout_failure(json.dumps(json.loads(LAYOUT_ERROR) | altered)))
+        self.assertFalse(archctx.renderer_layout_failure("Traceback: renderer crashed"))
+        self.assertEqual(archctx.renderer_diagnostic("Traceback: renderer crashed"), "Traceback: renderer crashed")
 
 
 def component(ident, **extra):

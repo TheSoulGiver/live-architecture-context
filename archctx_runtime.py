@@ -52,6 +52,34 @@ def executable(name: str) -> str:
     return value
 
 
+def npm_with_cli(windows: bool | None = None) -> tuple[Path, Path]:
+    """Select an npm that actually ships its CLI, not the first PATH entry named npm.
+
+    A wrapper or shim earlier on PATH is a normal thing to have, and it is not a broken Node
+    installation; blaming Node sent the reader to repair something that was already fine.
+    """
+    windows = os.name == "nt" if windows is None else windows
+    names = ("npm.cmd", "npm.CMD", "npm.exe", "npm") if windows else ("npm",)
+    seen, shadowing = [], []
+    for name in names:
+        directories = os.environ.get("PATH", "").split(os.pathsep)
+        for directory in directories:
+            if not directory: continue
+            candidate = Path(directory) / name
+            if not candidate.is_file() or candidate in seen: continue
+            seen.append(candidate)
+            script = candidate.parent / "node_modules/npm/bin/npm-cli.js"
+            if script.is_file() or not windows:
+                return candidate, script
+            shadowing.append(str(candidate))
+    if not seen:
+        raise ValueError("LAC setup needs npm on PATH")
+    raise ValueError("no npm on PATH ships an adjacent node_modules/npm/bin/npm-cli.js. "
+                     f"Checked, in PATH order: {', '.join(shadowing[:6])}. "
+                     "These are most likely wrappers or shims shadowing a real npm; Node itself may be fine. "
+                     "Put the directory of a full npm installation earlier on PATH for setup.")
+
+
 def node_runtime(minimum: int, cwd: Path) -> str:
     node = executable("node")
     version = execute([node, "--version"], cwd)
@@ -141,11 +169,8 @@ def setup(config_path: Path, explicit: str | None, analysis_home: str | None = N
             pnpm = runner / "node_modules/pnpm/bin/pnpm.cjs"
             if not pnpm.exists():
                 runner.mkdir(parents=True, exist_ok=True)
-                npm = Path(executable("npm"))
                 # Invoke npm's JS directly on Windows, avoiding .cmd quoting and POSIX shim selection.
-                npm_script = npm.parent / "node_modules/npm/bin/npm-cli.js"
-                if os.name == "nt" and not npm_script.is_file():
-                    raise ValueError("npm.cmd has no adjacent npm CLI; repair this Node installation before setup")
+                npm, npm_script = npm_with_cli()
                 npm_command = [node, str(npm_script)] if os.name == "nt" else [str(npm)]
                 execute([*npm_command, "install", "--prefix", str(runner), "--cache", str(directory / "tools/npm-cache"),
                          "--no-save", "--ignore-scripts", "pnpm@" + PNPM_VERSION], runner)

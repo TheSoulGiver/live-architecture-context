@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.1.12
+
+- Stop a renderer that cannot lay out a diagram from blocking the accepted
+  context. The projection emits only `id`/`from`/`to`/`label`, so a
+  render-stage layout complaint is the renderer rejecting its own automatic
+  route, and the only advice it gives — keep automatic routing — is already
+  what happened. Source evidence still gates promotion; the visual bundle is
+  withheld instead, recorded as `validation: LAYOUT_FAILED` with
+  `visual: unavailable`, and it does not re-stale the context on every read.
+- Report the renderer's own message instead of the tail of its output. The
+  envelope puts `error` first and a large subject last, so tailing kept the
+  noise and cut the explanation off mid-sentence. Projection IDs are decoded
+  back to declared IDs, so `c-7375627374726174652d6576616c756174696f6e` reads
+  as `c-substrate-evaluation`.
+- Select an npm that ships its CLI rather than the first PATH entry named npm.
+  A wrapper or shim earlier on PATH is a normal thing to have and is not a
+  broken Node installation; the old message sent the reader to repair
+  something that was already fine. The failure now names what it checked, in
+  PATH order, and says Node itself may be fine.
+
 ## v0.1.11
 
 - Remove `reachable_components` (CLI) and `impacted_components` (observer)
