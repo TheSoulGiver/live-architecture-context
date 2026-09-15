@@ -229,19 +229,23 @@ class NpmResolutionTest(unittest.TestCase):
             shim, real = root / "shim", root / "real"
             for path in (shim, real):
                 path.mkdir()
-                (path / "npm.cmd").write_text("@echo off\n", encoding="utf-8")
+                for name in ("npm.cmd", "npm"):
+                    (path / name).write_text("@echo off\n", encoding="utf-8")
             cli = real / "node_modules/npm/bin"
             cli.mkdir(parents=True)
             (cli / "npm-cli.js").write_text("// npm\n", encoding="utf-8")
-            with patch.dict(os.environ, {"PATH": os.pathsep.join([str(shim), str(real)])}), \
-                 patch.object(os, "name", "nt"):
+            # `windows` is a parameter rather than a patched `os.name`, which would also change
+            # which concrete Path flavour this platform can instantiate.
+            with patch.dict(os.environ, {"PATH": os.pathsep.join([str(shim), str(real)])}):
                 # The shim comes first on PATH and is a normal thing to have; it is not a broken Node.
-                selected, script = archctx_runtime.npm_with_cli()
+                selected, script = archctx_runtime.npm_with_cli(windows=True)
                 self.assertEqual(selected.parent, real)
                 self.assertEqual(script, cli / "npm-cli.js")
-            with patch.dict(os.environ, {"PATH": str(shim)}), patch.object(os, "name", "nt"):
+            with patch.dict(os.environ, {"PATH": str(shim)}):
                 with self.assertRaises(ValueError) as caught:
-                    archctx_runtime.npm_with_cli()
+                    archctx_runtime.npm_with_cli(windows=True)
                 message = str(caught.exception)
                 self.assertIn(str(shim / "npm.cmd"), message)
                 self.assertIn("Node itself may be fine", message)
+                # Off Windows the same shim is usable, because npm is invoked directly.
+                self.assertEqual(archctx_runtime.npm_with_cli(windows=False)[0], shim / "npm")

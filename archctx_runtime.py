@@ -52,13 +52,14 @@ def executable(name: str) -> str:
     return value
 
 
-def npm_with_cli() -> tuple[Path, Path]:
+def npm_with_cli(windows: bool | None = None) -> tuple[Path, Path]:
     """Select an npm that actually ships its CLI, not the first PATH entry named npm.
 
     A wrapper or shim earlier on PATH is a normal thing to have, and it is not a broken Node
     installation; blaming Node sent the reader to repair something that was already fine.
     """
-    names = ("npm.cmd", "npm.CMD", "npm.exe", "npm") if os.name == "nt" else ("npm",)
+    windows = os.name == "nt" if windows is None else windows
+    names = ("npm.cmd", "npm.CMD", "npm.exe", "npm") if windows else ("npm",)
     seen, shadowing = [], []
     for name in names:
         directories = os.environ.get("PATH", "").split(os.pathsep)
@@ -68,7 +69,7 @@ def npm_with_cli() -> tuple[Path, Path]:
             if not candidate.is_file() or candidate in seen: continue
             seen.append(candidate)
             script = candidate.parent / "node_modules/npm/bin/npm-cli.js"
-            if script.is_file() or os.name != "nt":
+            if script.is_file() or not windows:
                 return candidate, script
             shadowing.append(str(candidate))
     if not seen:
