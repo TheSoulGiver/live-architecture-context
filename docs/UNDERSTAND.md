@@ -229,12 +229,15 @@ source-reviewed canonical evidence for other files. Dynamic JavaScript may have
 raw call records without extracted named functions (for example IIFE/prototype
 forms); inspect the captured facts and source, not just final graph edge counts.
 
-Analysis findings remain readable before canonical acceptance. When rendering is
-configured, layout/validation failure still prevents a new accepted bundle so
-Agent context, IR and HTML cannot claim mismatched current versions. Keep full
-relations in canonical definitions and use a smaller selected view for the map.
-Independent semantic and visual publication is not implemented by bypassing
-Archify validation.
+Analysis findings remain readable before canonical acceptance. Source evidence
+and non-layout validation failures still block publication and preserve last-good.
+Since 0.1.12, a recognized render-stage layout validation failure can publish the
+validated context and projected IR **without a current visual bundle**. Its
+receipt says `validation: LAYOUT_FAILED`, `visual: unavailable` and includes the
+renderer diagnostic; old HTML must not be presented as the new accepted diagram.
+This settled layout failure does not re-stale the context on every query. Other
+renderer failures still block publication. Keep full relations in canonical
+definitions; adjust only the selected view when repairing the layout.
 
 The expert `archctx-understand prepare/finish/import/show`,
 `python archctx_understand.py`, `archctx-blueprint` and
