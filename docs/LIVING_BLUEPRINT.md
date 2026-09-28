@@ -96,6 +96,11 @@ python archctx.py --config architecture/architecture.json reject <id> --reason n
 ```
 
 Codex supplies the semantic judgment and edits the tracked declarations.
+Before refreshing changed evidence, check the affected responsibilities and
+relation labels too: an old "not connected" claim may now contradict the wiring
+even when its anchor still exists. Prefer stable declaration/call anchors over
+whole parameter lists, but do not weaken an anchor merely to clear a failure.
+Reuse a concurrent task's valid repair instead of redoing its refresh.
 Deterministic drift candidates must be decided before promotion. Native
 [source-understanding findings](UNDERSTAND.md) are separate, non-blocking leads:
 the component panel joins findings through real component IDs and shows their
@@ -184,14 +189,19 @@ Starting the live page does not enable or fix native hook delivery; next-read
 A refresh holds a process-scoped writer lock, validates source/config/view,
 builds a unique local generation, and uses real Archify validation, delivery
 and comparison. Publication rechecks the inputs and commits a single
-last-good record that references the complete generation. Each receipt binds
-context, source revision, IR, HTML and comparison hashes.
+last-good record that references that generation. A successful visual receipt
+binds context, source revision, IR, HTML and comparison hashes.
 
 Changes during validation return a retry; an interrupted writer releases its
-OS lock. An invalid candidate, renderer failure or interrupted publication
-leaves the previous accepted bundle available. The configured loose IR output
-is a compatibility copy; the viewer follows only the last-good generation.
-The viewer checks source freshness and clearly marks a retained older view.
+OS lock. An invalid candidate, non-layout renderer failure or interrupted
+publication leaves the previous accepted bundle available. A recognized
+render-stage layout validation failure instead allows the validated context and
+IR to publish with `validation: LAYOUT_FAILED` and `visual: unavailable`. No new
+HTML/comparison is claimed; retained historical diagrams keep their old identity.
+Queries can use the accepted context without retrying the same layout failure.
+The configured loose IR output is a compatibility copy; the viewer follows only
+the last-good generation, checks source freshness, and labels unavailable or
+retained older visuals rather than presenting them as current.
 
 The delta distinguishes architecture definitions, presentation changes, and
 source-evidence changes. The first render has no earlier accepted diagram;
