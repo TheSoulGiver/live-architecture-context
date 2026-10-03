@@ -199,6 +199,10 @@ render-stage layout validation failure instead allows the validated context and
 IR to publish with `validation: LAYOUT_FAILED` and `visual: unavailable`. No new
 HTML/comparison is claimed; retained historical diagrams keep their old identity.
 Queries can use the accepted context without retrying the same layout failure.
+After the view is repaired, a withheld visual is not a usable Before. The new
+validated render publishes with an explicitly current-only comparison baseline;
+the previous context and its layout-failure receipt remain in bounded history.
+Subsequent successful renders resume ordinary Before/After comparisons.
 The configured loose IR output is a compatibility copy; the viewer follows only
 the last-good generation, checks source freshness, and labels unavailable or
 retained older visuals rather than presenting them as current.

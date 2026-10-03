@@ -94,7 +94,10 @@ def render_bundle(config: dict[str, Any], repo: Path, directory: Path, generatio
     prior = previous.get("archify", {}) if previous else {}
     before = ir
     before_reason = "no earlier accepted render"
-    if prior.get("generation") and prior.get("ir"):
+    if prior.get("validation") == "LAYOUT_FAILED":
+        # Accepted context can have valid evidence but no renderable Before.
+        before_reason = "previous accepted visual withheld (LAYOUT_FAILED); comparison is a current-only baseline"
+    elif prior.get("generation") and prior.get("ir"):
         try:
             path = Path(prior["ir"])
             if not path.is_absolute():
