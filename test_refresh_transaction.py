@@ -1,4 +1,5 @@
 import json
+import subprocess
 import sys
 import tempfile
 import threading
@@ -37,7 +38,7 @@ class RefreshTransactionTest(unittest.TestCase):
         archctx.atomic(binding_path, binding)
         return binding | {"render": "PASS", "compare": "PASS", "artifacts": artifacts | {"binding.json": archctx.sha(binding_path.read_bytes())}}
 
-    def fixture(self, root: Path, render: bool = False):
+    def fixture(self, root: Path, render: bool = False, commands=None):
         source = root / "runtime.py"
         source.write_text("OWNER = 'one'\n", encoding="utf-8")
         config, state, view, output = root / "architecture.json", root / "state", root / "view.json", root / "compatibility.json"
@@ -49,6 +50,8 @@ class RefreshTransactionTest(unittest.TestCase):
         }
         if render:
             archify |= {"render": ["stub-render", "{archify_output}", "{archify_html}"], "compare": ["stub-compare", "{archify_before}", "{archify_output}", "{archify_compare}", "{archify_receipt}"]}
+        if commands:
+            archify |= commands
         value = {
             "version": 1,
             "repo": ".",
@@ -63,6 +66,97 @@ class RefreshTransactionTest(unittest.TestCase):
             self.assertIsNone(archctx.archify_artifact_reason(state, first["archify"]))
             self.assertEqual(archctx.status(config, str(state))["status"], "FRESH")
         return config, state, source, view, output
+
+    def test_refresh_recovers_withheld_visual_without_reusing_invalid_before(self):
+        """Synthetic renderer; projection, receipts, publication and retention are real."""
+        failure = {"operation": None}
+        comparisons = []
+        original_run = archctx.run
+
+        def renderer(command, repo, timeout, values):
+            operation = command[0].removeprefix("fixture-")
+            if not command[0].startswith("fixture-"):
+                return original_run(command, repo, timeout, values)
+            current = Path(values["{archify_output}"])
+            blocked = lambda path: archctx.load(path)["components"][0]["pos"] == [0, 0]
+            error = ""
+            result = {}
+            if operation == failure["operation"]:
+                error = "synthetic renderer operation failure"
+            elif operation == "validate" and blocked(current):
+                error = json.dumps({"command": "validate", "stage": "render", "error": "Architecture layout validation failed: synthetic node obstructs connection"})
+            elif operation == "render":
+                artifact = Path(values["{archify_html}"])
+                artifact.write_text("<svg>synthetic current blueprint</svg>", encoding="utf-8")
+                result = {"ok": True, "specification": {"sha256": archctx.sha(current.read_bytes())}, "artifact": {"sha256": archctx.sha(artifact.read_bytes())}}
+            elif operation == "compare":
+                before = Path(values["{archify_before}"])
+                comparisons.append((before, current))
+                if blocked(before):
+                    error = "comparison base has the withheld invalid layout"
+                else:
+                    artifact = Path(values["{archify_compare}"])
+                    artifact.write_text("<svg>synthetic comparison</svg>", encoding="utf-8")
+                    result = {"ok": True, "base": {"rawSha256": archctx.sha(before.read_bytes())}, "head": {"rawSha256": archctx.sha(current.read_bytes())}, "artifact": {"sha256": archctx.sha(artifact.read_bytes())}, "validation": {"checkCount": 1, "checksPassed": 1}}
+                    archctx.atomic(Path(values["{archify_receipt}"]), result)
+            return command, subprocess.CompletedProcess(command, 1 if error else 0, json.dumps(result), error)
+
+        commands = {
+            "validate": ["fixture-validate", "{archify_output}"],
+            "render": ["fixture-render", "{archify_output}", "{archify_html}"],
+            "compare": ["fixture-compare", "{archify_before}", "{archify_output}", "{archify_compare}", "{archify_receipt}"],
+        }
+        with tempfile.TemporaryDirectory() as temporary, patch.object(archctx, "run", side_effect=renderer):
+            root = Path(temporary)
+            config, state, source, view, output = self.fixture(root, render=True, commands=commands)
+            withheld = archctx.load(archctx.last_path(state))
+            self.assertEqual((withheld["archify"]["validation"], withheld["archify"]["visual"]), ("LAYOUT_FAILED", "unavailable"))
+            prior_ir = Path(withheld["archify"]["ir"])
+            prior_bytes = prior_ir.read_bytes()
+            prior_snapshot = state / "snapshots" / f"{withheld['context_hash']}.json"
+            prior_snapshot_bytes = prior_snapshot.read_bytes()
+            self.assertFalse((prior_ir.parent / "current.html").exists())
+            self.assertEqual(comparisons, [])
+
+            changed_view = archctx.load(view)
+            changed_view["nodes"][0]["pos"] = [40, 40]
+            archctx.atomic(view, changed_view)
+            source.write_text("OWNER = 'two'\n", encoding="utf-8")
+            recovered = archctx.refresh(config, str(state))
+            self.assertEqual(recovered["status"], "PASS", recovered)
+            receipt = recovered["archify"]
+            self.assertEqual((receipt["validation"], receipt["render"], receipt["compare"]), ("PASS", "PASS", "PASS"))
+            self.assertFalse(receipt["before_available"])
+            self.assertIn("layout", receipt["before_reason"].lower())
+            self.assertEqual(receipt["previous_context_hash"], withheld["context_hash"])
+            self.assertEqual(comparisons[-1][0], comparisons[-1][1])
+            self.assertEqual(prior_ir.read_bytes(), prior_bytes)
+            self.assertEqual(prior_snapshot.read_bytes(), prior_snapshot_bytes)
+            self.assertEqual(archctx.status(config, str(state))["status"], "FRESH")
+
+            source.write_text("OWNER = 'three'\n", encoding="utf-8")
+            ordinary = archctx.refresh(config, str(state))
+            self.assertEqual(ordinary["status"], "PASS", ordinary)
+            self.assertTrue(ordinary["archify"]["before_available"])
+            self.assertIsNone(ordinary["archify"]["before_reason"])
+            self.assertEqual(comparisons[-1][0], Path(receipt["ir"]))
+            self.assertNotEqual(*comparisons[-1])
+
+            for operation in ("render", "compare"):
+                with self.subTest(operation=operation):
+                    accepted = archctx.last_path(state).read_bytes()
+                    old_output = output.read_bytes()
+                    generations = set((state / "generations").iterdir())
+                    failure["operation"] = operation
+                    source.write_text(f"OWNER = '{operation}'\n", encoding="utf-8")
+                    rejected = archctx.refresh(config, str(state))
+                    self.assertEqual(rejected["status"], "INVALID")
+                    self.assertIn(f"Archify {operation} failed", rejected["failures"][0])
+                    self.assertTrue(rejected["last_good_preserved"])
+                    self.assertEqual(archctx.last_path(state).read_bytes(), accepted)
+                    self.assertEqual(output.read_bytes(), old_output)
+                    self.assertEqual(set((state / "generations").iterdir()), generations)
+                    self.assertEqual(archctx.status(config, str(state))["status"], "STALE")
 
     def test_final_input_recheck_keeps_prior_lkg_and_compatibility_output(self):
         """Before the transaction guard, each mutation below could have promoted as PASS."""

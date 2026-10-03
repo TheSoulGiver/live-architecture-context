@@ -34,7 +34,7 @@ class Element {
  cloneNode(){return new Element(this.tag)} remove(){this.removed=true}
 }
 const elements={},timers=[],get=id=>elements[id]??=(new Element()),packet=id=>({status:'FRESH',context_hash:id,
- generation:id,revision:id,artifacts:['current.html','comparison.html'],components:[{id:'service',purpose:'purpose-'+id,
+ generation:id,revision:id,before_available:true,artifacts:['current.html','comparison.html'],components:[{id:'service',purpose:'purpose-'+id,
  evidence:[{path:'service.py',line:1}]}],relations:[],development:{observation_id:'obs-'+id,observer_running:true,changes:[]}});
 let next=packet('accepted-A'),message;
 const context=vm.createContext({TextEncoder,document:{getElementById:get,createElement:tag=>new Element(tag)},
@@ -97,7 +97,16 @@ function displayed(id,frame){
  await context.poll();assert.ok(text(get('changes')).includes('保留上次观察，当前修改范围未知'));assert.deepEqual(Array.from(last().direct),[]);
  next=JSON.parse(JSON.stringify(next));next.development.observation_id='scope-path-gone';next.development.changes.shift();
  await context.poll();assert.equal(read('selectedChange'),null);assert.deepEqual(Array.from(last().direct),[id('db')]);assert.ok(get('map-caption').textContent.includes('全部已保存修改'));
- console.log('PASS: frame identity, single/all file scope, accepted-only overlay, retained/invalid scope, witnesses and omissions');
+ next=JSON.parse(JSON.stringify(next));next.before_available=false;next.before_reason='previous accepted visual withheld (LAYOUT_FAILED)';
+ await context.poll();get('delta').onclick();
+ assert.equal(read('loading'),null);assert.equal(read('version'),'accepted-C:current.html');
+ assert.ok(get('map-title').textContent.includes('暂无可用 Before'));assert.ok(get('reason').textContent.includes('LAYOUT_FAILED'));
+ assert.equal(get('fit').disabled,false);
+ next=JSON.parse(JSON.stringify(next));next.before_available=true;next.before_reason=null;await context.poll();
+ const recoveredComparison=read('loading');assert.ok(recoveredComparison.src.endsWith('/comparison.html'));ready(recoveredComparison);
+ assert.equal(read('version'),'accepted-C:comparison.html');assert.equal(get('fit').disabled,true);
+ assert.equal(get('reason').textContent.includes('LAYOUT_FAILED'),false);
+ console.log('PASS: frame identity, change scope, and unavailable Before remains a current view with an explicit reason');
 })().catch(error=>{console.error(error);process.exitCode=1});
 """
         result = subprocess.run([node, "-e", harness], input=script, text=True, encoding="utf-8", capture_output=True, timeout=10)
