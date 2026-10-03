@@ -280,14 +280,15 @@ function drawChanges(){let d=data.development||{},p=d.pending||{},box=$('changes
  for(let c of d.updates?.candidates||[])pendingBox.append(card(c.review_decision?'已判断 · '+c.review_decision+' · 待成功发布':'高价值信号 · Codex 待判断',c.path||c.kind,[],'pending'));box.append(pendingBox);
  if(d.counts?.omitted)box.append(el('p','另有 '+d.counts.omitted+' 项未展开；观察有界，不代表完整覆盖。','muted'));}
 }
-const desiredKey=()=>latest?.generation+':'+(mode==='delta'?'comparison.html':'current.html');
+const desiredArtifact=()=>mode==='delta'&&latest?.before_available?'comparison.html':'current.html';
+const desiredKey=()=>latest?.generation+':'+desiredArtifact();
 function cancelLoad(){clearTimeout(loadTimer);loading?.remove();loading=null;loadingKey='';}
 function waiting(message){$('state').textContent=version?'图待更新 · 保留已展示版本':'尚无已展示的已接受图';$('status').className='status stale';$('reason').textContent=message+' 最新接受状态 '+(latest?.context_hash||'none').slice(0,12)+'。';}
 function view(){let key=desiredKey();if(loading&&loadingKey!==key)cancelLoad();
  if(!latest?.artifacts?.length){if(!version)paint(latest);waiting('没有可用的已接受图。');return;}
  if(key===version){paint(latest);return;}if(data?.generation===latest.generation)paint(latest);
  waiting('新图正在加载；图、组件详情和源码入口将一起切换。');if(key===loadingKey)return;
- loading=picture.cloneNode(false);loading.removeAttribute('src');loading.id='loading-picture';loading.style.cssText='position:absolute;inset:0;visibility:hidden;pointer-events:none';loadingKey=key;$('stage').append(loading);loading.src='/map/'+latest.generation+'/'+(mode==='delta'?'comparison.html':'current.html');
+ loading=picture.cloneNode(false);loading.removeAttribute('src');loading.id='loading-picture';loading.style.cssText='position:absolute;inset:0;visibility:hidden;pointer-events:none';loadingKey=key;$('stage').append(loading);loading.src='/map/'+latest.generation+'/'+desiredArtifact();
  loadTimer=setTimeout(()=>{cancelLoad();etag='';waiting('新图加载失败，上一可读图及其架构信息保持不变；自动重试。');},8000);}
 function showPanel(id){panel=id;mode=['recent','delta'].includes(id)?id:'now';panels();view();}
 for(let id of ['now','component-view','flow-view','recent','delta'])$(id).onclick=()=>showPanel(id);
@@ -307,12 +308,13 @@ function paint(next){if(!next)return;data=next;let d=data.development||{},fresh=
  $('map-caption').textContent=comparing?'这里只显示已接受 IR 的差异；使用图内 Before / Delta / After 控件。':(selectedChange===null?'全部已保存修改':'修改范围：'+selectedChange)+' · 已接受声明的复审范围；工作区候选单独列出。';
  if(selected&&!data.components?.some(c=>c.id===selected)){selected=null;focused=false;$('focus').setAttribute('aria-pressed','false');}
  $('map-title').textContent=version.endsWith(':comparison.html')?'已接受版本 · Before / Delta / After':mode==='recent'?'最近变化 · 仍以已接受版本为准':'已接受的系统蓝图';
+ if(mode==='delta'&&!data.before_available)$('map-title').textContent='当前已接受图 · 暂无可用 Before';
  if(version)$('raw').href='/artifact/'+version.replace(':','/');
  $('project-name').textContent=(data.project?.name||'系统')+' · 系统地图';
  $('state').textContent=fresh?'已接受架构 FRESH · 源码证据一致':data.status+' · 保留上次已接受架构';$('status').className='status'+(fresh?'':' stale');
  $('identity').textContent='CONTEXT '+(data.context_hash||'none').slice(0,12)+' / '+(data.revision||'unknown').slice(0,8);
  $('summary').textContent=(data.components||[]).length+' 个已接受组件 · '+(data.relations||[]).length+' 条声明关系。'+(d.observer_running?(d.live?'持续观察已启动。':'只读观察；未启用自动发布。'):'观察线程未运行；保留最后观察。')+' 代码变化先显示，架构语义由 Codex 维护。';
- let reasons=[...(data.reason||[]),...(d.refresh?.reasons||[])];$('reason').textContent=unique(reasons).join(' · ');
+ let reasons=[...(data.reason||[]),...(d.refresh?.reasons||[])];if(mode==='delta'&&!data.before_available)reasons.push('暂无可用的旧图，仅展示当前已接受图；不代表架构没有变化。 '+(data.before_reason||''));$('reason').textContent=unique(reasons).join(' · ');
  $('scope').textContent=data.coverage?.scope||'仅覆盖配置声明的组件与证据。';$('limits').replaceChildren(...[...(data.coverage?.limitations||[]),...(d.limitations||[])].map(s=>el('li',s)));
  $('graph').textContent=data.graph?.configured?'代码图：'+(data.graph.provider||'external')+' / '+(data.graph.freshness||'unverified'):'CALM 未接入；图中是架构声明，不是完整调用图。';
  $('observation').textContent='OBS '+(d.observation_id||'—').slice(0,12)+' · '+(d.observed_at||'').replace('T',' ').slice(0,19)+' UTC · '+(d.counts?.unmapped||0)+' 项未覆盖';

@@ -203,6 +203,8 @@ After the view is repaired, a withheld visual is not a usable Before. The new
 validated render publishes with an explicitly current-only comparison baseline;
 the previous context and its layout-failure receipt remain in bounded history.
 Subsequent successful renders resume ordinary Before/After comparisons.
+Until a usable Before exists, the page keeps the current diagram visible and
+explains the missing baseline instead of displaying a misleading zero-change delta.
 The configured loose IR output is a compatibility copy; the viewer follows only
 the last-good generation, checks source freshness, and labels unavailable or
 retained older visuals rather than presenting them as current.
