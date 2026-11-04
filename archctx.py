@@ -586,7 +586,7 @@ def graph_refresh(config: dict[str, Any], repo: Path, directory: Path, changed: 
         if any(token not in command for token in required): raise ValueError("code graph receipt command is missing required binding placeholders")
     values = {"{repo}": str(repo), "{state}": str(directory / "codegraph"), "{changed_files}": json.dumps(observed, ensure_ascii=False, separators=(",", ":")), "{changed_files_sha256}": graph_changed_files_hash(observed), "{context_hash}": context_hash, "{revision}": str(candidate["revision"])}
     _, result = run(command, repo, int(graph.get("timeout_seconds", 180)), values)
-    if result.returncode: raise RuntimeError(f"code graph command failed ({result.returncode}): {result.stderr.strip()[-1000:]}")
+    if result.returncode: raise RuntimeError(f"code graph command failed ({result.returncode}): {result.stderr.strip()}")
     execution = {"requested_mode": requested_mode}
     if not contract: return {"configured": True, "provider": provider, "contract_hash": contract_hash, "freshness": "unverified", "confidence": "provider_unverified", "execution": execution}
     receipt = graph_receipt(result.stdout, provider, candidate, context_hash, requested_mode, observed)
@@ -597,7 +597,7 @@ def gates(config: dict[str, Any], repo: Path, directory: Path) -> list[dict[str,
     for gate in config.get("gates", []):
         if not isinstance(gate, dict) or not isinstance(gate.get("name"), str) or not isinstance(gate.get("command"), list): raise ValueError("every gate needs name and command argv")
         argv, r = run(gate["command"], repo, int(gate.get("timeout_seconds", 180)), {"{repo}": str(repo), "{state}": str(directory)}, gate.get("env"))
-        if r.returncode: raise RuntimeError(f"gate {gate['name']} failed ({r.returncode}): {r.stderr.strip()[-1000:]}")
+        if r.returncode: raise RuntimeError(f"gate {gate['name']} failed ({r.returncode}): {r.stderr.strip()}")
         receipts.append({"name": gate["name"], "command": argv, "stdout_tail": r.stdout.strip()[-1000:]})
     return receipts
 def persistent_graph(value: dict[str, Any]) -> dict[str, Any]:
@@ -783,8 +783,8 @@ def renderer_diagnostic(raw: str) -> str:
     except (json.JSONDecodeError, ValueError): value = None
     if isinstance(value, dict) and isinstance(value.get("error"), str):
         stage = " ".join(str(value[key]) for key in ("command", "stage") if isinstance(value.get(key), str))
-        return decoded_projection_ids(f"[{stage}] {value['error']}" if stage else value["error"])[:2000]
-    return decoded_projection_ids(raw)[-1000:]
+        return decoded_projection_ids(f"[{stage}] {value['error']}" if stage else value["error"])
+    return decoded_projection_ids(raw)
 
 
 def archify_projection(config: dict[str, Any], repo: Path, directory: Path, candidate: dict[str, Any], previous: dict[str, Any] | None) -> dict[str, Any]:
@@ -1106,7 +1106,10 @@ def blueprint_diagnostics(directory: Path, config: dict[str, Any], record: dict[
     receipt = (record or {}).get("archify", {})
     visible = accepted
     visual_error = None
-    if receipt.get("configured"):
+    if receipt.get("validation") == "LAYOUT_FAILED":
+        visual_error = receipt["layout_failure"]
+        visible = set()
+    elif receipt.get("configured"):
         try:
             ir = load(Path(receipt["ir"]))
             from archctx_to_archify import archify_id
@@ -1129,6 +1132,8 @@ def blueprint_diagnostics(directory: Path, config: dict[str, Any], record: dict[
             reasons = ["accepted component is not selected in the accepted blueprint view"]
         omissions.append({"id": ident, "name": component.get("name", ident), "reasons": reasons})
     result["blueprint_omissions"] = omissions
+    if visual_error:
+        result.update(blueprint_status="UNAVAILABLE", blueprint_reason=[visual_error])
     return result
 
 
@@ -1569,7 +1574,7 @@ def code_query(config: dict[str, Any], repo: Path, directory: Path, symbol: str,
     graph = config.get("code_graph", {})
     if not isinstance(graph, dict) or not isinstance(graph.get("query"), list): return {"available": False, "reason": "no code_graph.query configured"}
     argv, r = run(graph["query"], repo, int(graph.get("timeout_seconds", 30)), {"{repo}": str(repo), "{state}": str(directory / "codegraph"), "{symbol}": symbol, "{direction}": direction})
-    if r.returncode: return {"available": False, "provider": graph.get("provider", "external"), "error": r.stderr.strip()[-1000:], "command": argv}
+    if r.returncode: return {"available": False, "provider": graph.get("provider", "external"), "error": r.stderr.strip(), "command": argv}
     try: result: Any = json.loads(r.stdout)
     except json.JSONDecodeError: result = {"stdout_tail": r.stdout.strip()[-1000:]}
     return {"available": True, "kind": "code_graph_query", "provider": graph.get("provider", "external"), "confidence": "provider_reported", "result": result}
@@ -1821,7 +1826,7 @@ def bounded_updates(value: dict[str, Any]) -> dict[str, Any]:
     truncated = False
     def compact(item: Any, key: str = "") -> Any:
         nonlocal truncated
-        if key in ("last_refresh", "blueprint_omissions", "evidence_diagnostics", "reason", "failures"):
+        if key in ("last_refresh", "blueprint_omissions", "blueprint_reason", "evidence_diagnostics", "reason", "failures"):
             return item
         if isinstance(item, str) and key != "cursor" and len(item) > 240:
             truncated = True
@@ -1908,7 +1913,7 @@ def updates(config_path: Path, explicit: str | None, since: str | None = None,
     context_hash = old.get("context_hash") if isinstance(old, dict) else None
     cursor = ":".join(("u1", selection, context_hash or "-", view_hash or "-", observation_hash))
     base = {key: value[key] for key in ("protocol_version", "status", "freshness", "confidence", "next_action") if key in value}
-    base.update({key: value[key] for key in ("reason", "failures", "last_refresh", "blueprint_omissions", "evidence_diagnostics") if key in value})
+    base.update({key: value[key] for key in ("reason", "failures", "last_refresh", "blueprint_omissions", "blueprint_status", "blueprint_reason", "evidence_diagnostics") if key in value})
     base.update(kind="architecture_updates", cursor=cursor)
     if previous and since == cursor: return base | {"changed": False}
     before = snapshot_record(directory, previous["context"]) if previous and previous["context"] != "-" else None

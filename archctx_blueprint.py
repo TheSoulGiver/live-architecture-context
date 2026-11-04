@@ -119,7 +119,7 @@ def render_bundle(config: dict[str, Any], repo: Path, directory: Path, generatio
             raise ValueError(f"archify.{operation} must include its input and output placeholders")
         _, result = archctx.run(command, repo, settings.get("timeout_seconds", 180), values)
         if result.returncode:
-            raise RuntimeError(f"Archify {operation} failed ({result.returncode}): {(result.stderr or result.stdout)[-1000:]}")
+            raise RuntimeError(f"Archify {operation} failed ({result.returncode}): {result.stderr or result.stdout}")
         if operation == "render":
             delivered = json.loads(result.stdout)
     for path in (current, comparison):
@@ -432,6 +432,10 @@ def handler(config_path: Path, explicit: str | None, observer: DevelopmentObserv
                             value.update(status="STALE", reason=["architecture declarations changed after the accepted blueprint"])
                 else:
                     value = archctx.snapshot(config_path, explicit)
+                if value.get("blueprint_status") == "UNAVAILABLE":
+                    value["source_status"] = value["status"]
+                    if value["status"] == "FRESH": value["status"] = "STALE"
+                    value["reason"] = list(dict.fromkeys((value.get("reason") or []) + value["blueprint_reason"]))
                 receipt = value.get("archify", {})
                 if url.path == "/api/current":
                     args = parse_qs(url.query, keep_blank_values=True, max_num_fields=understand.SOURCE_LIMIT + 1)
@@ -447,7 +451,7 @@ def handler(config_path: Path, explicit: str | None, observer: DevelopmentObserv
                             raise ValueError("selected analysis accepted context changed; retry after the next observation")
                         development = {**(development or {}), "updates": {**(development or {}).get("updates", {}),
                                                                           "source_analysis": selected_analysis}}
-                    result = {key: value.get(key) for key in ("status", "revision", "reason", "graph", "last_refresh", "blueprint_omissions", "evidence_diagnostics")}
+                    result = {key: value.get(key) for key in ("status", "source_status", "blueprint_status", "blueprint_reason", "revision", "reason", "graph", "last_refresh", "blueprint_omissions", "evidence_diagnostics")}
                     result.update(context_hash=value.get("last_good_context_hash"), generation=Path(receipt.get("generation", "")).name,
                                   artifacts=list(receipt.get("artifacts", {})), delta_kind=receipt.get("delta_kind"),
                                   before_reason=receipt.get("before_reason"), before_available=receipt.get("before_available", False),

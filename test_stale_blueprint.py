@@ -111,6 +111,54 @@ class StaleBlueprintTest(unittest.TestCase):
             self.assertEqual(value["last_refresh"]["failures"], failed["failures"])
             self.assertEqual(value["last_refresh"]["evidence_diagnostics_error"], failed["evidence_diagnostics_error"])
 
+    def test_external_errors_keep_both_ends_of_long_stderr(self):
+        diagnostic = "first failure\n" + "detailed failure cause\n" * 250 + "last failure"
+        command = [sys.executable, "-c", "import sys;sys.stderr.write(" + repr(diagnostic) + ");sys.exit(1)"]
+        for setting in ({"gates": [{"name": "long-error", "command": command}]},
+                        {"code_graph": {"refresh": command}},
+                        {"archify": {"view": "view.json", "output": "diagram.json", "validate": command}}):
+            with self.subTest(setting=next(iter(setting))):
+                (self.root / "view.json").write_text(json.dumps({"nodes": [{"id": "owner", "pos": [0, 0]}]}), encoding="utf-8")
+                base = {key: item for key, item in self.definition.items() if key not in ("gates", "code_graph", "archify")}
+                self.definition = base | setting
+                self.save()
+                failed = archctx.refresh(self.config, str(self.state))
+                self.assertEqual(failed["status"], "INVALID")
+                self.assertIn(diagnostic, failed["failures"][0])
+                self.assertEqual(archctx.status(self.config, str(self.state))["last_refresh"]["failures"], failed["failures"])
+
+    def test_layout_failure_is_visible_in_map_while_source_context_stays_fresh(self):
+        diagnostic = "Architecture layout validation failed:\n" + "edge crosses unrelated component\n" * 120 + "final layout cause"
+        renderer_reply = json.dumps({"command": "validate", "stage": "render", "error": diagnostic})
+        (self.root / "view.json").write_text(json.dumps({"nodes": [{"id": "owner", "pos": [0, 0]}]}), encoding="utf-8")
+        self.definition["archify"] = {"view": "view.json", "output": "diagram.json", "validate":
+            [sys.executable, "-c", "import sys;sys.stderr.write(" + repr(renderer_reply) + ");sys.exit(1)"]}
+        self.save()
+        result = archctx.refresh(self.config, str(self.state))
+        self.assertEqual(result["status"], "PASS")
+        self.assertIn(diagnostic, result["archify"]["layout_failure"])
+        self.assertEqual(archctx.status(self.config, str(self.state))["status"], "FRESH")
+        observer = SimpleNamespace(bundle=lambda: ({"status": "FRESH", "updates": {"status": "FRESH"},
+            "observation_id": "settled-source", "changes": []}, archctx.load(archctx.last_path(self.state))))
+        server = ThreadingHTTPServer(("127.0.0.1", 0), blueprint.handler(self.config, str(self.state), observer))
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(worker.join, 2)
+        self.addCleanup(server.shutdown)
+        connection = http.client.HTTPConnection("127.0.0.1", server.server_port)
+        connection.request("GET", "/api/current")
+        response = connection.getresponse()
+        value = json.loads(response.read())
+        connection.close()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(value["status"], "STALE")
+        self.assertEqual(value["source_status"], "FRESH")
+        self.assertEqual(value["blueprint_status"], "UNAVAILABLE")
+        self.assertIn(diagnostic, " ".join(value["reason"]))
+        self.assertEqual([item["id"] for item in value["blueprint_omissions"]], ["owner"])
+        self.assertIn(diagnostic, " ".join(value["blueprint_omissions"][0]["reasons"]))
+
 
 if __name__ == "__main__":
     unittest.main()
