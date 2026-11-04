@@ -178,6 +178,7 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 370px;height:calc(100vh - 
 .canvas-head{padding:16px 24px 10px;display:flex;justify-content:space-between;gap:12px}.canvas-head h2{margin:0 0 5px}.legend{font-size:11px;display:flex;gap:12px;flex-wrap:wrap;margin-top:8px}.legend span:before{content:'';display:inline-block;border:2px solid #6b8f80;width:10px;height:10px;margin-right:5px}.legend .direct:before{border-color:#b66a13}.legend .dependency:before{border-style:dashed;border-color:#526fac}.legend .dependent:before{border-style:dotted;border-color:#267b79}.legend .both:before{border-style:dashed;border-color:#75578e}
 #stage{position:relative;flex:1;min-height:0}iframe{width:100%;height:100%;border:0;background:#fff}.map-controls{display:flex;gap:5px;align-items:center;align-self:flex-start}.map-controls button{padding:5px 10px;font-size:12px}
 #empty{position:absolute;inset:25% 15%;text-align:center;color:var(--muted);pointer-events:none}#empty[hidden]{display:none}#reason{padding:9px 24px;background:#fff3dd;color:#794917;font-size:12px;line-height:1.5;border-top:1px solid #ecd4aa;max-height:86px;overflow:auto}#reason:empty{display:none}
+#stale-notice{padding:15px 28px;border-bottom:3px solid var(--red);background:#fff0e7;color:#78291f;overflow-wrap:anywhere;max-height:35vh;overflow:auto}#stale-notice h2{margin:0 0 8px}#stale-notice ul{margin:7px 0}#stale-reasons{white-space:pre-wrap;font-size:12px;line-height:1.6}#stale-notice details{margin:8px 0}.omission{padding:8px 0;border-top:1px solid #dfb9a4}.omission code{display:block}
 aside{padding:20px;overflow:auto;min-width:0;overflow-wrap:anywhere;background:#fafbf6}#summary{font-size:12px;line-height:1.65;color:var(--muted);border-bottom:1px solid var(--line);padding-bottom:15px;margin-bottom:18px}.section-label{font-size:11px;letter-spacing:1px;color:var(--muted);margin-bottom:8px}
 .change{border-left:3px solid #c27c27;padding:9px 10px;background:#fff8e9;margin:8px 0;font-size:12px}.change.unmapped{border-left-style:dashed;border-color:#99a4a1;background:#eff1ec}.change.pending{border-color:#ad5575;background:#f8edf2}.change.accepted{border-color:var(--green);background:#eaf3ea}.change button{padding:3px 6px;font-size:11px;margin:6px 4px 0 0}.change code{display:block}
 .scope-group{border-top:1px solid var(--line);padding-top:8px;margin-top:9px}.scope-group.pending{border-left:2px dashed #ad5575;padding-left:8px}.scope-row{margin:6px 0;line-height:1.6}.scope-group details{margin:8px 0}.witness{padding:7px 0;border-bottom:1px solid var(--line);overflow-wrap:anywhere}.scope-note{font-size:11px;color:var(--muted);overflow-wrap:anywhere}
@@ -189,6 +190,7 @@ footer{height:34px;border-top:1px solid var(--line);display:flex;justify-content
 @media(max-width:680px){header{height:auto;min-height:110px;align-items:flex-start;flex-wrap:wrap;gap:9px}header small{display:none}#identity{max-width:none;text-align:left}.status{justify-content:flex-start}h1{font-size:21px}nav{height:auto;min-height:54px;padding:7px;gap:3px;flex-wrap:wrap}nav button{padding:7px;font-size:12px}nav a,nav .spacer{display:none}main{height:auto;display:flex;flex-direction:column}.canvas{height:62vh;min-height:360px}aside{max-height:none}footer{height:auto;padding:10px;flex-wrap:wrap}.canvas-head{gap:5px;flex-wrap:wrap}.map-controls{flex-wrap:wrap}}
 </style>
 <header><div><div class="eyebrow">LAC / SYSTEM MAP</div><h1 id="project-name">系统地图</h1><small>人与 Agent 共用组件身份、源码证据和变化范围</small></div><div><div class="status" id="status"><i class="dot"></i><span id="state">正在读取已接受蓝图</span></div><code id="identity"></code></div></header>
+<section id="stale-notice" role="alert" hidden><h2 id="stale-title">地图已过期 · 保留上次接受蓝图</h2><div id="stale-reasons"></div><details id="blueprint-omissions" open><summary id="omission-title">已声明但未进入当前蓝图的组件</summary><div id="omission-items"></div></details><details id="evidence-repairs"><summary>失效证据与修复入口</summary><div id="repair-items"></div></details></section>
 <nav aria-label="地图视图"><button id="now" aria-pressed="true">项目</button><button id="component-view" aria-pressed="false">组件</button><button id="flow-view" aria-pressed="false">流程</button><button id="recent" aria-pressed="false">变化</button><button id="delta" aria-pressed="false">Before / After</button><button id="all-changes" aria-pressed="true">全部修改</button><span class="spacer"></span><a id="raw" target="_blank" rel="noopener">打开原始图 ↗</a></nav>
 <main><section class="canvas"><div class="canvas-head"><div><h2 id="map-title">已接受的系统蓝图</h2><small id="map-caption">点击组件，查看职责、原始关系和源码。</small><div class="legend"><span>已接受</span><span class="direct">直接涉及</span><span class="dependency">依赖对象</span><span class="dependent">依赖者</span><span class="both">两者重合</span></div></div><div class="map-controls"><button id="zoom-out" aria-label="缩小">−</button><button id="zoom-in" aria-label="放大">＋</button><button id="fit">全景</button><button id="focus" aria-pressed="false">聚焦邻居</button></div></div>
 <div id="stage"><iframe id="picture" title="Archify 系统图与开发变化" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"></iframe><div id="empty">等待可用的已接受 Archify 图。<p>局部变化不会被猜成正式架构。</p></div></div><div id="reason" role="status"></div></section>
@@ -284,7 +286,13 @@ const desiredArtifact=()=>mode==='delta'&&latest?.before_available?'comparison.h
 const desiredKey=()=>latest?.generation+':'+desiredArtifact();
 function cancelLoad(){clearTimeout(loadTimer);loading?.remove();loading=null;loadingKey='';}
 function waiting(message){$('state').textContent=version?'图待更新 · 保留已展示版本':'尚无已展示的已接受图';$('status').className='status stale';$('reason').textContent=message+' 最新接受状态 '+(latest?.context_hash||'none').slice(0,12)+'。';}
+function drawStale(next){let stale=next.status!=='FRESH',omissions=next.blueprint_omissions||[],failures=next.last_refresh?.failures||[];
+ $('stale-notice').hidden=!stale;$('stale-title').textContent='地图已过期 · 保留上次接受蓝图';
+ $('stale-reasons').textContent=unique([...(next.reason||[]),...failures]).join('\n');$('omission-title').textContent='已声明但未进入当前蓝图的组件 · '+omissions.length;$('blueprint-omissions').hidden=!omissions.length;
+ $('omission-items').replaceChildren(...omissions.map(item=>{let row=el('div',null,'omission');row.append(el('strong',item.name||item.id),el('code',item.id));for(let reason of item.reasons||[])row.append(el('p',reason));return row}));
+ let repairs=next.evidence_diagnostics||[];$('evidence-repairs').hidden=!repairs.length;$('repair-items').replaceChildren(...repairs.map(item=>{let row=el('div',null,'omission');row.append(el('strong',item.component+' · '+item.issue),el('code',item.path+' :: '+item.contains));if(item.nearest_line)row.append(el('code',item.nearest_line.path+':'+item.nearest_line.line+' '+item.nearest_line.text));if(item.repair_command)row.append(el('code',item.repair_command));return row}));}
 function view(){let key=desiredKey();if(loading&&loadingKey!==key)cancelLoad();
+ drawStale(latest);
  if(!latest?.artifacts?.length){if(!version)paint(latest);waiting('没有可用的已接受图。');return;}
  if(key===version){paint(latest);return;}if(data?.generation===latest.generation)paint(latest);
  waiting('新图正在加载；图、组件详情和源码入口将一起切换。');if(key===loadingKey)return;
@@ -321,7 +329,7 @@ function paint(next){if(!next)return;data=next;let d=data.development||{},fresh=
  let observation=data.context_hash+':'+d.observation_id+':'+(analysis()?.analysis_id||'');if(observation!==lastObservation){lastObservation=observation;$('sources').replaceChildren(...(data.components||[]).map(componentButton));send();}detail();drawProject();drawChanges();drawAnalysis();drawFlows();panels();}
 async function poll(){clearTimeout(pollTimer);let requested=analysisQuery;try{let r=await fetch('/api/current'+requested,{cache:'no-store',headers:etag?{'If-None-Match':etag}:{}});if(r.status===304)return;if(!r.ok)throw Error(await r.text());let next=await r.json();if(requested!==analysisQuery)return;etag=r.headers.get('ETag')||'';
  if(next.status==='RETRY')throw Error('观察期间状态已变化，保留当前画面，下一次读取重试。');latest=next;view();
-}catch(e){if(requested===analysisQuery){etag='';$('state').textContent='暂不可更新 · 保留当前画面';$('reason').textContent=String(e)}}finally{if(requested===analysisQuery){clearTimeout(pollTimer);pollTimer=setTimeout(poll,1500)}}}poll();
+}catch(e){if(requested===analysisQuery){etag='';$('state').textContent='暂不可更新 · 保留当前画面';$('reason').textContent=String(e);$('stale-notice').hidden=false;$('stale-title').textContent='地图状态读取失败 · 保留当前画面';$('stale-reasons').textContent=String(e)}}finally{if(requested===analysisQuery){clearTimeout(pollTimer);pollTimer=setTimeout(poll,1500)}}}poll();
 </script></html>"""
 
 # The original receipt-bound Archify artifact stays untouched. This local-only
@@ -407,6 +415,21 @@ def handler(config_path: Path, explicit: str | None, observer: DevelopmentObserv
                              "archify": record.get("archify", {}), "revision": record.get("revision"),
                              "graph": record.get("graph", {}), "status": development.get("status", notice.get("status", "UNAVAILABLE")),
                              "reason": [development["error"]] if development.get("error") else notice.get("reason", notice.get("failures", []))}
+                    try:
+                        current_config = archctx.load(config_path)
+                    except (OSError, ValueError) as error:
+                        if value["status"] == "FRESH": value["status"] = "STALE"
+                        value["reason"] = (value.get("reason") or []) + [f"architecture config is unavailable: {error}"]
+                        if attempt := archctx.last_refresh_failure(directory):
+                            value.update(last_refresh=attempt, evidence_diagnostics=attempt.get("evidence_diagnostics", []))
+                            value["reason"].extend(attempt["failures"])
+                    else:
+                        value.update(archctx.blueprint_diagnostics(directory, current_config, record))
+                        if value.get("last_refresh"):
+                            value["status"] = "STALE"
+                            value["reason"] = list(dict.fromkeys((value.get("reason") or []) + value["last_refresh"]["failures"]))
+                        elif record.get("config_hash") and archctx.semantic(current_config) != record["config_hash"]:
+                            value.update(status="STALE", reason=["architecture declarations changed after the accepted blueprint"])
                 else:
                     value = archctx.snapshot(config_path, explicit)
                 receipt = value.get("archify", {})
@@ -424,7 +447,7 @@ def handler(config_path: Path, explicit: str | None, observer: DevelopmentObserv
                             raise ValueError("selected analysis accepted context changed; retry after the next observation")
                         development = {**(development or {}), "updates": {**(development or {}).get("updates", {}),
                                                                           "source_analysis": selected_analysis}}
-                    result = {key: value.get(key) for key in ("status", "revision", "reason", "graph")}
+                    result = {key: value.get(key) for key in ("status", "revision", "reason", "graph", "last_refresh", "blueprint_omissions", "evidence_diagnostics")}
                     result.update(context_hash=value.get("last_good_context_hash"), generation=Path(receipt.get("generation", "")).name,
                                   artifacts=list(receipt.get("artifacts", {})), delta_kind=receipt.get("delta_kind"),
                                   before_reason=receipt.get("before_reason"), before_available=receipt.get("before_available", False),
@@ -435,7 +458,7 @@ def handler(config_path: Path, explicit: str | None, observer: DevelopmentObserv
                                          "component_queries": {c["id"]: {command: prefix + " " + command + " " +
                                             ("--from=" if command == "trace" else "--component=") + quote(c["id"])
                                             for command in ("canonical", "evidence", "trace")} for c in result["components"]}}
-                    etag = '"' + archctx.semantic({key: result.get(key) for key in ("context_hash", "generation", "status", "reason")} |
+                    etag = '"' + archctx.semantic({key: result.get(key) for key in ("context_hash", "generation", "status", "reason", "last_refresh", "blueprint_omissions", "evidence_diagnostics")} |
                         {"observation": (development or {}).get("observation_id"), "refresh": (development or {}).get("refresh"),
                          "observer_running": (development or {}).get("observer_running"),
                          "selection": selection, "selected_analysis": selected_analysis}) + '"'

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse, fnmatch, hashlib, json, os, re, shlex, shutil, subprocess, sys, time, uuid
+from difflib import SequenceMatcher
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,7 +20,7 @@ except OSError:
 SNAPSHOT_LIMIT, GENERATION_LIMIT, USAGE_LIMIT, USAGE_BYTES = 32, 4, 128, 64 * 1024
 CANDIDATE_ENTRY_LIMIT, CANDIDATE_BYTES, CANDIDATE_OUTPUT_LIMIT = 64, 32 * 1024, 8
 CANDIDATE_FILE_LIMIT, CANDIDATE_SOURCE_BYTES = 256, 4 * 1024 * 1024
-WATCH_FILE_LIMIT, WATCH_SOURCE_BYTES = 512, 8 * 1024 * 1024
+WATCH_FILE_LIMIT, WATCH_SOURCE_BYTES = 4096, 64 * 1024 * 1024
 UPDATES_BYTES = 16 * 1024
 DECISION_LIMIT, DECISION_BYTES = 64, 64 * 1024
 USAGE_OPERATIONS = {"refresh", "snapshot", "canonical", "search", "evidence", "trace", "impact", "changed-since", "delta", "drift", "candidates", "accept", "reject", "watch"}
@@ -353,6 +354,146 @@ def validate(repo: Path, config: dict[str, Any]) -> tuple[dict[str, list[dict[st
         value, errors = evidence(repo, {"id": relation_id(relation), "evidence": relation["evidence"]})
         relation_facts.append(value); failures.extend(errors)
     return facts, relation_facts, failures
+
+
+def evidence_diagnostics(repo: Path, config: dict[str, Any], config_path: Path | None = None) -> list[dict[str, Any]]:
+    """Describe broken claims without changing source, definitions or accepted evidence."""
+    owners = [("component", item["id"], item["id"], item) for item in components(config)]
+    owners.extend(("relation", relation_id(item), item["from"], item)
+                  for item in config.get("relations", []) if "evidence" in item)
+    diagnostics, sources = [], {}
+
+    def source(name: str) -> str | None:
+        path = (repo / name).resolve()
+        if not path.is_relative_to(repo) or not path.is_file():
+            return None
+        if name not in sources:
+            raw = path.read_bytes()
+            sources[name] = None if b"\0" in raw else raw.decode("utf-8", errors="replace")
+        return sources[name]
+
+    for owner_type, owner, component, value in owners:
+        for index, item in enumerate(value["evidence"]):
+            diagnostic = {"owner_type": owner_type, "owner": owner, "component": component,
+                          "evidence_index": index, "path": item.get("path") if isinstance(item, dict) else None,
+                          "contains": item.get("contains") if isinstance(item, dict) else None,
+                          "nearest_line": None, "repair": None, "repair_state": "unavailable", "repair_command": None}
+            if not isinstance(item, dict) or not isinstance(item.get("path"), str) or not isinstance(item.get("contains"), str) or not item["contains"]:
+                diagnostic["issue"] = "invalid_evidence"
+            elif not (repo / item["path"]).resolve().is_relative_to(repo):
+                diagnostic["issue"] = "escapes_repo"
+            else:
+                text = source(item["path"])
+                if text is not None and item["contains"] in text:
+                    continue
+                diagnostic["issue"] = "missing_file" if text is None else "missing_anchor"
+            diagnostics.append(diagnostic)
+    if not diagnostics:
+        return []
+
+    git_root = git(repo, "rev-parse", "--show-toplevel")
+    for diagnostic in diagnostics:
+        if diagnostic["issue"] not in ("missing_file", "missing_anchor"):
+            diagnostic["id"] = semantic(diagnostic)[:20]
+            continue
+        original = diagnostic["contains"]
+        exact, close, nearest = [], [], None
+        owner = next(item for kind, ident, _, item in owners if kind == diagnostic["owner_type"] and ident == diagnostic["owner"])
+        nearby = {name: source(name) for name in owner.get("truth_sources", [])}
+        nearby[diagnostic["path"]] = sources.get(diagnostic["path"])
+        for name, text in nearby.items():
+            if text is None:
+                continue
+            offset = text.find(original)
+            while offset >= 0:
+                line = text.count("\n", 0, offset) + 1
+                exact.append({"path": name, "line": line, "text": text.splitlines()[line - 1], "similarity": 1.0})
+                offset = text.find(original, offset + len(original))
+        if git_root and "\n" not in original:
+            # Git streams tracked text search, so a failed claim never loads models or textures into Python.
+            argv = ["git", "-C", str(repo), "grep", "--no-color", "--no-textconv", "-n", "-z", "-I", "-F", "-e", original,
+                    "--", ".", ":(exclude)**/.archctx/**", ":(exclude).archctx/**"]
+            if config_path and config_path.resolve().is_relative_to(repo):
+                argv.append(":(exclude)" + config_path.resolve().relative_to(repo).as_posix())
+            matches = subprocess.run(argv, text=True, encoding="utf-8", errors="replace", capture_output=True)
+            if matches.returncode not in (0, 1):
+                raise ValueError("evidence move search failed: " + matches.stderr.strip())
+            seen = {(item["path"], item["line"]) for item in exact}
+            for match in matches.stdout.splitlines():
+                name, line_number, text = match.split("\0", 2)
+                line = int(line_number)
+                if (name, line) not in seen and (repo / name).resolve().is_relative_to(repo):
+                    exact.extend({"path": name, "line": line, "text": text, "similarity": 1.0}
+                                 for _ in range(text.count(original)))
+        # A small text repair stays in the original file. Cross-file moves require an exact surviving claim.
+        local = sources.get(diagnostic["path"])
+        nearby = {diagnostic["path"]: local} if local is not None else nearby
+        for name, text in nearby.items():
+            if text is None:
+                continue
+            for index, line in enumerate(text.splitlines()):
+                if not line.strip():
+                    continue
+                matcher = SequenceMatcher(None, original.strip(), line.strip(), autojunk=False)
+                cutoff = min(0.9, nearest["similarity"] if nearest else 0)
+                if matcher.real_quick_ratio() < cutoff or matcher.quick_ratio() < cutoff:
+                    continue
+                similarity = matcher.ratio()
+                candidate = {"path": name, "line": index + 1, "text": line, "similarity": similarity}
+                if nearest is None or similarity > nearest["similarity"]:
+                    nearest = candidate
+                if local is not None and similarity >= 0.9:
+                    close.append(candidate)
+        nearest = exact[0] if exact else nearest
+        if nearest:
+            diagnostic["nearest_line"] = {**nearest, "similarity": round(nearest["similarity"], 4)}
+        choices = exact + close
+        if len(choices) == 1:
+            replacement = choices[0]
+            diagnostic["repair"] = {"path": replacement["path"],
+                                    "contains": original if exact else replacement["text"].strip(),
+                                    "kind": "exact_move" if exact else "small_text_change"}
+            diagnostic["repair_state"] = "unique"
+        elif choices:
+            diagnostic["repair_state"] = "ambiguous"
+            diagnostic["candidate_count"] = len(choices)
+        diagnostic["id"] = semantic({key: diagnostic[key] for key in
+                                     ("owner_type", "owner", "evidence_index", "path", "contains", "repair")})[:20]
+        if diagnostic["repair"]:
+            argv = [sys.executable, str(CORE_SOURCE_PATH)]
+            if config_path:
+                argv.extend(["--config", str(config_path.resolve())])
+            argv.extend(["evidence-repair", "--id", diagnostic["id"]])
+            diagnostic["repair_argv"] = argv
+            diagnostic["repair_command"] = ("& " + " ".join("'" + item.replace("'", "''") + "'" for item in argv)
+                                            if os.name == "nt" else shlex.join(argv))
+    return diagnostics
+
+
+def diagnose_evidence(config_path: Path) -> dict[str, Any]:
+    config = load(config_path)
+    diagnostics = evidence_diagnostics(repo_for(config_path, config), config, config_path)
+    return {"status": "INVALID" if diagnostics else "PASS", "evidence_diagnostics": diagnostics,
+            "next_action": "review each source claim; run only its explicit unique repair command" if diagnostics else "query normally"}
+
+
+def repair_evidence(config_path: Path, ident: str) -> dict[str, Any]:
+    """Apply exactly the current unique proposal selected by the caller; never refresh."""
+    config = load(config_path)
+    diagnostics = evidence_diagnostics(repo_for(config_path, config), config, config_path)
+    selected = next((item for item in diagnostics if item["id"] == ident), None)
+    if selected is None:
+        raise ValueError("evidence repair is stale or unknown; run evidence-diagnose again")
+    if selected["repair"] is None:
+        raise ValueError("evidence repair is ambiguous or unavailable; inspect the original source claim")
+    owners = config["components"] if selected["owner_type"] == "component" else config.get("relations", [])
+    owner = next(item for item in owners if (item["id"] if selected["owner_type"] == "component" else relation_id(item)) == selected["owner"])
+    anchor = owner["evidence"][selected["evidence_index"]]
+    before = dict(anchor)
+    anchor.update({key: selected["repair"][key] for key in ("path", "contains")})
+    atomic(config_path, config)
+    return {"status": "REPAIRED", "owner": selected["owner"], "before": before, "after": dict(anchor),
+            "next_action": "review the updated source claim, then refresh"}
 
 def context(config: dict[str, Any], rev: str, facts: dict[str, list[dict[str, Any]]], relation_facts: list[list[dict[str, Any]]]) -> dict[str, Any]:
     relations = []
@@ -949,6 +1090,48 @@ def unavailable_status(directory: Path, record: dict[str, Any] | None, error: Ex
     }
 
 
+def blueprint_diagnostics(directory: Path, config: dict[str, Any], record: dict[str, Any] | None) -> dict[str, Any]:
+    """Explain the retained picture from declarations and receipts, without scanning source."""
+    attempt = last_refresh_failure(directory)
+    result = {"blueprint_omissions": []}
+    if attempt:
+        result["last_refresh"] = attempt
+        result["evidence_diagnostics"] = attempt.get("evidence_diagnostics", [])
+    try:
+        declared = components(config)
+    except ValueError as error:
+        result["blueprint_omissions_error"] = str(error)
+        return result
+    accepted = {item["id"] for item in (record or {}).get("context", {}).get("components", [])}
+    receipt = (record or {}).get("archify", {})
+    visible = accepted
+    visual_error = None
+    if receipt.get("configured"):
+        try:
+            ir = load(Path(receipt["ir"]))
+            from archctx_to_archify import archify_id
+            rendered = {item["id"] for item in ir["components"]}
+            visible = {ident for ident in accepted if archify_id("c", ident) in rendered}
+        except (OSError, ValueError, KeyError) as error:
+            visual_error = f"accepted blueprint unavailable: {error}"
+            visible = set()
+    omissions = []
+    for component in declared:
+        ident = component["id"]
+        if ident in visible:
+            continue
+        if ident not in accepted:
+            reasons = ["declared component has not entered the accepted architecture"]
+            if attempt: reasons.append("last refresh " + attempt["status"] + "; complete causes are listed in last_refresh.failures")
+        elif visual_error:
+            reasons = [visual_error]
+        else:
+            reasons = ["accepted component is not selected in the accepted blueprint view"]
+        omissions.append({"id": ident, "name": component.get("name", ident), "reasons": reasons})
+    result["blueprint_omissions"] = omissions
+    return result
+
+
 def status(config_path: Path, explicit: str | None, record: dict[str, Any] | None = None, *, _observed: dict[str, Any] | None = None) -> dict[str, Any]:
     directory = state(config_path, explicit); old_path = last_path(directory)
     try:
@@ -960,7 +1143,13 @@ def status(config_path: Path, explicit: str | None, record: dict[str, Any] | Non
             except ValueError:
                 record = None
         if _observed is not None: _observed["record"] = record
-        return unavailable_status(directory, record, error)
+        result = unavailable_status(directory, record, error)
+        if attempt := last_refresh_failure(directory):
+            result["last_refresh"] = attempt
+            result["evidence_diagnostics"] = attempt.get("evidence_diagnostics", [])
+            result.setdefault("reason", result.get("failures", []))
+            result["reason"] = result["reason"] + attempt["failures"]
+        return result
     try:
         repo = repo_for(config_path, config); facts, relation_facts, failures = validate(repo, config)
     except ValueError as e: repo, facts, relation_facts, failures = None, {}, [], [str(e)]
@@ -975,9 +1164,9 @@ def status(config_path: Path, explicit: str | None, record: dict[str, Any] | Non
         # First use fails here too: without this, a refresh that cannot complete is answered by
         # advising the same refresh again, with no statement of what stopped it.
         attempt = last_refresh_failure(directory)
-        return {"protocol_version": PROTOCOL_VERSION, "status": "MISSING", "freshness": "missing", "repo": str(repo) if repo else None} | (
-            {"reason": [f"last refresh did not complete ({attempt.get('status')}): {attempt['failures'][0]}"], "last_refresh": attempt,
-             "next_action": "repair the reported refresh failure, then refresh"} if attempt else {"next_action": "run refresh"})
+        return {"protocol_version": PROTOCOL_VERSION, "status": "MISSING", "freshness": "missing", "repo": str(repo) if repo else None,
+                "reason": failures + (attempt["failures"] if attempt else []),
+                "next_action": "repair the reported refresh failure, then refresh" if attempt else "run refresh"} | blueprint_diagnostics(directory, config, None)
     old = record if record is not None else load(old_path); current = context(config, revision(repo, {"components": facts, "relations": relation_facts}), facts, relation_facts) if repo and not failures else None
     try: visual_failure = archify_stale_reason(config, repo, directory, old) if repo and not failures else None
     except (OSError, ValueError) as error: visual_failure = f"Archify projection check failed: {error}"
@@ -993,13 +1182,12 @@ def status(config_path: Path, explicit: str | None, record: dict[str, Any] | Non
     elif candidate_state in ("incomplete", "baseline_incomplete"): reason = ["candidate observation incomplete; tighten configured drift rules before trusting this context"]
     elif candidate_state == "baseline_missing": reason = ["candidate baseline missing; run refresh to establish it"]
     elif candidate_state == "rules_changed": reason = ["candidate rules changed; run refresh to establish a new reviewed baseline"]
-    stale = not (fresh and not blocked)
+    attempt = last_refresh_failure(directory)
+    stale = not (fresh and not blocked) or attempt is not None
     # A retained state that is stale because refresh itself failed must not read as a missing
     # artifact: "run refresh" is the wrong repair when refresh is what is broken.
-    attempt = last_refresh_failure(directory) if stale else None
-    if attempt: reason = reason + [f"last refresh did not complete ({attempt.get('status')}): {attempt['failures'][0]}"]
-    result = freshness(old, "STALE" if stale else "FRESH", reason if stale else None) | {"last_good_available": True, "last_good_context_hash": old.get("context_hash"), "graph": persistent_graph(old.get("graph", {}))} | candidate_fields(observation)
-    if attempt: result["last_refresh"] = attempt
+    if attempt: reason = list(dict.fromkeys(reason + attempt["failures"]))
+    result = freshness(old, "STALE" if stale else "FRESH", reason if stale else None) | {"last_good_available": True, "last_good_context_hash": old.get("context_hash"), "graph": persistent_graph(old.get("graph", {}))} | candidate_fields(observation) | blueprint_diagnostics(directory, config, old)
     if candidates: result["next_action"] = "inspect candidates, update canonical config/evidence if accepted, then run accept or reject"
     elif candidate_state in ("baseline_missing", "rules_changed"): result["next_action"] = "review current source, then run refresh with reset_candidate_baseline"
     elif attempt: result["next_action"] = "repair the reported refresh failure, then refresh"
@@ -1112,14 +1300,26 @@ def _refresh_locked(config_path: Path, explicit: str | None, directory: Path, ch
     except OSError:
         history_state = "deferred"
     output_state = compatibility_output(archify_config(config, repo), archify)
+    record_refresh_outcome(directory, {"status": "PASS"})
     return freshness(record, "PASS") | {"context_hash": record["context_hash"], "graph": graph, "gates": receipts, "archify": archify, "changed_files": changed or [], "candidate_baseline_reset": bool(reset_candidate_baseline), "history": history_state, "compatibility_output": output_state, "validation": "reused_accepted_inputs" if reused_validation else "executed"}
 
 
 def refresh(config_path: Path, explicit: str | None, changed: list[str] | None = None, acknowledged: dict[str, dict[str, Any]] | None = None, expected_context_hash: str | None = None, reset_candidate_baseline: bool = False) -> dict[str, Any]:
     """Retain why the last promotion attempt failed, so `status` can stop advising the step that failed."""
     value = refresh_attempt(config_path, explicit, changed, acknowledged, expected_context_hash, reset_candidate_baseline)
-    try: record_refresh_outcome(state(config_path, explicit), value)
-    except (OSError, ValueError): pass
+    if value.get("status") != "PASS":
+        try:
+            config = load(config_path)
+            repo = repo_for(config_path, config)
+        except (OSError, ValueError) as error:
+            # A missing or malformed external config already failed the refresh.
+            value["config_error"] = str(error)
+        else:
+            try:
+                value["evidence_diagnostics"] = evidence_diagnostics(repo, config, config_path)
+            except (OSError, ValueError) as error:
+                value["evidence_diagnostics_error"] = str(error)
+        record_refresh_outcome(state(config_path, explicit), value)
     return value
 
 
@@ -1129,18 +1329,20 @@ def refresh_outcome_path(directory: Path) -> Path: return directory / "last-refr
 def record_refresh_outcome(directory: Path, value: dict[str, Any]) -> None:
     path = refresh_outcome_path(directory)
     if value.get("status") == "PASS":
-        try: path.unlink(missing_ok=True)
-        except OSError: pass
+        path.unlink(missing_ok=True)
         return
-    failures = value.get("failures") if isinstance(value.get("failures"), list) else []
-    atomic(path, {"status": value.get("status"), "at": datetime.now(timezone.utc).isoformat(),
-                  "failures": [str(x)[:500] for x in failures][:8], "next_action": value.get("next_action")})
+    failures = value.get("failures") or value.get("reason") or [value["next_action"]]
+    receipt = {"status": value.get("status"), "at": datetime.now(timezone.utc).isoformat(),
+               "failures": failures, "next_action": value.get("next_action"),
+               "evidence_diagnostics": value.get("evidence_diagnostics", [])}
+    if "evidence_diagnostics_error" in value:
+        receipt["evidence_diagnostics_error"] = value["evidence_diagnostics_error"]
+    atomic(path, receipt)
 
 
 def last_refresh_failure(directory: Path) -> dict[str, Any] | None:
     path = refresh_outcome_path(directory)
-    try: value = load(path) if path.is_file() else None
-    except ValueError: return None
+    value = load(path) if path.is_file() else None
     return value if isinstance(value, dict) and value.get("failures") else None
 
 
@@ -1619,6 +1821,8 @@ def bounded_updates(value: dict[str, Any]) -> dict[str, Any]:
     truncated = False
     def compact(item: Any, key: str = "") -> Any:
         nonlocal truncated
+        if key in ("last_refresh", "blueprint_omissions", "evidence_diagnostics", "reason", "failures"):
+            return item
         if isinstance(item, str) and key != "cursor" and len(item) > 240:
             truncated = True
             return item[:240]
@@ -1627,7 +1831,7 @@ def bounded_updates(value: dict[str, Any]) -> dict[str, Any]:
         return item
     result = compact(value)
     if truncated: result["truncated_strings"] = True; result["more_available"] = True
-    groups = [(result, "overview", "omitted_overview_components"), (result, "candidates", "omitted_candidate_count"), (result, "affected_components", "omitted_affected_components"), (result, "reason", "omitted_reason_count"), (result, "failures", "omitted_failure_count")]
+    groups = [(result, "overview", "omitted_overview_components"), (result, "candidates", "omitted_candidate_count"), (result, "affected_components", "omitted_affected_components")]
     delta = result.get("accepted_delta", {})
     groups += [(delta, key, f"omitted_{key}") for key, items in delta.items() if isinstance(items, list)]
     analysis = result.get("source_analysis", {})
@@ -1696,6 +1900,7 @@ def updates(config_path: Path, explicit: str | None, since: str | None = None,
         "config": semantic(config), "context": architecture_semantic(current) if current else None,
         "facts": observed.get("facts"), "relation_facts": observed.get("relation_facts"),
         "status": value.get("status"), "reason": value.get("reason", value.get("failures")),
+        "last_refresh": value.get("last_refresh"), "blueprint_omissions": value.get("blueprint_omissions"),
         "candidate_state": candidate.get("state"), "candidate_ids": sorted(x["id"] for x in candidate.get("candidates", [])),
         "source_analysis": analysis, "analysis_receipt": analysis_identity,
         "blueprint": {key: (old or {}).get("archify", {}).get(key) for key in ("view_sha256", "ir_sha256", "html_sha256")},
@@ -1703,6 +1908,7 @@ def updates(config_path: Path, explicit: str | None, since: str | None = None,
     context_hash = old.get("context_hash") if isinstance(old, dict) else None
     cursor = ":".join(("u1", selection, context_hash or "-", view_hash or "-", observation_hash))
     base = {key: value[key] for key in ("protocol_version", "status", "freshness", "confidence", "next_action") if key in value}
+    base.update({key: value[key] for key in ("reason", "failures", "last_refresh", "blueprint_omissions", "evidence_diagnostics") if key in value})
     base.update(kind="architecture_updates", cursor=cursor)
     if previous and since == cursor: return base | {"changed": False}
     before = snapshot_record(directory, previous["context"]) if previous and previous["context"] != "-" else None
@@ -1749,11 +1955,6 @@ def updates(config_path: Path, explicit: str | None, since: str | None = None,
         "view_changed": view_changed, "view_sha256": view_hash,
         "accepted_blueprint": {key: blueprint[key] for key in ("configured", "view_sha256", "ir_sha256", "html_sha256") if key in blueprint} | {"context_hash": context_hash},
     }
-    for key in ("reason", "failures"):
-        if value.get(key):
-            items = value[key] if isinstance(value[key], list) else [value[key]]
-            answer[key] = bounded_strings(items)
-            if len(items) > len(answer[key]): answer[f"omitted_{key}_count"] = len(items) - len(answer[key])
     if previous is None:
         declared = (old or {}).get("context", {}).get("components", [])
         answer["overview"] = [{key: str(item[key]) if key == "id" else str(item[key])[:160] for key in ("id", "name", "purpose") if key in item} for item in declared[:CANDIDATE_OUTPUT_LIMIT]]
@@ -1949,6 +2150,24 @@ def drift(config_path: Path, base: str) -> dict[str, Any]:
     return {"protocol_version": PROTOCOL_VERSION, "status": "PASS", "base": base, "candidates": found[:CANDIDATE_OUTPUT_LIMIT], "candidate_count": len(found), "omitted_candidate_count": max(0, len(found) - CANDIDATE_OUTPUT_LIMIT), "note": "Configured high-value additions/removals only; candidates are not architecture facts.", "next_action": "review candidates, then update canonical config if appropriate" if found else "none"}
 
 def ignored(path: str, patterns: list[Any]) -> bool: return any(fnmatch.fnmatch(path, str(x)) for x in patterns)
+def watch_limit(watch: dict[str, Any], key: str, default: int) -> int:
+    value = watch.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"watch.{key} must be a positive integer")
+    return value
+
+def watch_scope_failure(config: dict[str, Any], sizes: dict[str, int], reason: str) -> str:
+    declarations: dict[str, set[str]] = {}
+    for item in components(config):
+        declarations[item["id"]] = {e["path"].replace("\\", "/") for e in item["evidence"] if e["path"].replace("\\", "/") in sizes}
+    for relation in config.get("relations", []):
+        declarations[relation_id(relation)] = {e["path"].replace("\\", "/") for e in relation.get("evidence", []) if e["path"].replace("\\", "/") in sizes}
+    largest_files = [{"path": path, "bytes": size, "definitions": sorted(owner for owner, paths in declarations.items() if path in paths)}
+                     for path, size in sorted(sizes.items(), key=lambda item: (-item[1], item[0]))[:10]]
+    largest_definitions = [{"id": owner, "files": len(paths), "bytes": sum(sizes[path] for path in paths)}
+                           for owner, paths in sorted(declarations.items(), key=lambda item: (-sum(sizes[path] for path in item[1]), item[0]))[:10] if paths]
+    return reason + "; " + json.dumps({"largest_files": largest_files, "largest_definitions": largest_definitions}, ensure_ascii=False)
+
 def manifest(config_path: Path, repo: Path, config: dict[str, Any]) -> dict[str, str | None]:
     paths = {e["path"].replace("\\", "/") for x in components(config) for e in x["evidence"] if isinstance(e, dict) and isinstance(e.get("path"), str)}
     paths |= {e["path"].replace("\\", "/") for relation in config.get("relations", []) if isinstance(relation, dict) for e in relation.get("evidence", []) if isinstance(e, dict) and isinstance(e.get("path"), str)}
@@ -1961,14 +2180,14 @@ def manifest(config_path: Path, repo: Path, config: dict[str, Any]) -> dict[str,
         paths.add(settings["view_relative"]); mandatory.add(settings["view_relative"])
     watch = config.get("watch", {})
     if not isinstance(watch, dict): raise ValueError("watch must be an object")
+    max_files = watch_limit(watch, "max_files", WATCH_FILE_LIMIT)
+    max_bytes = watch_limit(watch, "max_source_bytes", WATCH_SOURCE_BYTES)
     ignore = watch.get("ignore", [])
     if not isinstance(ignore, list) or not all(isinstance(pattern, str) for pattern in ignore): raise ValueError("watch.ignore must contain strings")
     paths = {path for path in paths if path in mandatory or not ignored(path, ignore)}
     def include(path: Path) -> None:
         relative = path.resolve().relative_to(repo.resolve()).as_posix()
         if not ignored(relative, ignore): paths.add(relative)
-        if len(paths) > WATCH_FILE_LIMIT: raise ValueError(f"watch scope exceeds {WATCH_FILE_LIMIT} files; narrow watch.paths")
-    if len(paths) > WATCH_FILE_LIMIT: raise ValueError(f"watch scope exceeds {WATCH_FILE_LIMIT} files; narrow watch.paths")
     for pattern in watch.get("paths", []):
         if not isinstance(pattern, str): raise ValueError("watch.paths must contain strings")
         for path in repo.glob(relative_glob(pattern, "watch.paths")):
@@ -1976,13 +2195,16 @@ def manifest(config_path: Path, repo: Path, config: dict[str, Any]) -> dict[str,
     candidate_paths, _ = candidate_files(repo, normalized_drift_rules(config), ignore)
     for path in candidate_paths: include(path)
     selected = [path for path in sorted(paths) if path in mandatory or not ignored(path, ignore)]
-    if len(selected) > WATCH_FILE_LIMIT: raise ValueError(f"watch scope exceeds {WATCH_FILE_LIMIT} files; narrow watch.paths")
-    total = 0; result: dict[str, str | None] = {}
+    sizes = {relative: (repo / relative).stat().st_size for relative in selected if (repo / relative).is_file()}
+    total = sum(sizes.values())
+    if len(selected) > max_files:
+        raise ValueError(watch_scope_failure(config, sizes, f"watch scope has {len(selected)} files; exceeds watch.max_files={max_files}"))
+    if total > max_bytes:
+        raise ValueError(watch_scope_failure(config, sizes, f"watch scope has {total} source bytes; exceeds watch.max_source_bytes={max_bytes}"))
+    result: dict[str, str | None] = {}
     for relative in selected:
         path = repo / relative
         if not path.is_file(): result[relative] = None; continue
-        total += path.stat().st_size
-        if total > WATCH_SOURCE_BYTES: raise ValueError(f"watch scope exceeds {WATCH_SOURCE_BYTES} source bytes; narrow watch.paths")
         result[relative] = sha(path.read_bytes())
     return result
 def watch_once(config_path: Path, explicit: str | None, apply: bool = False) -> dict[str, Any]:
@@ -2154,6 +2376,9 @@ def main() -> int:
     mode.add_argument("--_serve", metavar="INSTANCE", help=argparse.SUPPRESS)
     x = sub.add_parser("status"); x.add_argument("--diagnose", action="store_true", help="read-only core identity and selected config/state paths; works even without a config")
     x = sub.add_parser("refresh"); x.add_argument("--reset-candidate-baseline", action="store_true")
+    sub.add_parser("evidence-diagnose", help="report every broken source anchor and uniquely supported repair commands; read-only")
+    x = sub.add_parser("evidence-repair", help="explicitly apply one current unique anchor repair; leaves accepted context untouched")
+    x.add_argument("--id", required=True)
     x = sub.add_parser("candidates"); x.add_argument("--limit", type=int, default=CANDIDATE_OUTPUT_LIMIT)
     x = sub.add_parser("history"); x.add_argument("--context-hash"); x.add_argument("--limit", type=int, default=10)
     x = sub.add_parser("usage"); x.add_argument("--operation"); x.add_argument("--limit", type=int, default=10); x.add_argument("--import-legacy", action="store_true")
@@ -2194,6 +2419,11 @@ def main() -> int:
         if args.command == "status" and args.diagnose:
             dump(diagnose_status(config_path, args.state_dir)); return 0
         if not config_path.is_file(): raise ValueError("--config is required except for init (or run from a repository with .archctx/architecture.json)")
+        if args.command == "evidence-diagnose":
+            result = diagnose_evidence(config_path)
+            dump(result); return 2 if result["status"] == "INVALID" else 0
+        if args.command == "evidence-repair":
+            dump(repair_evidence(config_path, args.id)); return 0
         if args.command == "understand":
             value = understand(config_path, args.state_dir, {key: getattr(args, key) for key in ("question", "files", "resume", "show", "details", "analysis", "revise")})
             dump(value); return 2 if value.get("status") in ("ERROR", "INVALID") else 0

@@ -18,7 +18,7 @@
     {
       "id": "archctx-cli",
       "name": "Archctx CLI and MCP",
-      "purpose": "Provides native setup/understand/map entrypoints alongside compact CLI/MCP queries. Mechanical analysis errors remain request-local; caller-cursor deltas and declared change scope share component identities with the human map.",
+      "purpose": "Provides native setup/understand/map entrypoints alongside compact CLI/MCP queries and explicit source-anchor diagnosis/repair. Repair changes only one current unique source match selected by its diagnostic ID. Mechanical analysis errors remain request-local; caller-cursor deltas and declared change scope share component identities with the human map.",
       "truth_sources": ["archctx.py", "pyproject.toml"],
       "code_symbol": "main",
       "tags": ["canonical", "agent-protocol", "source-evidence"],
@@ -34,7 +34,7 @@
     {
       "id": "last-known-good-state",
       "name": "Last-good context state",
-      "purpose": "Locally retains accepted context, snapshots, review provenance and verified map generations; atomic publication keeps failures from replacing the prior readable, freshness-labelled record.",
+      "purpose": "Locally retains accepted context, snapshots, review provenance and verified map generations; atomic publication keeps failures from replacing the prior readable record. Complete failed-refresh diagnostics remain separate and propagate through status, updates and map. Watch capacity is project-configurable with file/definition size diagnostics.",
       "truth_sources": ["archctx.py"],
       "code_symbol": "refresh_lock",
       "tags": ["state", "trust", "local-only"],
@@ -86,7 +86,7 @@
     {
       "id": "blueprint-viewer",
       "name": "Local system map",
-      "purpose": "Organizes accepted architecture, retained discoveries and worktree changes with independent identities. The native ensure path starts or reuses a matching background loopback viewer using an identity handshake and local OS locks; incompatible live instances are preserved. It owns only its observer, not a system service or new truth source.",
+      "purpose": "Organizes accepted architecture, retained discoveries and worktree changes with independent identities. A stale blueprint has a prominent failure notice and identifies declared components absent from the accepted visual with their reasons. The native ensure path starts or reuses a matching background loopback viewer using an identity handshake and local OS locks; incompatible live instances are preserved. It owns only its observer, not a system service or new truth source.",
       "truth_sources": ["archctx_blueprint.py", "archctx_map.py"],
       "code_symbol": "render_bundle",
       "tags": ["human-view", "local-only", "source-evidence"],

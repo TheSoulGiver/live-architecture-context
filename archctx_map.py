@@ -84,7 +84,7 @@ def _receipt(directory: Path) -> dict | None:
         raise ValueError("unsupported map service receipt")
     if not re.fullmatch(r"[0-9a-f]{32}", str(value.get("instance_id", ""))):
         raise ValueError("invalid map service identity")
-    if value.get("state") == "failed" and isinstance(value.get("reason"), str) and len(value["reason"]) <= 500:
+    if value.get("state") == "failed" and isinstance(value.get("reason"), str):
         return value
     if not isinstance(value.get("url"), str):
         raise ValueError("map service URL must be a string")
@@ -125,7 +125,7 @@ def _status(expected: dict) -> dict:
             return {**result, "status": "RETRY", "reason": health.get("reason", "Map observer is not running")}
         return {**result, "status": state.upper(), "state": state}
     except (OSError, ValueError, TypeError, http.client.HTTPException) as error:
-        return {"status": "RETRY", "reason": str(error)[:500]}
+        return {"status": "RETRY", "reason": str(error)}
 
 
 def status(config_path: Path, explicit: str | None = None, *, live: bool = True, port: int = 0) -> dict:
@@ -174,7 +174,7 @@ def ensure(config_path: Path, explicit: str | None = None, *, live: bool = True,
         return {**current, "status": "REUSED"} if current["status"] in ("STARTING", "RUNNING") else {
             **current, "status": "MISMATCH" if current["status"] == "MISMATCH" else "RETRY"}
     except (OSError, ValueError) as error:
-        return {"status": "RETRY", "reason": str(error)[:500]}
+        return {"status": "RETRY", "reason": str(error)}
 
 
 @contextmanager
@@ -184,7 +184,7 @@ def _owner(directory: Path, instance_id: str):
             yield
         except Exception as error:
             archctx.atomic(directory / "map-service.json", {"version": 1, "instance_id": instance_id,
-                "state": "failed", "reason": f"Map startup failed: {type(error).__name__}: {error}"[:500]})
+                "state": "failed", "reason": f"Map startup failed: {type(error).__name__}: {error}"})
             raise
 
 
@@ -210,7 +210,7 @@ def serve(config_path: Path, explicit: str | None = None, *, live: bool = True,
                         health.update(state="stopped", reason="Map observer stopped; existing viewer was preserved")
                     self.reply(200, json.dumps(health), "application/json")
                 elif runtime["state"] != "running" and urlsplit(self.path).path != "/":
-                    self.reply(503, "Map observation is initializing", "text/plain")
+                    self.reply(503, runtime["reason"] if runtime["state"] == "failed" else "Map observation is initializing", "text/plain")
                 else:
                     super().do_GET()
 
@@ -224,7 +224,7 @@ def serve(config_path: Path, explicit: str | None = None, *, live: bool = True,
                 observer.start()
                 runtime["state"] = "running"
             except Exception as error:
-                runtime.update(state="failed", reason=f"Observer initialization failed: {type(error).__name__}: {error}"[:500])
+                runtime.update(state="failed", reason=f"Observer initialization failed: {type(error).__name__}: {error}")
 
         try:
             archctx.atomic(directory / "map-service.json", record)

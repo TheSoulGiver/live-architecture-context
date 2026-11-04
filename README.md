@@ -274,8 +274,20 @@ provider must emit one JSON object with the validated `{context_hash}`,
 (plus `{changed_files_sha256}` and a count for an incremental request). For a
 persistent CALM daemon without that receipt, the result explicitly says
 `external_daemon_unverified`, rather than claiming a graph refresh occurred.
-The watcher refuses scopes above 512 files or 8 MiB of configured source; narrow
-`watch.paths` instead of turning each polling tick into a repository scan.
+The watcher defaults to 4096 files and 64 MiB of configured source. Set
+`watch.max_files` and `watch.max_source_bytes` to positive integers for the
+project's capacity. An exceeded limit reports the observed size, the largest
+source files and the component/relation declarations that own them.
+
+`archctx evidence-diagnose` reports each broken anchor with its component,
+original claim and nearest current source line. A unique exact code move or
+small in-file change includes an `evidence-repair --id ...` command. That
+explicit command updates only the selected anchor; ambiguous matches remain
+unresolved. Review the change and refresh to publish it.
+
+Failed refreshes retain their complete causes in `status`, `updates` and the
+map. A stale map labels its retained blueprint prominently and lists declared
+components missing from the visual, with the reason for each omission.
 
 ## Agent protocol
 
@@ -497,7 +509,7 @@ candidate-baseline migration requires the explicit
 Candidate rules are intentionally bounded to 256 files / 4 MiB of source per
 observation and respect `watch.ignore`; broad rules fail closed as stale rather
 than turning the watcher into a full-repository scanner. The independent watcher
-scope is likewise capped at 512 files / 8 MiB.
+scope defaults to 4096 files / 64 MiB and has project-local configurable limits.
 
 ## Boundaries and release notes
 
